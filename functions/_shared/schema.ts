@@ -22,6 +22,8 @@ const DBSchema = {
     isServerAdmin: "is_server_admin",
     isChannelManager: "is_channel_manager",
     canCreateTokens: "can_create_tokens",
+    isMuted: "is_muted",
+    isDeafened: "is_deafened",
   },
   channels: {
     tableName: "channels",

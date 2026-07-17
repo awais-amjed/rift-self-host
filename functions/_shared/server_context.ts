@@ -43,7 +43,7 @@ export async function fetchServerContext(
   const { data: userData } = await supabase
     .from(DBSchema.users.tableName)
     .select(
-      `${DBSchema.users.id}, ${DBSchema.users.username}, ${DBSchema.users.displayName}, ${DBSchema.users.isServerAdmin}, ${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}`,
+      `${DBSchema.users.id}, ${DBSchema.users.username}, ${DBSchema.users.displayName}, ${DBSchema.users.isServerAdmin}, ${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}`,
     )
     .eq(DBSchema.users.id, opts.userId)
     .single();
@@ -60,6 +60,8 @@ export async function fetchServerContext(
         is_channel_manager: u[DBSchema.users.isChannelManager],
         can_create_tokens: u[DBSchema.users.canCreateTokens],
       },
+      is_muted: u[DBSchema.users.isMuted],
+      is_deafened: u[DBSchema.users.isDeafened],
     };
   }
 

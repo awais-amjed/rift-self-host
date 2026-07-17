@@ -1,6 +1,6 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient, TrackSource } from "livekit-server-sdk";
 import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
@@ -43,10 +43,12 @@ Deno.serve(async (req) => {
 
     const room = channel_id;
 
-    // Fetch user display name
+    // Fetch user display name + moderation flags
     const { data: userData, error: userError } = await supabase
       .from(DBSchema.users.tableName)
-      .select(`${DBSchema.users.displayName}`)
+      .select(
+        `${DBSchema.users.displayName}, ${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}`,
+      )
       .eq(DBSchema.users.id, auth.userId)
       .single();
 
@@ -62,6 +64,8 @@ Deno.serve(async (req) => {
     }
 
     const displayName = userRecord[DBSchema.users.displayName];
+    const isMuted: boolean = userRecord[DBSchema.users.isMuted] === true;
+    const isDeafened: boolean = userRecord[DBSchema.users.isDeafened] === true;
 
     // Fetch LiveKit credentials
     const { data: server, error: serverError } = await supabase
@@ -96,11 +100,16 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Failed to ensure LiveKit room exists", EC.UNEXPECTED_ERROR, roomErr);
     }
 
-    // Create LiveKit access token
+    // Create LiveKit access token. Moderation flags are enforced here — a
+    // server-muted user's token cannot publish microphone audio and a
+    // deafened user's token cannot subscribe, so the state survives rejoins
+    // and cannot be bypassed client-side. The flags also ride along as
+    // participant metadata so every client can render the moderation state.
     const at = new AccessToken(apiKey, apiSecret, {
       identity,
       name: displayName,
       ttl: "1h",
+      metadata: JSON.stringify({ muted: isMuted, deafened: isDeafened }),
     });
 
     at.addGrant({
@@ -108,7 +117,10 @@ Deno.serve(async (req) => {
       roomJoin: true,
       room,
       canPublish: true,
-      canSubscribe: true,
+      canPublishSources: isMuted
+        ? [TrackSource.CAMERA, TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO]
+        : undefined, // undefined = all sources
+      canSubscribe: !isDeafened,
       roomAdmin: auth.isChannelManager,
     });
 
