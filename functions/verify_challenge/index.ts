@@ -113,54 +113,29 @@ Deno.serve(async (req) => {
 
     const user_id = userRecord[DBSchema.users.id];
 
-    // 6. Find or re-create the user's auth token.
-    const { data: tokenData, error: tokenError } = await supabase
+    // 6. Issue a fresh token for this login. Each device gets its own token
+    // row (migration 003 dropped UNIQUE(user_id)), so logging in on one
+    // device never invalidates the session of another. Expired rows are
+    // garbage-collected by the cleanup-expired-tokens cron job.
+    const token_server_id = server_id;
+    const tokenValue = generateSecureToken();
+    const tokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    const { error: insertError } = await supabase
       .from(DBSchema.tokens.tableName)
-      .select(`${DBSchema.tokens.token}, ${DBSchema.tokens.serverId}`)
-      .eq(DBSchema.tokens.userId, user_id)
-      .maybeSingle();
+      .insert({
+        [DBSchema.tokens.serverId]: server_id,
+        [DBSchema.tokens.token]: tokenValue,
+        [DBSchema.tokens.userId]: user_id,
+        [DBSchema.tokens.expiresAt]: tokenExpiresAt,
+      });
 
-    let tokenValue: string;
-    let token_server_id: string;
-
-    if (!tokenError && tokenData) {
-      // Token exists — refresh its TTL.
-      const tokenRecord = tokenData as Record<string, any>;
-      tokenValue = tokenRecord[DBSchema.tokens.token];
-      token_server_id = tokenRecord[DBSchema.tokens.serverId];
-
-      // 7. Refresh the token's TTL — every successful handshake extends the session by 1 hour
-      const newExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      await supabase
-        .from(DBSchema.tokens.tableName)
-        .update({ [DBSchema.tokens.expiresAt]: newExpiresAt })
-        .eq(DBSchema.tokens.token, tokenValue);
-    } else {
-      // Token was deleted — re-issue a fresh one using the server_id from the request.
-      token_server_id = server_id;
-
-      tokenValue = generateSecureToken();
-      const tokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-
-      // Use upsert so that a concurrent verify_challenge for the same user
-      // doesn't race-insert a second token row — the UNIQUE(user_id) constraint
-      // on tokens ensures at most one token per user.
-      const { error: insertError } = await supabase
-        .from(DBSchema.tokens.tableName)
-        .upsert({
-          [DBSchema.tokens.serverId]: server_id,
-          [DBSchema.tokens.token]: tokenValue,
-          [DBSchema.tokens.userId]: user_id,
-          [DBSchema.tokens.expiresAt]: tokenExpiresAt,
-        }, { onConflict: DBSchema.tokens.userId });
-
-      if (insertError) {
-        return CustomResponse.error(
-          `Error re-creating auth token: ${JSON.stringify(insertError)}`,
-          EC.DB_ERROR,
-          insertError,
-        );
-      }
+    if (insertError) {
+      return CustomResponse.error(
+        `Error creating auth token: ${JSON.stringify(insertError)}`,
+        EC.DB_ERROR,
+        insertError,
+      );
     }
 
     // 8. Fetch full server context
