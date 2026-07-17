@@ -127,7 +127,9 @@ Deno.serve(async (req) => {
         p_stable_id:          stable_id,
         p_is_server_admin:    claim[DBSchema.invites.isServerAdmin],
         p_is_channel_manager: claim[DBSchema.invites.isChannelManager],
-        p_can_create_tokens:  claim[DBSchema.invites.canCreateTokens],
+        // Baseline: every member may create (plain) invites, Discord-style.
+        // Admins can revoke this per-user via set_user_permissions.
+        p_can_create_tokens:  true,
         p_auth_token:         authToken,
         p_token_expires_at:   tokenExpiresAt,
       },

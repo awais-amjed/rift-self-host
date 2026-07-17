@@ -18,8 +18,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { is_server_admin, is_channel_manager, can_create_tokens, max_uses, expires_in_seconds } =
-      await req.json();
+    const { max_uses, expires_in_seconds } = await req.json();
     const token = extractBearerToken(req);
 
     // Authenticate the caller
@@ -29,14 +28,6 @@ Deno.serve(async (req) => {
     // Check if the caller can create invites
     if (!auth.canCreateTokens) {
       return CustomResponse.error("Permission denied: user cannot create invites", EC.PERMISSION_DENIED);
-    }
-
-    // Check permission escalation
-    if (is_server_admin && !auth.isServerAdmin) {
-      return CustomResponse.error("Permission denied: only admins can grant admin", EC.PERMISSION_DENIED);
-    }
-    if (is_channel_manager && !auth.isChannelManager) {
-      return CustomResponse.error("Permission denied: only channel managers can grant channel manager", EC.PERMISSION_DENIED);
     }
 
     // Generate invite code
@@ -53,14 +44,18 @@ Deno.serve(async (req) => {
     //           omitted (undefined) → default to 1 (single-use)
     const resolvedMaxUses = max_uses !== undefined ? max_uses : 1;
 
+    // Invites are plain (Discord-style): everyone joins with baseline
+    // permissions and admins promote members afterwards via
+    // set_user_permissions. Only the hidden bootstrap invite created by
+    // create_server carries elevated permissions.
     const { error: insertError } = await supabase
       .from(DBSchema.invites.tableName)
       .insert({
         [DBSchema.invites.serverId]: auth.serverId,
         [DBSchema.invites.code]: inviteCode,
-        [DBSchema.invites.isServerAdmin]: is_server_admin || false,
-        [DBSchema.invites.isChannelManager]: is_channel_manager || false,
-        [DBSchema.invites.canCreateTokens]: can_create_tokens || false,
+        [DBSchema.invites.isServerAdmin]: false,
+        [DBSchema.invites.isChannelManager]: false,
+        [DBSchema.invites.canCreateTokens]: false,
         [DBSchema.invites.maxUses]: resolvedMaxUses,
         [DBSchema.invites.uses]: 0,
         [DBSchema.invites.expiresAt]: expiresAt,
