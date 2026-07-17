@@ -4,7 +4,7 @@ import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
-import { generateSecureToken } from "../_shared/token_utils.ts";
+import { generateInviteCode } from "../_shared/token_utils.ts";
 import { timingSafeEqual } from "@std/crypto/timing-safe-equal";
 
 const supabase = createClient(
@@ -63,7 +63,7 @@ Deno.serve(async (req) => {
     const server_id = serverRecord[DBSchema.servers.id];
 
     // Generate an admin invite code (single-use)
-    const inviteCode = generateSecureToken();
+    const inviteCode = generateInviteCode();
 
     const { error: inviteError } = await supabase
       .from(DBSchema.invites.tableName)
