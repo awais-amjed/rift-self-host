@@ -19,7 +19,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { channel_id, screen_share } = await req.json();
+    const { channel_id, screen_share, device_id } = await req.json();
     const token = extractBearerToken(req);
     console.log(`[get_channel_token] token="${token?.substring(0,8)}...", channel_id="${channel_id}"`);
 
@@ -57,7 +57,18 @@ Deno.serve(async (req) => {
     }
 
     const userRecord = userData as Record<string, any>;
-    let identity = auth.userId;
+
+    // Identity = "<userId>~<deviceId>" (+ "_screenshare" for the screen-share
+    // connection). The device segment lets the same user join from multiple
+    // devices without a LiveKit identity collision — without it, a second
+    // device joining the same room kicks the first one out. The userId prefix
+    // is always server-controlled (from auth), so a client-supplied device_id
+    // can never spoof another user; we still sanitise it to keep the identity
+    // parseable (userId is split off on the first "~").
+    const deviceSuffix =
+      (typeof device_id === "string" ? device_id : "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16) ||
+      "default";
+    let identity = `${auth.userId}~${deviceSuffix}`;
 
     if (screen_share === true) {
       identity = `${identity}_screenshare`;
@@ -126,7 +137,10 @@ Deno.serve(async (req) => {
 
     const livekitToken = await at.toJwt();
 
-    return CustomResponse.success({ token: livekitToken });
+    // Return the identity so the desktop screen-share path (which connects via
+    // the Rust SDK) uses the exact identity embedded in this token instead of
+    // reconstructing it client-side.
+    return CustomResponse.success({ token: livekitToken, identity });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }
