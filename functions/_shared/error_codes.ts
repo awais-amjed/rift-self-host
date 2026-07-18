@@ -47,6 +47,11 @@ export const USERNAME_TAKEN   = "username_taken";
 export const INVALID_PUBLIC_KEY = "invalid_public_key"; // not valid base64 or wrong length
 export const INVALID_STABLE_ID  = "invalid_stable_id";  // not valid base64 or wrong length
 
+// ── Chat ──────────────────────────────────────────────────────────────────────
+export const KEYRING_CONFLICT   = "keyring_conflict";   // key version already exists — refetch and re-wrap
+export const ENVELOPE_INVALID   = "envelope_invalid";   // message envelope fields missing/oversized
+export const CHAT_KEY_INVALID   = "chat_key_invalid";   // chat_public_key not valid base64 / wrong length
+
 // ── Permissions ───────────────────────────────────────────────────────────────
 export const PERMISSION_DENIED = "permission_denied";
 
