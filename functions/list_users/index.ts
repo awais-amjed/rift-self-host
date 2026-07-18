@@ -33,7 +33,8 @@ Deno.serve(async (req) => {
         `${DBSchema.users.id}, ${DBSchema.users.username}, ${DBSchema.users.displayName}, ` +
           `${DBSchema.users.createdAt}, ${DBSchema.users.isServerAdmin}, ` +
           `${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ` +
-          `${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ${DBSchema.users.isBanned}`,
+          `${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ${DBSchema.users.isBanned}, ` +
+          `${DBSchema.users.chatPublicKey}`,
       )
       .eq(DBSchema.users.serverId, auth.serverId)
       .order(DBSchema.users.createdAt, { ascending: true });
@@ -55,6 +56,8 @@ Deno.serve(async (req) => {
       is_muted: row[DBSchema.users.isMuted],
       is_deafened: row[DBSchema.users.isDeafened],
       is_banned: row[DBSchema.users.isBanned],
+      // X25519 chat key (null until published) — needed to start a DM.
+      chat_public_key: row[DBSchema.users.chatPublicKey],
     }));
 
     return CustomResponse.success({ users });

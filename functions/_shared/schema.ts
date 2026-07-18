@@ -37,6 +37,17 @@ const DBSchema = {
     signature: "signature",
     keyVersion: "key_version",
   },
+  dmMessages: {
+    tableName: "dm_messages",
+    id: "id",
+    createdAt: "created_at",
+    senderId: "sender_id",
+    recipientId: "recipient_id",
+    ciphertext: "ciphertext",
+    nonce: "nonce",
+    signature: "signature",
+    keyVersion: "key_version",
+  },
   channelKeyring: {
     tableName: "channel_keyring",
     id: "id",

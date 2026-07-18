@@ -53,6 +53,17 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Read the previous value so the client learns whether this publish is
+    // new — a newly keyed member rings the key-sweep doorbell so online
+    // members wrap channel keys for them immediately.
+    const { data: existing } = await supabase
+      .from(DBSchema.users.tableName)
+      .select(DBSchema.users.chatPublicKey)
+      .eq(DBSchema.users.id, auth.userId)
+      .single();
+    const previous =
+      (existing as Record<string, any> | null)?.[DBSchema.users.chatPublicKey];
+
     const { error } = await supabase
       .from(DBSchema.users.tableName)
       .update({ [DBSchema.users.chatPublicKey]: chat_public_key })
@@ -62,7 +73,10 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error publishing chat key", EC.DB_ERROR, error);
     }
 
-    return CustomResponse.success({ chat_public_key });
+    return CustomResponse.success({
+      chat_public_key,
+      newly_published: previous !== chat_public_key,
+    });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }
