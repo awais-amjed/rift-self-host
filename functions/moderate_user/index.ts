@@ -120,22 +120,32 @@ Deno.serve(async (req) => {
         const room = channel[DBSchema.channels.id] as string;
         try {
           const participants = await roomService.listParticipants(room);
-          const participant = participants.find((p) => p.identity === user_id);
-          if (!participant) continue;
-
-          await roomService.updateParticipant(room, user_id, JSON.stringify({ muted, deafened }), {
-            canSubscribe: !deafened,
-            canPublish: true,
-            canPublishData: true,
-            // Empty list = all sources allowed.
-            canPublishSources: muted
-              ? [TrackSource.CAMERA, TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO]
-              : [],
-            hidden: false,
-            canUpdateMetadata: false,
-          });
-          appliedLive = true;
-          break;
+          // Identities are `<userId>~<deviceId>` (get_channel_token), with a
+          // `_screenshare` suffix for screenshare sessions — match every
+          // session belonging to the target, across all rooms (a user's
+          // devices may sit in different channels).
+          const sessions = participants.filter(
+            (p) => p.identity === user_id || p.identity.startsWith(`${user_id}~`),
+          );
+          for (const session of sessions) {
+            await roomService.updateParticipant(
+              room,
+              session.identity,
+              JSON.stringify({ muted, deafened }),
+              {
+                canSubscribe: !deafened,
+                canPublish: true,
+                canPublishData: true,
+                // Empty list = all sources allowed.
+                canPublishSources: muted
+                  ? [TrackSource.CAMERA, TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO]
+                  : [],
+                hidden: false,
+                canUpdateMetadata: false,
+              },
+            );
+            appliedLive = true;
+          }
         } catch (_) {
           // Room doesn't exist or is empty — keep looking.
         }
