@@ -4,7 +4,7 @@ import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
-import { generateSecureToken } from "../_shared/token_utils.ts";
+import { extractBearerToken } from "../_shared/auth.ts";
 import { fetchServerContext } from "../_shared/server_context.ts";
 
 const supabase = createClient(
@@ -12,12 +12,33 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+/**
+ * Create this server's profile row for an already-authenticated caller.
+ *
+ * The client first authenticates via Sign-in-with-Web3 (SIWS), which yields a
+ * GoTrue JWT for a fresh `auth.users` row keyed by the caller's Ed25519 key.
+ * register then binds a `users` profile to that identity: `users.id = auth.uid()`
+ * (see auth.md / migration 007). No token is issued — the client already holds
+ * the JWT.
+ */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
+    // 0. Identify the caller from their SIWS JWT. authenticateToken can't be
+    //    used here — there's no users row yet — so verify the JWT directly.
+    const token = extractBearerToken(req);
+    if (!token) {
+      return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
+    }
+    const { data: userData, error: authError } = await supabase.auth.getUser(token);
+    if (authError || !userData?.user) {
+      return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID, authError);
+    }
+    const authUid = userData.user.id;
+
     const { invite_code, public_key, stable_id, username, display_name } =
       await req.json();
 
@@ -28,7 +49,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Validate public_key: must be valid base64 encoding of exactly 32 bytes (Ed25519)
+    // Validate public_key: base64 of exactly 32 bytes (Ed25519).
     let publicKeyBytes: Uint8Array;
     try {
       publicKeyBytes = Uint8Array.from(atob(public_key), (c) => c.charCodeAt(0));
@@ -42,7 +63,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Validate stable_id: must be valid base64 encoding of exactly 32 bytes (HMAC-SHA256)
+    // Validate stable_id: base64 of exactly 32 bytes (HMAC-SHA256).
     let stableIdBytes: Uint8Array;
     try {
       stableIdBytes = Uint8Array.from(atob(stable_id), (c) => c.charCodeAt(0));
@@ -56,7 +77,17 @@ Deno.serve(async (req) => {
       );
     }
 
-    // 1. Atomically claim one use of the invite (race-safe)
+    // 1. Already registered? (idempotent-ish: same identity re-calling register)
+    const { data: existingSelf } = await supabase
+      .from(DBSchema.users.tableName)
+      .select(DBSchema.users.id)
+      .eq(DBSchema.users.id, authUid)
+      .maybeSingle();
+    if (existingSelf) {
+      return CustomResponse.error("Already registered on this server", EC.IDENTITY_TAKEN);
+    }
+
+    // 2. Atomically claim one use of the invite (race-safe).
     const { data: claimData, error: claimError } = await supabase
       .rpc("claim_invite", { p_invite_code: invite_code });
 
@@ -65,7 +96,6 @@ Deno.serve(async (req) => {
     }
 
     const claim = claimData as Record<string, any>;
-
     if (claim.reason === "not_found") {
       return CustomResponse.error("Invalid invite code", EC.INVITE_INVALID);
     }
@@ -78,14 +108,13 @@ Deno.serve(async (req) => {
 
     const server_id = claim[DBSchema.invites.serverId] as string;
 
-    // 2. Check for duplicate identity — scoped to this server only
+    // 3. Duplicate identity checks — scoped to this server.
     const { data: existingByKey } = await supabase
       .from(DBSchema.users.tableName)
       .select(DBSchema.users.id)
       .eq(DBSchema.users.serverId, server_id)
       .eq(DBSchema.users.publicKey, public_key)
       .maybeSingle();
-
     if (existingByKey) {
       return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
     }
@@ -96,58 +125,45 @@ Deno.serve(async (req) => {
       .eq(DBSchema.users.serverId, server_id)
       .eq(DBSchema.users.stableId, stable_id)
       .maybeSingle();
-
     if (existingByStableId) {
       return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
     }
 
-    // 3. Check username uniqueness
+    // 4. Username uniqueness.
     const { data: existingUser } = await supabase
       .from(DBSchema.users.tableName)
       .select(DBSchema.users.id)
       .eq(DBSchema.users.username, username)
       .maybeSingle();
-
     if (existingUser) {
       return CustomResponse.error("Username already taken", EC.USERNAME_TAKEN);
     }
 
-    // 4. Generate auth token and insert user + token atomically
-    const authToken = generateSecureToken();
-    const tokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
-
-    // 5. Insert user + token atomically — rolls back both if either fails
-    const { data: createData, error: createError } = await supabase.rpc(
-      "create_user_with_token",
-      {
-        p_server_id:          server_id,
-        p_username:           username,
-        p_display_name:       display_name,
-        p_public_key:         public_key,
-        p_stable_id:          stable_id,
-        p_is_server_admin:    claim[DBSchema.invites.isServerAdmin],
-        p_is_channel_manager: claim[DBSchema.invites.isChannelManager],
+    // 5. Insert the profile bound to the GoTrue identity (users.id = auth.uid()).
+    const { error: insertError } = await supabase
+      .from(DBSchema.users.tableName)
+      .insert({
+        [DBSchema.users.id]:              authUid,
+        [DBSchema.users.serverId]:        server_id,
+        [DBSchema.users.username]:        username,
+        [DBSchema.users.displayName]:     display_name,
+        [DBSchema.users.publicKey]:       public_key,
+        [DBSchema.users.stableId]:        stable_id,
+        [DBSchema.users.isServerAdmin]:   claim[DBSchema.invites.isServerAdmin],
+        [DBSchema.users.isChannelManager]: claim[DBSchema.invites.isChannelManager],
         // Baseline: every member may create (plain) invites, Discord-style.
-        // Admins can revoke this per-user via set_user_permissions.
-        p_can_create_tokens:  true,
-        p_auth_token:         authToken,
-        p_token_expires_at:   tokenExpiresAt,
-      },
-    );
+        [DBSchema.users.canCreateTokens]: true,
+      });
 
-    if (createError) {
-      return CustomResponse.error("Error creating user", EC.DB_ERROR, createError);
+    if (insertError) {
+      return CustomResponse.error("Error creating user", EC.DB_ERROR, insertError);
     }
 
-    const user_id = (createData as Record<string, any>).user_id as string;
-
-    // 6. Return full server context
+    // 6. Return full server context (no token — the client holds the JWT).
     const context = await fetchServerContext(supabase, {
       serverId: server_id,
-      tokenValue: authToken,
-      userId: user_id,
+      userId: authUid,
     });
-
     if (context instanceof Response) return context;
 
     return CustomResponse.success(context);

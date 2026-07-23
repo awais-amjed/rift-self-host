@@ -4,12 +4,13 @@ import { CustomResponse } from "./response.ts";
 import * as EC from "./error_codes.ts";
 
 /**
- * Authenticated token record with user permissions.
+ * Authenticated caller with server permissions.
  *
- * Permissions are sourced from the **users** table.
- * Tokens are always linked to a user (invites are a separate table).
+ * Identity comes from a verified GoTrue JWT (`auth.uid()`); permissions and ban
+ * state come from the **users** profile row (`users.id = auth.uid()`).
  */
 export interface AuthenticatedToken {
+  /** The caller's id (= auth.uid() = users.id). Kept for API compatibility. */
   tokenId: string;
   serverId: string;
   userId: string;
@@ -19,11 +20,13 @@ export interface AuthenticatedToken {
 }
 
 /**
- * Validate an access token and return the token record with user permissions.
- * Returns a Response if the token is missing, invalid, or not linked to a user.
+ * Verify the caller's GoTrue JWT and load their server permissions.
+ * Returns a Response if the JWT is missing/invalid/expired, the caller isn't
+ * registered on this server, or they're banned.
  *
- * Uses a single JOIN query (tokens → users via FK) instead of two sequential
- * round-trips, cutting auth overhead by ~50% on every protected endpoint.
+ * The ban + permission check hits the DB on every call, so revocation on the
+ * edge-function path stays instant even though the JWT itself is stateless
+ * (see auth.md — short-lived JWTs cover the RLS-only surfaces).
  */
 export async function authenticateToken(
   supabase: SupabaseClient,
@@ -33,52 +36,36 @@ export async function authenticateToken(
     return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
   }
 
-  // One round-trip: fetch token + user permissions via the FK relationship.
-  // PostgREST embeds the related users row as a nested object under the table name.
+  // 1. Validate the JWT and resolve the caller's identity via GoTrue.
+  const { data: userData, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !userData?.user) {
+    return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID, authError);
+  }
+  const authUid = userData.user.id;
+
+  // 2. Load this server's profile row. users.id = auth.uid() (see migration 007).
   const { data, error } = await supabase
-    .from(DBSchema.tokens.tableName)
+    .from(DBSchema.users.tableName)
     .select(
-      `${DBSchema.tokens.id},` +
-      ` ${DBSchema.tokens.serverId},` +
-      ` ${DBSchema.tokens.userId},` +
-      ` ${DBSchema.tokens.expiresAt},` +
-      ` ${DBSchema.users.tableName}(${DBSchema.users.isServerAdmin}, ${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ${DBSchema.users.isBanned})`,
+      `${DBSchema.users.id}, ${DBSchema.users.serverId}, ${DBSchema.users.isServerAdmin}, ${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ${DBSchema.users.isBanned}`,
     )
-    .eq(DBSchema.tokens.token, token)
+    .eq(DBSchema.users.id, authUid)
     .single();
 
   if (error || !data) {
-    console.log(`[auth] Token lookup failed for token="${token?.substring(0,8)}...": ${JSON.stringify(error)}`);
-    return CustomResponse.error("Invalid token provided", EC.TOKEN_INVALID, error);
+    // Authenticated with GoTrue but not registered on this server yet.
+    return CustomResponse.error("User not found", EC.USER_NOT_FOUND, error);
   }
 
-  const d = data as Record<string, any>;
-
-  // Reject expired tokens
-  const expiresAt = new Date(d[DBSchema.tokens.expiresAt]);
-  if (expiresAt < new Date()) {
-    return CustomResponse.error("Token has expired — please re-authenticate", EC.TOKEN_EXPIRED);
-  }
-
-  const userId = d[DBSchema.tokens.userId];
-  if (!userId) {
-    return CustomResponse.error("Token is not linked to a user", EC.TOKEN_UNLINKED);
-  }
-
-  // The embedded users row — null if the user was deleted (ON DELETE SET NULL)
-  const u = d[DBSchema.users.tableName] as Record<string, any> | null;
-  if (!u) {
-    return CustomResponse.error("User not found", EC.USER_NOT_FOUND);
-  }
-
+  const u = data as Record<string, any>;
   if (u[DBSchema.users.isBanned]) {
     return CustomResponse.error("User is banned", EC.USER_BANNED);
   }
 
   return {
-    tokenId: d[DBSchema.tokens.id],
-    serverId: d[DBSchema.tokens.serverId],
-    userId,
+    tokenId: authUid,
+    serverId: u[DBSchema.users.serverId],
+    userId: authUid,
     isServerAdmin: u[DBSchema.users.isServerAdmin],
     isChannelManager: u[DBSchema.users.isChannelManager],
     canCreateTokens: u[DBSchema.users.canCreateTokens],

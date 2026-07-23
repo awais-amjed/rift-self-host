@@ -6,17 +6,16 @@ import * as EC from "./error_codes.ts";
 /**
  * Fetch full server context: server details, user profile, and channels.
  *
- * Permissions are read directly from the **users** table.
+ * Permissions are read directly from the **users** table. Sessions are GoTrue
+ * JWTs held by the client (SIWS), so no token is returned here.
  *
  * Returns the assembled response object matching the standard shape used by
- * verify_challenge, register, and get_server_details.
- * Returns a Response on error.
+ * register and get_server_details. Returns a Response on error.
  */
 export async function fetchServerContext(
   supabase: SupabaseClient,
   opts: {
     serverId: string;
-    tokenValue: string;
     userId: string;
   },
 ): Promise<Record<string, any> | Response> {
@@ -80,7 +79,6 @@ export async function fetchServerContext(
   }));
 
   return {
-    token: opts.tokenValue,
     server_id: opts.serverId,
     name: server[DBSchema.servers.name],
     icon_url: server[DBSchema.servers.iconUrl],

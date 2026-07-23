@@ -60,6 +60,34 @@ Deno.serve(async (req) => {
     }
 
     const row = data as Record<string, any>;
+
+    // Fan out a notification row per other member (best-effort; a failure here
+    // must never fail the send). Clients read these via authenticated Realtime
+    // (RLS-scoped to auth.uid()) — one subscription per server, so members are
+    // notified for channels they never opened. See auth.md.
+    try {
+      const { data: members } = await supabase
+        .from(DBSchema.users.tableName)
+        .select(DBSchema.users.id)
+        .eq(DBSchema.users.serverId, auth.serverId)
+        .eq(DBSchema.users.isBanned, false)
+        .neq(DBSchema.users.id, auth.userId);
+
+      const recipients = (members ?? []) as Record<string, any>[];
+      if (recipients.length > 0) {
+        await supabase.from(DBSchema.notifications.tableName).insert(
+          recipients.map((m) => ({
+            [DBSchema.notifications.userId]: m[DBSchema.users.id],
+            [DBSchema.notifications.channelId]: channel_id,
+            [DBSchema.notifications.messageId]: row[DBSchema.messages.id],
+            [DBSchema.notifications.senderId]: auth.userId,
+          })),
+        );
+      }
+    } catch (_) {
+      // Notifications are non-critical — the message is already stored.
+    }
+
     return CustomResponse.success({
       id: row[DBSchema.messages.id],
       created_at: row[DBSchema.messages.createdAt],

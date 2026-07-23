@@ -26,7 +26,6 @@ Deno.serve(async (req) => {
     // Fetch full server context using shared helper
     const context = await fetchServerContext(supabase, {
       serverId: auth.serverId,
-      tokenValue: token!,
       userId: auth.userId,
     });
 

@@ -68,14 +68,15 @@ const DBSchema = {
     name: "name",
     channelType: "channel_type",
   },
-  tokens: {
-    tableName: "tokens",
+  notifications: {
+    tableName: "notifications",
     id: "id",
     createdAt: "created_at",
-    serverId: "server_id",
-    token: "token",
     userId: "user_id",
-    expiresAt: "expires_at",
+    channelId: "channel_id",
+    messageId: "message_id",
+    senderId: "sender_id",
+    readAt: "read_at",
   },
   invites: {
     tableName: "invites",
@@ -89,12 +90,6 @@ const DBSchema = {
     maxUses: "max_uses",
     uses: "uses",
     expiresAt: "expires_at",
-  },
-  authChallenges: {
-    tableName: "auth_challenges",
-    nonce: "nonce",
-    expiresAt: "expires_at",
-    publicKey: "public_key",
   },
 };
 
