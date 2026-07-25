@@ -91,6 +91,20 @@ const DBSchema = {
     uses: "uses",
     expiresAt: "expires_at",
   },
+  messageReactions: {
+    tableName: "message_reactions",
+    messageId: "message_id",
+    userId: "user_id",
+    emoji: "emoji",
+    createdAt: "created_at",
+  },
+  dmMessageReactions: {
+    tableName: "dm_message_reactions",
+    messageId: "message_id",
+    userId: "user_id",
+    emoji: "emoji",
+    createdAt: "created_at",
+  },
 };
 
 export default DBSchema;

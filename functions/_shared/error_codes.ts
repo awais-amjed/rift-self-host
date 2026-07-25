@@ -29,6 +29,7 @@ export const SERVER_KEY_INVALID         = "server_key_invalid";         // wrong
 export const SERVER_CREDENTIALS_MISSING = "server_credentials_missing"; // LiveKit / seeding secret missing
 
 // ── Channel ───────────────────────────────────────────────────────────────────
+export const MESSAGE_NOT_FOUND     = "message_not_found";
 export const CHANNEL_NOT_FOUND     = "channel_not_found";
 export const CHANNEL_NAME_DUPLICATE = "channel_name_duplicate";
 export const CHANNEL_TYPE_INVALID  = "channel_type_invalid";
