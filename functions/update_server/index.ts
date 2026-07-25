@@ -17,7 +17,8 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { name, icon_url, livekit_api_key, livekit_secret_key } = await req.json();
+    const { name, icon_url, livekit_url, livekit_api_key, livekit_secret_key } =
+      await req.json();
     const token = extractBearerToken(req);
 
     // Authenticate
@@ -25,9 +26,9 @@ Deno.serve(async (req) => {
     if (isAuthError(auth)) return auth;
 
     // Check if at least one field to update is provided
-    if (!name && icon_url === undefined && !livekit_api_key && !livekit_secret_key) {
+    if (!name && icon_url === undefined && !livekit_url && !livekit_api_key && !livekit_secret_key) {
       return CustomResponse.error(
-        "At least one field to update must be provided: name, icon_url, livekit_api_key, or livekit_secret_key",
+        "At least one field to update must be provided: name, icon_url, livekit_url, livekit_api_key, or livekit_secret_key",
         EC.MISSING_FIELDS,
       );
     }
@@ -45,6 +46,9 @@ Deno.serve(async (req) => {
     if (icon_url !== undefined) {
       updateData[DBSchema.servers.iconUrl] = icon_url;
     }
+    if (livekit_url) {
+      updateData[DBSchema.servers.livekitUrl] = livekit_url;
+    }
     if (livekit_api_key) {
       updateData[DBSchema.servers.livekitApiKey] = livekit_api_key;
     }
@@ -57,7 +61,7 @@ Deno.serve(async (req) => {
       .from(DBSchema.servers.tableName)
       .update(updateData)
       .eq(DBSchema.servers.id, auth.serverId)
-      .select(`${DBSchema.servers.name}, ${DBSchema.servers.iconUrl}`)
+      .select(`${DBSchema.servers.name}, ${DBSchema.servers.iconUrl}, ${DBSchema.servers.livekitUrl}`)
       .single();
 
     if (error) {
@@ -72,6 +76,7 @@ Deno.serve(async (req) => {
     return CustomResponse.success({
       name: serverRecord[DBSchema.servers.name],
       icon_url: serverRecord[DBSchema.servers.iconUrl],
+      livekit_url: serverRecord[DBSchema.servers.livekitUrl],
     });
   } catch (error) {
     return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, error);
