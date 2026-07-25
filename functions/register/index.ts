@@ -5,6 +5,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { extractBearerToken } from "../_shared/auth.ts";
+import { verifyJwt } from "../_shared/jwt.ts";
 import { fetchServerContext } from "../_shared/server_context.ts";
 
 const supabase = createClient(
@@ -28,16 +29,16 @@ Deno.serve(async (req) => {
 
   try {
     // 0. Identify the caller from their SIWS JWT. authenticateToken can't be
-    //    used here — there's no users row yet — so verify the JWT directly.
+    //    used here — there's no users row yet — so verify the JWT directly
+    //    (locally against the JWKS, same as authenticateToken).
     const token = extractBearerToken(req);
     if (!token) {
       return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
     }
-    const { data: userData, error: authError } = await supabase.auth.getUser(token);
-    if (authError || !userData?.user) {
-      return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID, authError);
+    const authUid = await verifyJwt(token);
+    if (!authUid) {
+      return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
     }
-    const authUid = userData.user.id;
 
     const { invite_code, public_key, stable_id, username, display_name } =
       await req.json();

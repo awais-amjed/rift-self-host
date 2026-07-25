@@ -2,6 +2,7 @@ import { SupabaseClient } from "@supabase/supabase-js";
 import DBSchema from "./schema.ts";
 import { CustomResponse } from "./response.ts";
 import * as EC from "./error_codes.ts";
+import { verifyJwt } from "./jwt.ts";
 
 /**
  * Authenticated caller with server permissions.
@@ -36,12 +37,12 @@ export async function authenticateToken(
     return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
   }
 
-  // 1. Validate the JWT and resolve the caller's identity via GoTrue.
-  const { data: userData, error: authError } = await supabase.auth.getUser(token);
-  if (authError || !userData?.user) {
-    return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID, authError);
+  // 1. Verify the JWT locally against the stack's JWKS (no GoTrue round-trip).
+  //    Ban / deleted-user / permission state is still resolved from the DB below.
+  const authUid = await verifyJwt(token);
+  if (!authUid) {
+    return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
   }
-  const authUid = userData.user.id;
 
   // 2. Load this server's profile row. users.id = auth.uid() (see migration 007).
   const { data, error } = await supabase
