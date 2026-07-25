@@ -78,89 +78,45 @@ Deno.serve(async (req) => {
       );
     }
 
-    // 1. Already registered? (idempotent-ish: same identity re-calling register)
-    const { data: existingSelf } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(DBSchema.users.id)
-      .eq(DBSchema.users.id, authUid)
-      .maybeSingle();
-    if (existingSelf) {
-      return CustomResponse.error("Already registered on this server", EC.IDENTITY_TAKEN);
+    // Claim the invite + create the profile atomically (migration 009). The
+    // invite is only consumed once every check passes, so a rejected register
+    // (e.g. username taken) never burns an invite use.
+    const { data: regData, error: regError } = await supabase.rpc("register_user", {
+      p_invite_code:  invite_code,
+      p_user_id:      authUid,
+      p_public_key:   public_key,
+      p_stable_id:    stable_id,
+      p_username:     username,
+      p_display_name: display_name,
+    });
+
+    if (regError) {
+      return CustomResponse.error("Error creating user", EC.DB_ERROR, regError);
     }
 
-    // 2. Atomically claim one use of the invite (race-safe).
-    const { data: claimData, error: claimError } = await supabase
-      .rpc("claim_invite", { p_invite_code: invite_code });
-
-    if (claimError) {
-      return CustomResponse.error("Error processing invite", EC.DB_ERROR, claimError);
+    const reg = regData as Record<string, any>;
+    switch (reg.reason) {
+      case "ok":
+        break;
+      case "not_found":
+        return CustomResponse.error("Invalid invite code", EC.INVITE_INVALID);
+      case "expired":
+        return CustomResponse.error("Invite code has expired", EC.INVITE_EXPIRED);
+      case "exhausted":
+        return CustomResponse.error("Invite code has reached its maximum uses", EC.INVITE_EXHAUSTED);
+      case "already_registered":
+        return CustomResponse.error("Already registered on this server", EC.IDENTITY_TAKEN);
+      case "identity_taken":
+        return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
+      case "username_taken":
+        return CustomResponse.error("Username already taken", EC.USERNAME_TAKEN);
+      default:
+        return CustomResponse.error("Error creating user", EC.DB_ERROR, reg);
     }
 
-    const claim = claimData as Record<string, any>;
-    if (claim.reason === "not_found") {
-      return CustomResponse.error("Invalid invite code", EC.INVITE_INVALID);
-    }
-    if (claim.reason === "expired") {
-      return CustomResponse.error("Invite code has expired", EC.INVITE_EXPIRED);
-    }
-    if (claim.reason === "exhausted") {
-      return CustomResponse.error("Invite code has reached its maximum uses", EC.INVITE_EXHAUSTED);
-    }
+    const server_id = reg[DBSchema.invites.serverId] as string;
 
-    const server_id = claim[DBSchema.invites.serverId] as string;
-
-    // 3. Duplicate identity checks — scoped to this server.
-    const { data: existingByKey } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(DBSchema.users.id)
-      .eq(DBSchema.users.serverId, server_id)
-      .eq(DBSchema.users.publicKey, public_key)
-      .maybeSingle();
-    if (existingByKey) {
-      return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
-    }
-
-    const { data: existingByStableId } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(DBSchema.users.id)
-      .eq(DBSchema.users.serverId, server_id)
-      .eq(DBSchema.users.stableId, stable_id)
-      .maybeSingle();
-    if (existingByStableId) {
-      return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
-    }
-
-    // 4. Username uniqueness.
-    const { data: existingUser } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(DBSchema.users.id)
-      .eq(DBSchema.users.username, username)
-      .maybeSingle();
-    if (existingUser) {
-      return CustomResponse.error("Username already taken", EC.USERNAME_TAKEN);
-    }
-
-    // 5. Insert the profile bound to the GoTrue identity (users.id = auth.uid()).
-    const { error: insertError } = await supabase
-      .from(DBSchema.users.tableName)
-      .insert({
-        [DBSchema.users.id]:              authUid,
-        [DBSchema.users.serverId]:        server_id,
-        [DBSchema.users.username]:        username,
-        [DBSchema.users.displayName]:     display_name,
-        [DBSchema.users.publicKey]:       public_key,
-        [DBSchema.users.stableId]:        stable_id,
-        [DBSchema.users.isServerAdmin]:   claim[DBSchema.invites.isServerAdmin],
-        [DBSchema.users.isChannelManager]: claim[DBSchema.invites.isChannelManager],
-        // Baseline: every member may create (plain) invites, Discord-style.
-        [DBSchema.users.canCreateTokens]: true,
-      });
-
-    if (insertError) {
-      return CustomResponse.error("Error creating user", EC.DB_ERROR, insertError);
-    }
-
-    // 6. Return full server context (no token — the client holds the JWT).
+    // Return full server context (no token — the client holds the JWT).
     const context = await fetchServerContext(supabase, {
       serverId: server_id,
       userId: authUid,
