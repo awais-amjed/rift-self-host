@@ -63,7 +63,9 @@ Deno.serve(async (req) => {
         ` ${DBSchema.messages.nonce},` +
         ` ${DBSchema.messages.signature},` +
         ` ${DBSchema.messages.keyVersion},` +
-        ` ${DBSchema.users.tableName}(${DBSchema.users.displayName}, ${DBSchema.users.publicKey})`,
+        // Disambiguate the embed: message_reactions added a second messages↔users
+        // relationship, so PostgREST needs the explicit sender FK (PGRST201).
+        ` ${DBSchema.users.tableName}!messages_sender_id_fkey(${DBSchema.users.displayName}, ${DBSchema.users.publicKey})`,
       )
       .eq(DBSchema.messages.channelId, channel_id)
       .limit(pageSize);
