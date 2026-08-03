@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
         ` ${m.ciphertext}, ${m.nonce}, ${m.signature}, ${m.keyVersion},` +
         ` ${m.editedAt},` +
         // Two FKs point at users — disambiguate the embed by column.
-        ` sender:${DBSchema.users.tableName}!${m.senderId}(${DBSchema.users.displayName}, ${DBSchema.users.publicKey})`,
+        ` sender:${DBSchema.users.tableName}!${m.senderId}(${DBSchema.users.displayName}, ${DBSchema.users.publicKey}, ${DBSchema.users.avatarPath})`,
       )
       .or(
         `and(${m.senderId}.eq.${auth.userId},${m.recipientId}.eq.${peer_id}),` +
@@ -86,10 +86,12 @@ Deno.serve(async (req) => {
         recipient_id: row[m.recipientId],
         sender_name: sender?.[DBSchema.users.displayName] ?? "Unknown",
         sender_public_key: sender?.[DBSchema.users.publicKey] ?? null,
+        sender_avatar_path: sender?.[DBSchema.users.avatarPath] ?? null,
         ciphertext: row[m.ciphertext],
         nonce: row[m.nonce],
         signature: row[m.signature],
         key_version: row[m.keyVersion],
+        edited_at: row[m.editedAt],
       };
     });
 

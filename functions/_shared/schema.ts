@@ -25,6 +25,7 @@ const DBSchema = {
     isMuted: "is_muted",
     isDeafened: "is_deafened",
     chatPublicKey: "chat_public_key",
+    avatarPath: "avatar_path",
   },
   messages: {
     tableName: "messages",

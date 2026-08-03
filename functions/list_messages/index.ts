@@ -66,7 +66,7 @@ Deno.serve(async (req) => {
         ` ${DBSchema.messages.editedAt},` +
         // Disambiguate the embed: message_reactions added a second messages↔users
         // relationship, so PostgREST needs the explicit sender FK (PGRST201).
-        ` ${DBSchema.users.tableName}!messages_sender_id_fkey(${DBSchema.users.displayName}, ${DBSchema.users.publicKey})`,
+        ` ${DBSchema.users.tableName}!messages_sender_id_fkey(${DBSchema.users.displayName}, ${DBSchema.users.publicKey}, ${DBSchema.users.avatarPath})`,
       )
       .eq(DBSchema.messages.channelId, channel_id)
       .limit(pageSize);
@@ -97,10 +97,12 @@ Deno.serve(async (req) => {
         sender_id: row[DBSchema.messages.senderId],
         sender_name: sender?.[DBSchema.users.displayName] ?? "Unknown",
         sender_public_key: sender?.[DBSchema.users.publicKey] ?? null,
+        sender_avatar_path: sender?.[DBSchema.users.avatarPath] ?? null,
         ciphertext: row[DBSchema.messages.ciphertext],
         nonce: row[DBSchema.messages.nonce],
         signature: row[DBSchema.messages.signature],
         key_version: row[DBSchema.messages.keyVersion],
+        edited_at: row[DBSchema.messages.editedAt],
       };
     });
 

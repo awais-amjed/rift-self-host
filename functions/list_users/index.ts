@@ -34,7 +34,7 @@ Deno.serve(async (req) => {
           `${DBSchema.users.createdAt}, ${DBSchema.users.isServerAdmin}, ` +
           `${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ` +
           `${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ${DBSchema.users.isBanned}, ` +
-          `${DBSchema.users.chatPublicKey}`,
+          `${DBSchema.users.chatPublicKey}, ${DBSchema.users.avatarPath}`,
       )
       .eq(DBSchema.users.serverId, auth.serverId)
       .order(DBSchema.users.createdAt, { ascending: true });
