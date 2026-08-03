@@ -54,6 +54,7 @@ Deno.serve(async (req) => {
       .select(
         `${m.id}, ${m.createdAt}, ${m.senderId}, ${m.recipientId},` +
         ` ${m.ciphertext}, ${m.nonce}, ${m.signature}, ${m.keyVersion},` +
+        ` ${m.editedAt},` +
         // Two FKs point at users — disambiguate the embed by column.
         ` sender:${DBSchema.users.tableName}!${m.senderId}(${DBSchema.users.displayName}, ${DBSchema.users.publicKey})`,
       )

@@ -36,6 +36,7 @@ const DBSchema = {
     nonce: "nonce",
     signature: "signature",
     keyVersion: "key_version",
+    editedAt: "edited_at",
   },
   dmMessages: {
     tableName: "dm_messages",
@@ -47,6 +48,7 @@ const DBSchema = {
     nonce: "nonce",
     signature: "signature",
     keyVersion: "key_version",
+    editedAt: "edited_at",
   },
   channelKeyring: {
     tableName: "channel_keyring",
