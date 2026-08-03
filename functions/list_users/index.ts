@@ -58,6 +58,8 @@ Deno.serve(async (req) => {
       is_banned: row[DBSchema.users.isBanned],
       // X25519 chat key (null until published) — needed to start a DM.
       chat_public_key: row[DBSchema.users.chatPublicKey],
+      // Avatar object name (null = render initials). Not E2E — migration 014.
+      avatar_path: row[DBSchema.users.avatarPath],
     }));
 
     return CustomResponse.success({ users });
