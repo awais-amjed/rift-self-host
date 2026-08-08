@@ -78,6 +78,10 @@ const DBSchema = {
     userId: "user_id",
     channelId: "channel_id",
     messageId: "message_id",
+    // A row targets either a channel message (the two above) or a DM (these
+    // two) — see migration 015.
+    dmPeerId: "dm_peer_id",
+    dmMessageId: "dm_message_id",
     senderId: "sender_id",
     readAt: "read_at",
   },

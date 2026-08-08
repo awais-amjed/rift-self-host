@@ -85,6 +85,25 @@ Deno.serve(async (req) => {
     }
 
     const row = data as Record<string, any>;
+
+    // Fan out one notification row to the recipient (best-effort; a failure
+    // here must never fail the send). Same table and same client subscription
+    // as channel messages — a DM row names the peer instead of a channel, so
+    // the unread badge works on servers the recipient isn't looking at, and
+    // read state lives server-side where every device agrees on it. On a server
+    // that hasn't applied migration 015 the insert fails and the DM still
+    // sends — it just doesn't badge.
+    try {
+      await supabase.from(DBSchema.notifications.tableName).insert({
+        [DBSchema.notifications.userId]: recipient_id,
+        [DBSchema.notifications.dmPeerId]: auth.userId,
+        [DBSchema.notifications.dmMessageId]: row[DBSchema.dmMessages.id],
+        [DBSchema.notifications.senderId]: auth.userId,
+      });
+    } catch (_) {
+      // Notifications are non-critical — the message is already stored.
+    }
+
     return CustomResponse.success({
       id: row[DBSchema.dmMessages.id],
       created_at: row[DBSchema.dmMessages.createdAt],
