@@ -77,6 +77,33 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error storing server credentials", EC.DB_ERROR, secretsError);
     }
 
+    // Seed the two channels every server turns out to want. Without them the
+    // admin lands in an empty sidebar and has to build the room before anyone
+    // can say anything in it. Names are lowercase to match what the create
+    // dialog suggests, and they differ because (server_id, name) is unique —
+    // a text and a voice channel cannot both be called "general".
+    const { error: channelsError } = await supabase
+      .from(DBSchema.channels.tableName)
+      .insert([
+        {
+          [DBSchema.channels.serverId]: server_id,
+          [DBSchema.channels.name]: "general",
+          [DBSchema.channels.channelType]: "text",
+        },
+        {
+          [DBSchema.channels.serverId]: server_id,
+          [DBSchema.channels.name]: "voice",
+          [DBSchema.channels.channelType]: "voice",
+        },
+      ]);
+
+    if (channelsError) {
+      // Same reasoning as the credentials above: a half-made server is worse
+      // than one that plainly failed. The cascade takes the secrets with it.
+      await supabase.from(DBSchema.servers.tableName).delete().eq(DBSchema.servers.id, server_id);
+      return CustomResponse.error("Error creating default channels", EC.DB_ERROR, channelsError);
+    }
+
     // Generate an admin invite code (single-use)
     const inviteCode = generateInviteCode();
 
