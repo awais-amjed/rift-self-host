@@ -10,6 +10,8 @@
 -- hardware and their own retention policy; deleting their history on a timer is
 -- the central tier's bargain, not this one's.
 
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
 SELECT cron.unschedule('cleanup-expired-invites')
   WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'cleanup-expired-invites');
 

@@ -21,8 +21,9 @@
 --   005_storage.sql   buckets and their policies
 --   006_jobs.sql      scheduled cleanup
 
+-- pgcrypto backs new_invite_code(); pg_cron is declared by 006, which is the
+-- only file that schedules anything.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS pg_cron;
 
 -- ============================================================
 -- Types
