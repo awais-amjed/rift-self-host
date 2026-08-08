@@ -78,21 +78,29 @@ Deno.serve(async (req) => {
     const isMuted: boolean = userRecord[DBSchema.users.isMuted] === true;
     const isDeafened: boolean = userRecord[DBSchema.users.isDeafened] === true;
 
-    // Fetch LiveKit credentials
+    // Fetch LiveKit credentials. The API secret lives in `server_secrets`,
+    // which no client can read — minting this token is the only reason anything
+    // reads it, and it is why this endpoint stays an edge function.
     const { data: server, error: serverError } = await supabase
       .from(DBSchema.servers.tableName)
-      .select(`${DBSchema.servers.livekitUrl}, ${DBSchema.servers.livekitApiKey}, ${DBSchema.servers.livekitSecretKey}`)
+      .select(DBSchema.servers.livekitUrl)
       .eq(DBSchema.servers.id, auth.serverId)
       .single();
 
-    if (serverError || !server) {
-      return CustomResponse.error("Error fetching server credentials", EC.DB_ERROR, serverError);
+    const { data: secrets, error: secretsError } = await supabase
+      .from(DBSchema.serverSecrets.tableName)
+      .select(`${DBSchema.serverSecrets.livekitApiKey}, ${DBSchema.serverSecrets.livekitSecretKey}`)
+      .eq(DBSchema.serverSecrets.serverId, auth.serverId)
+      .single();
+
+    if (serverError || !server || secretsError || !secrets) {
+      return CustomResponse.error("Error fetching server credentials", EC.DB_ERROR, serverError ?? secretsError);
     }
 
-    const serverRecord = server as Record<string, any>;
-    const apiKey = serverRecord[DBSchema.servers.livekitApiKey];
-    const apiSecret = serverRecord[DBSchema.servers.livekitSecretKey];
-    const livekitUrl: string = serverRecord[DBSchema.servers.livekitUrl] ?? "";
+    const secretRecord = secrets as Record<string, any>;
+    const apiKey = secretRecord[DBSchema.serverSecrets.livekitApiKey];
+    const apiSecret = secretRecord[DBSchema.serverSecrets.livekitSecretKey];
+    const livekitUrl: string = (server as Record<string, any>)[DBSchema.servers.livekitUrl] ?? "";
 
     if (!apiKey || !apiSecret) {
       return CustomResponse.error("LiveKit credentials not configured for this server", EC.SERVER_CREDENTIALS_MISSING);

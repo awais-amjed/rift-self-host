@@ -49,8 +49,6 @@ Deno.serve(async (req) => {
         [DBSchema.servers.name]: name,
         [DBSchema.servers.iconUrl]: icon_url || null,
         [DBSchema.servers.livekitUrl]: livekit_url,
-        [DBSchema.servers.livekitApiKey]: livekit_api_key,
-        [DBSchema.servers.livekitSecretKey]: livekit_secret_key,
       })
       .select()
       .single();
@@ -61,6 +59,23 @@ Deno.serve(async (req) => {
 
     const serverRecord = data as Record<string, any>;
     const server_id = serverRecord[DBSchema.servers.id];
+
+    // Credentials go in their own table, which nothing but the service role can
+    // read — that is what lets members select the rest of the server row.
+    const { error: secretsError } = await supabase
+      .from(DBSchema.serverSecrets.tableName)
+      .insert({
+        [DBSchema.serverSecrets.serverId]: server_id,
+        [DBSchema.serverSecrets.livekitApiKey]: livekit_api_key,
+        [DBSchema.serverSecrets.livekitSecretKey]: livekit_secret_key,
+      });
+
+    if (secretsError) {
+      // A server without credentials can never mint a voice token, so don't
+      // leave one behind.
+      await supabase.from(DBSchema.servers.tableName).delete().eq(DBSchema.servers.id, server_id);
+      return CustomResponse.error("Error storing server credentials", EC.DB_ERROR, secretsError);
+    }
 
     // Generate an admin invite code (single-use)
     const inviteCode = generateInviteCode();

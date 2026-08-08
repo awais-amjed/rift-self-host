@@ -6,6 +6,13 @@ const DBSchema = {
     name: "name",
     iconUrl: "icon_url",
     livekitUrl: "livekit_url",
+  },
+  // Split out of `servers` so the rest of that row can be read directly by
+  // members under RLS. This table has no grant and no policy: the service role
+  // is the only thing that can reach it.
+  serverSecrets: {
+    tableName: "server_secrets",
+    serverId: "server_id",
     livekitApiKey: "livekit_api_key",
     livekitSecretKey: "livekit_secret_key",
   },
@@ -27,30 +34,6 @@ const DBSchema = {
     chatPublicKey: "chat_public_key",
     avatarPath: "avatar_path",
   },
-  messages: {
-    tableName: "messages",
-    id: "id",
-    createdAt: "created_at",
-    channelId: "channel_id",
-    senderId: "sender_id",
-    ciphertext: "ciphertext",
-    nonce: "nonce",
-    signature: "signature",
-    keyVersion: "key_version",
-    editedAt: "edited_at",
-  },
-  dmMessages: {
-    tableName: "dm_messages",
-    id: "id",
-    createdAt: "created_at",
-    senderId: "sender_id",
-    recipientId: "recipient_id",
-    ciphertext: "ciphertext",
-    nonce: "nonce",
-    signature: "signature",
-    keyVersion: "key_version",
-    editedAt: "edited_at",
-  },
   channelKeyring: {
     tableName: "channel_keyring",
     id: "id",
@@ -71,20 +54,6 @@ const DBSchema = {
     name: "name",
     channelType: "channel_type",
   },
-  notifications: {
-    tableName: "notifications",
-    id: "id",
-    createdAt: "created_at",
-    userId: "user_id",
-    channelId: "channel_id",
-    messageId: "message_id",
-    // A row targets either a channel message (the two above) or a DM (these
-    // two) — see migration 015.
-    dmPeerId: "dm_peer_id",
-    dmMessageId: "dm_message_id",
-    senderId: "sender_id",
-    readAt: "read_at",
-  },
   invites: {
     tableName: "invites",
     id: "id",
@@ -97,20 +66,6 @@ const DBSchema = {
     maxUses: "max_uses",
     uses: "uses",
     expiresAt: "expires_at",
-  },
-  messageReactions: {
-    tableName: "message_reactions",
-    messageId: "message_id",
-    userId: "user_id",
-    emoji: "emoji",
-    createdAt: "created_at",
-  },
-  dmMessageReactions: {
-    tableName: "dm_message_reactions",
-    messageId: "message_id",
-    userId: "user_id",
-    emoji: "emoji",
-    createdAt: "created_at",
   },
 };
 

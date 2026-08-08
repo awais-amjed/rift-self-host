@@ -49,11 +49,33 @@ Deno.serve(async (req) => {
     if (livekit_url) {
       updateData[DBSchema.servers.livekitUrl] = livekit_url;
     }
+    // Credentials live in server_secrets, so they are a separate write. This
+    // endpoint exists for them: name and icon ride along rather than splitting
+    // one settings dialog across two transports.
+    const secretData: Record<string, unknown> = {};
     if (livekit_api_key) {
-      updateData[DBSchema.servers.livekitApiKey] = livekit_api_key;
+      secretData[DBSchema.serverSecrets.livekitApiKey] = livekit_api_key;
     }
     if (livekit_secret_key) {
-      updateData[DBSchema.servers.livekitSecretKey] = livekit_secret_key;
+      secretData[DBSchema.serverSecrets.livekitSecretKey] = livekit_secret_key;
+    }
+    if (Object.keys(secretData).length > 0) {
+      const { error: secretsError } = await supabase
+        .from(DBSchema.serverSecrets.tableName)
+        .update(secretData)
+        .eq(DBSchema.serverSecrets.serverId, auth.serverId);
+      if (secretsError) {
+        return CustomResponse.error("Error updating server credentials", EC.DB_ERROR, secretsError);
+      }
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      const { data: current } = await supabase
+        .from(DBSchema.servers.tableName)
+        .select(`${DBSchema.servers.name}, ${DBSchema.servers.iconUrl}, ${DBSchema.servers.livekitUrl}`)
+        .eq(DBSchema.servers.id, auth.serverId)
+        .single();
+      return CustomResponse.success(current);
     }
 
     // Update server details
