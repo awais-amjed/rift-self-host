@@ -1,6 +1,7 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import { AccessToken, RoomServiceClient, TrackSource } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { grantSources, moderationMetadata } from "../_shared/moderation.ts";
 import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
@@ -128,7 +129,7 @@ Deno.serve(async (req) => {
       identity,
       name: displayName,
       ttl: "1h",
-      metadata: JSON.stringify({ muted: isMuted, deafened: isDeafened }),
+      metadata: moderationMetadata(isMuted, isDeafened),
     });
 
     at.addGrant({
@@ -136,9 +137,7 @@ Deno.serve(async (req) => {
       roomJoin: true,
       room,
       canPublish: true,
-      canPublishSources: isMuted
-        ? [TrackSource.CAMERA, TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO]
-        : undefined, // undefined = all sources
+      canPublishSources: grantSources(isMuted), // undefined = all sources
       canSubscribe: !isDeafened,
       roomAdmin: auth.isChannelManager,
     });
