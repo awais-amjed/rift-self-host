@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livePermissions, moderationMetadata } from "../_shared/moderation.ts";
+import { livePermissions, micDenied, moderationMetadata } from "../_shared/moderation.ts";
 
 /**
  * Server-side mute / deafen / ban.
@@ -203,7 +203,7 @@ async function applyToLiveRooms(
           permission,
         });
 
-        if (isMuted) {
+        if (micDenied(isMuted, isDeafened)) {
           // Revoking the source stops future publishes; this stops the audio
           // already flowing.
           for (const track of participant.tracks ?? []) {

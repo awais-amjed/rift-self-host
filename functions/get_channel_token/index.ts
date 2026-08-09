@@ -137,7 +137,8 @@ Deno.serve(async (req) => {
       roomJoin: true,
       room,
       canPublish: true,
-      canPublishSources: grantSources(isMuted), // undefined = all sources
+      // undefined = all sources. Deafened denies the mic as well as the ears.
+      canPublishSources: grantSources(isMuted, isDeafened),
       canSubscribe: !isDeafened,
       roomAdmin: auth.isChannelManager,
     });

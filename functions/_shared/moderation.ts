@@ -10,7 +10,7 @@ import { TrackSource } from "livekit-server-sdk";
  * happened to already be in the call.
  */
 
-/** A muted member keeps camera and screen share; only the microphone goes. */
+/** A silenced member keeps camera and screen share; only the microphone goes. */
 export const MUTED_SOURCES = [
   TrackSource.CAMERA,
   TrackSource.SCREEN_SHARE,
@@ -18,11 +18,25 @@ export const MUTED_SOURCES = [
 ];
 
 /**
+ * Whether the microphone is denied.
+ *
+ * **A deafened member is muted too.** You cannot hold up your end of a
+ * conversation you cannot hear, and it is what every client already draws — so
+ * either flag takes the microphone, and only the microphone.
+ */
+export function micDenied(isMuted: boolean, isDeafened: boolean): boolean {
+  return isMuted || isDeafened;
+}
+
+/**
  * Publishable sources for an **AccessToken grant**, where `undefined` means
  * "every source".
  */
-export function grantSources(isMuted: boolean): TrackSource[] | undefined {
-  return isMuted ? MUTED_SOURCES : undefined;
+export function grantSources(
+  isMuted: boolean,
+  isDeafened: boolean,
+): TrackSource[] | undefined {
+  return micDenied(isMuted, isDeafened) ? MUTED_SOURCES : undefined;
 }
 
 /**
@@ -31,8 +45,11 @@ export function grantSources(isMuted: boolean): TrackSource[] | undefined {
  * `undefined`. Mixing the two up silently mutes everyone or no one, which is
  * why they are separate functions rather than one shared value.
  */
-export function permissionSources(isMuted: boolean): TrackSource[] {
-  return isMuted ? MUTED_SOURCES : [];
+export function permissionSources(
+  isMuted: boolean,
+  isDeafened: boolean,
+): TrackSource[] {
+  return micDenied(isMuted, isDeafened) ? MUTED_SOURCES : [];
 }
 
 /**
@@ -45,7 +62,7 @@ export function livePermissions(isMuted: boolean, isDeafened: boolean) {
     canSubscribe: !isDeafened,
     canPublish: true,
     canPublishData: true,
-    canPublishSources: permissionSources(isMuted),
+    canPublishSources: permissionSources(isMuted, isDeafened),
   };
 }
 
