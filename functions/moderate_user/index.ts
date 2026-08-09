@@ -1,11 +1,12 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import { RoomServiceClient, TrackSource } from "livekit-server-sdk";
+import { TrackSource } from "livekit-server-sdk";
 import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { livekitRoomService } from "../_shared/livekit.ts";
 import { livePermissions, micDenied, moderationMetadata } from "../_shared/moderation.ts";
 
 /**
@@ -141,30 +142,8 @@ async function applyToLiveRooms(
   isBanned: boolean,
 ): Promise<{ updated: number; error: string | null }> {
   try {
-    const { data: server } = await supabase
-      .from(DBSchema.servers.tableName)
-      .select(DBSchema.servers.livekitUrl)
-      .eq(DBSchema.servers.id, serverId)
-      .single();
-
-    const { data: secrets } = await supabase
-      .from(DBSchema.serverSecrets.tableName)
-      .select(`${DBSchema.serverSecrets.livekitApiKey}, ${DBSchema.serverSecrets.livekitSecretKey}`)
-      .eq(DBSchema.serverSecrets.serverId, serverId)
-      .single();
-
-    if (!server || !secrets) return { updated: 0, error: "credentials_missing" };
-
-    const secretRecord = secrets as Record<string, any>;
-    const apiKey = secretRecord[DBSchema.serverSecrets.livekitApiKey];
-    const apiSecret = secretRecord[DBSchema.serverSecrets.livekitSecretKey];
-    const livekitUrl: string = (server as Record<string, any>)[DBSchema.servers.livekitUrl] ?? "";
-    if (!apiKey || !apiSecret || !livekitUrl) {
-      return { updated: 0, error: "credentials_missing" };
-    }
-
-    const livekitHost = livekitUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
-    const roomService = new RoomServiceClient(livekitHost, apiKey, apiSecret);
+    const roomService = await livekitRoomService(supabase, serverId);
+    if (!roomService) return { updated: 0, error: "credentials_missing" };
 
     const { data: channels } = await supabase
       .from(DBSchema.channels.tableName)

@@ -1,11 +1,11 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import { RoomServiceClient } from "livekit-server-sdk";
 import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { livekitRoomService } from "../_shared/livekit.ts";
 
 /**
  * Delete a channel, and the call going on inside it.
@@ -87,28 +87,10 @@ Deno.serve(async (req) => {
  */
 async function deleteRoom(serverId: string, channelId: string): Promise<string | null> {
   try {
-    const { data: server } = await supabase
-      .from(DBSchema.servers.tableName)
-      .select(DBSchema.servers.livekitUrl)
-      .eq(DBSchema.servers.id, serverId)
-      .single();
+    const roomService = await livekitRoomService(supabase, serverId);
+    if (!roomService) return "credentials_missing";
 
-    const { data: secrets } = await supabase
-      .from(DBSchema.serverSecrets.tableName)
-      .select(`${DBSchema.serverSecrets.livekitApiKey}, ${DBSchema.serverSecrets.livekitSecretKey}`)
-      .eq(DBSchema.serverSecrets.serverId, serverId)
-      .single();
-
-    if (!server || !secrets) return "credentials_missing";
-
-    const secretRecord = secrets as Record<string, any>;
-    const apiKey = secretRecord[DBSchema.serverSecrets.livekitApiKey];
-    const apiSecret = secretRecord[DBSchema.serverSecrets.livekitSecretKey];
-    const livekitUrl: string = (server as Record<string, any>)[DBSchema.servers.livekitUrl] ?? "";
-    if (!apiKey || !apiSecret || !livekitUrl) return "credentials_missing";
-
-    const livekitHost = livekitUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
-    await new RoomServiceClient(livekitHost, apiKey, apiSecret).deleteRoom(channelId);
+    await roomService.deleteRoom(channelId);
     return null;
   } catch (err) {
     // Includes "room does not exist", which is the normal case for a text

@@ -7,6 +7,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { livekitCredentials } from "../_shared/livekit.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -82,38 +83,16 @@ Deno.serve(async (req) => {
     // Fetch LiveKit credentials. The API secret lives in `server_secrets`,
     // which no client can read — minting this token is the only reason anything
     // reads it, and it is why this endpoint stays an edge function.
-    const { data: server, error: serverError } = await supabase
-      .from(DBSchema.servers.tableName)
-      .select(DBSchema.servers.livekitUrl)
-      .eq(DBSchema.servers.id, auth.serverId)
-      .single();
-
-    const { data: secrets, error: secretsError } = await supabase
-      .from(DBSchema.serverSecrets.tableName)
-      .select(`${DBSchema.serverSecrets.livekitApiKey}, ${DBSchema.serverSecrets.livekitSecretKey}`)
-      .eq(DBSchema.serverSecrets.serverId, auth.serverId)
-      .single();
-
-    if (serverError || !server || secretsError || !secrets) {
-      return CustomResponse.error("Error fetching server credentials", EC.DB_ERROR, serverError ?? secretsError);
-    }
-
-    const secretRecord = secrets as Record<string, any>;
-    const apiKey = secretRecord[DBSchema.serverSecrets.livekitApiKey];
-    const apiSecret = secretRecord[DBSchema.serverSecrets.livekitSecretKey];
-    const livekitUrl: string = (server as Record<string, any>)[DBSchema.servers.livekitUrl] ?? "";
-
-    if (!apiKey || !apiSecret) {
+    const credentials = await livekitCredentials(supabase, auth.serverId);
+    if (!credentials) {
       return CustomResponse.error("LiveKit credentials not configured for this server", EC.SERVER_CREDENTIALS_MISSING);
     }
-
-    // Normalise the LiveKit URL for the admin API (wss:// → https://, ws:// → http://)
-    const livekitHost = livekitUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+    const { apiKey, apiSecret } = credentials;
 
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
     // the edge function is the only thing that can create rooms.
-    const roomService = new RoomServiceClient(livekitHost, apiKey, apiSecret);
+    const roomService = new RoomServiceClient(credentials.host, apiKey, apiSecret);
     try {
       await roomService.createRoom({ name: room });
     } catch (roomErr) {

@@ -20,8 +20,9 @@ export const CHALLENGE_EXPIRED = "challenge_expired"; // nonce TTL has passed
 export const SIGNATURE_INVALID = "signature_invalid"; // Ed25519 verification failed
 
 // ── User ──────────────────────────────────────────────────────────────────────
-export const USER_NOT_FOUND = "user_not_found";
-export const USER_BANNED    = "user_banned";
+export const USER_NOT_FOUND    = "user_not_found";
+export const USER_BANNED       = "user_banned";
+export const USER_NOT_IN_VOICE = "user_not_in_voice"; // nothing to move: they're not in a call
 
 // ── Server ────────────────────────────────────────────────────────────────────
 export const SERVER_NOT_FOUND           = "server_not_found";
