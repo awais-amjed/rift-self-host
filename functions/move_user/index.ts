@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService } from "../_shared/livekit.ts";
+import { livekitRoomService, voiceUserId } from "../_shared/livekit.ts";
 
 /**
  * Pull a member from the voice channel they're in into another one.
@@ -149,15 +149,9 @@ Deno.serve(async (req) => {
   }
 });
 
-/**
- * The target's own connections in a room — one per device — with screen shares
- * left out, since telling a share to join a channel means nothing.
- *
- * Identities are "<userId>~<device>", plus a "_screenshare" suffix for that
- * device's share, so the user id is what to match on.
- */
+/** The target's own connections in a room — one per device, shares excluded. */
 function voiceConnectionsOf(participants: ParticipantInfo[], userId: string): string[] {
   return participants
-    .filter((p) => p.identity.split("~")[0] === userId && !p.identity.endsWith("_screenshare"))
+    .filter((p) => voiceUserId(p.identity) === userId)
     .map((p) => p.identity);
 }
