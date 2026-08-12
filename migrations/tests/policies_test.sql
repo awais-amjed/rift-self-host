@@ -559,172 +559,44 @@ BEGIN
   END;
   RAISE NOTICE 'ok  a ban applies from the next statement, not the next token';
 END $$;
-
 -- ============================================================
 -- 11. Operator limits
 -- ============================================================
 -- Migration 007. Every limit defaults to 0 = off, so the cases that matter are
--- the ones that turn one on: a quota that is never reached proves nothing, and
--- a quota that silently fails to apply looks exactly like a working app.
+-- the ones that turn one on: a sweep that never runs proves nothing, and a
+-- sweep that silently fails to apply looks exactly like a working app.
+--
+-- Fresh fixtures rather than the shared ones: earlier sections have been posting
+-- as alice and bob all file, so their row counts are whatever those tests
+-- happened to leave. A cap test that starts from an unknown number is a cap test
+-- that passes for the wrong reason.
 
--- Fresh fixtures rather than the shared ones: earlier sections have been
--- posting as alice and bob all file, so their 24-hour counts are whatever the
--- tests above happened to leave. A quota test that starts from an unknown
--- number is a quota test that passes for the wrong reason.
 RESET ROLE;
 UPDATE users SET is_banned = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
 
--- Alpha: 2 channel messages/day by default, 1 DM/day. Beta sets nothing, so
--- "the limit is this server's, not the schema's" stays testable.
-UPDATE servers SET default_channel_daily_quota = 2, dm_daily_quota = 1
+-- Alpha keeps 30 days and at most 2 messages. Beta sets nothing, so "the limit
+-- is this server's, not the schema's" stays testable.
+UPDATE servers SET message_retention_days = 30, message_history_cap = 2
  WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
 
--- #metered inherits the default; #announcements tightens it to 1.
-INSERT INTO channels (id, server_id, name, channel_type, daily_quota) VALUES
+--   #inherits   — takes both of Alpha's numbers
+--   #strict     — its own cap of 1 and its own 7-day age
+--   #forever    — 0 for both: opts out of a server-wide sweep entirely
+INSERT INTO channels (id, server_id, name, channel_type, retention_days, history_cap) VALUES
   ('aaaa1111-0000-4000-8000-000000000002', 'aaaa0000-0000-4000-8000-000000000001',
-   'metered', 'text', NULL),
+   'inherits', 'text', NULL, NULL),
   ('aaaa1111-0000-4000-8000-000000000003', 'aaaa0000-0000-4000-8000-000000000001',
-   'announcements', 'text', 1);
+   'strict', 'text', 7, 1),
+  ('aaaa1111-0000-4000-8000-000000000004', 'aaaa0000-0000-4000-8000-000000000001',
+   'forever', 'text', 0, 0);
 
--- Dave and erin start with no messages and no DMs at all.
-INSERT INTO auth.users (id) VALUES
-  ('11111111-aaaa-4aaa-8aaa-000000000004'),
-  ('11111111-aaaa-4aaa-8aaa-000000000005');
-INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
-VALUES
-  ('11111111-aaaa-4aaa-8aaa-000000000004', 'aaaa0000-0000-4000-8000-000000000001',
-   'dave', 'Dave', 'pk-dave', 'sid-dave', 'chat-dave'),
-  ('11111111-aaaa-4aaa-8aaa-000000000005', 'aaaa0000-0000-4000-8000-000000000001',
-   'erin', 'Erin', 'pk-erin', 'sid-erin', 'chat-erin');
-
-SET LOCAL ROLE authenticated;
-DO $$ BEGIN PERFORM set_config('request.jwt.claims',
-  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000004","role":"authenticated"}', true); END $$;
-
-DO $$
-BEGIN
-  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
-  VALUES ('aaaa1111-0000-4000-8000-000000000002', 'first', 'n', 's', 1);
-  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
-  VALUES ('aaaa1111-0000-4000-8000-000000000002', 'second', 'n', 's', 1);
-  BEGIN
-    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
-    VALUES ('aaaa1111-0000-4000-8000-000000000002', 'third', 'n', 's', 1);
-    RAISE EXCEPTION 'FAIL: a third message passed a channel quota of 2';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'quota_exceeded' THEN RAISE; END IF;
-  END;
-  RAISE NOTICE 'ok  the server default channel quota is enforced';
-END $$;
-
--- The budget is per (member, channel): a full #metered must not have spent
--- anything in a channel that sets its own number.
-DO $$
-BEGIN
-  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
-  VALUES ('aaaa1111-0000-4000-8000-000000000003', 'announce', 'n', 's', 1);
-  BEGIN
-    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
-    VALUES ('aaaa1111-0000-4000-8000-000000000003', 'announce2', 'n', 's', 1);
-    RAISE EXCEPTION 'FAIL: a second message passed a channel override of 1';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'quota_exceeded' THEN RAISE; END IF;
-  END;
-  RAISE NOTICE 'ok  a per-channel quota overrides the server default';
-END $$;
-
--- An edit is not a new message and must not cost quota — the rule central
--- states by having its edit path bypass send_dm().
-DO $$
-BEGIN
-  UPDATE messages SET ciphertext = 'edited-at-the-wall'
-   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003'
-     AND sender_id  = '11111111-aaaa-4aaa-8aaa-000000000004';
-  RAISE NOTICE 'ok  editing still works with the quota spent';
-END $$;
-
--- Erin has her own budget in the channel dave just filled.
-DO $$ BEGIN PERFORM set_config('request.jwt.claims',
-  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000005","role":"authenticated"}', true); END $$;
-DO $$
-BEGIN
-  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
-  VALUES ('aaaa1111-0000-4000-8000-000000000002', 'erins-own-budget', 'n', 's', 1);
-  RAISE NOTICE 'ok  a quota is per member, not a channel-wide total';
-END $$;
-
--- Alpha allows 1 DM/day, across every conversation rather than per peer.
-DO $$
-BEGIN
-  INSERT INTO dm_messages (recipient_id, ciphertext, nonce, signature, key_version)
-  VALUES ('11111111-aaaa-4aaa-8aaa-000000000004', 'dm-to-dave', 'n', 's', 1);
-  BEGIN
-    INSERT INTO dm_messages (recipient_id, ciphertext, nonce, signature, key_version)
-    VALUES ('11111111-aaaa-4aaa-8aaa-000000000001', 'dm-to-alice', 'n', 's', 1);
-    RAISE EXCEPTION 'FAIL: a second DM to a different peer passed a quota of 1';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'quota_exceeded' THEN RAISE; END IF;
-  END;
-  RAISE NOTICE 'ok  the DM quota spans the whole surface, like central''s';
-END $$;
-
--- The meter, from erin's seat: one channel message spent of two, DM spent.
-DO $$
-DECLARE r JSONB;
-BEGIN
-  r := chat_quota('aaaa1111-0000-4000-8000-000000000002');
-  IF (r->>'quota')::INT <> 2 OR (r->>'remaining')::INT <> 1 THEN
-    RAISE EXCEPTION 'FAIL: expected 1 of 2 left for erin, got %', r;
-  END IF;
-
-  r := chat_quota(NULL);
-  IF (r->>'quota')::INT <> 1 OR (r->>'remaining')::INT <> 0 THEN
-    RAISE EXCEPTION 'FAIL: expected erin''s DM quota spent, got %', r;
-  END IF;
-  RAISE NOTICE 'ok  chat_quota answers for channels and DMs alike';
-END $$;
-
--- Mallory is on Beta, which set nothing: unlimited must read as quota 0 with a
--- NULL remaining, never as "0 left".
-DO $$ BEGIN PERFORM set_config('request.jwt.claims',
-  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
-DO $$
-DECLARE r JSONB;
-BEGIN
-  r := chat_quota('bbbb1111-0000-4000-8000-000000000001');
-  IF (r->>'quota')::INT <> 0 OR r->>'remaining' IS NOT NULL THEN
-    RAISE EXCEPTION 'FAIL: an unconfigured server should read unlimited, got %', r;
-  END IF;
-
-  BEGIN
-    PERFORM chat_quota('aaaa1111-0000-4000-8000-000000000001');
-    RAISE EXCEPTION 'FAIL: mallory read Alpha''s channel quota';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'not_a_member' THEN RAISE; END IF;
-  END;
-  RAISE NOTICE 'ok  unlimited is distinguishable from spent, and scoped per server';
-END $$;
-
--- The retention sweep deletes history, so it must be unreachable from a member
--- session — it is in `app` precisely so PostgREST cannot expose it.
-DO $$
-BEGIN
-  BEGIN
-    PERFORM app.enforce_retention();
-    RAISE EXCEPTION 'FAIL: a member can run the retention sweep';
-  EXCEPTION WHEN insufficient_privilege THEN NULL;
-  END;
-  RAISE NOTICE 'ok  app.enforce_retention is out of a member''s reach';
-END $$;
-
--- And that it does what it claims when the operator asks for it. Back-dating
--- needs auth.uid() gone: attest_message() re-pins created_at on every UPDATE.
-RESET ROLE;
-DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
-UPDATE servers SET message_retention_days = 7, message_history_cap = 1
- WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
-UPDATE messages SET created_at = now() - interval '30 days'
- WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003';
+-- Four messages in each, so a cap of 2 and a cap of 1 are both visible.
+INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+SELECT c.id, '11111111-aaaa-4aaa-8aaa-000000000002', 'm' || g, 'n', 's', 1
+  FROM (VALUES ('aaaa1111-0000-4000-8000-000000000002'::UUID),
+               ('aaaa1111-0000-4000-8000-000000000003'::UUID),
+               ('aaaa1111-0000-4000-8000-000000000004'::UUID)) AS c(id),
+       generate_series(1, 4) AS g;
 
 DO $$
 DECLARE n INT;
@@ -732,21 +604,241 @@ BEGIN
   PERFORM app.enforce_retention();
 
   SELECT count(*) INTO n FROM messages
-   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003';
-  IF n <> 0 THEN RAISE EXCEPTION 'FAIL: aged messages survived, % left', n; END IF;
-
-  -- #metered held three, all inside the retention window, so only the cap
-  -- applies — and it keeps the newest one.
-  SELECT count(*) INTO n FROM messages
    WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000002';
-  IF n <> 1 THEN RAISE EXCEPTION 'FAIL: a history cap of 1 left % rows', n; END IF;
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a NULL cap should inherit the server''s 2, left %', n;
+  END IF;
 
-  -- Beta configured nothing, so its message must be untouched by a sweep that
-  -- ran for Alpha.
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a channel cap of 1 left % rows', n;
+  END IF;
+
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000004';
+  IF n <> 4 THEN
+    RAISE EXCEPTION 'FAIL: a channel cap of 0 should opt out, left %', n;
+  END IF;
+
+  RAISE NOTICE 'ok  a channel cap overrides, inherits on NULL, opts out on 0';
+END $$;
+
+-- Age, and the same three-way override. Back-dating needs auth.uid() gone:
+-- attest_message() re-pins created_at on every UPDATE.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+UPDATE messages SET created_at = now() - interval '10 days'
+ WHERE channel_id IN ('aaaa1111-0000-4000-8000-000000000003',
+                      'aaaa1111-0000-4000-8000-000000000004');
+
+DO $$
+DECLARE n INT;
+BEGIN
+  PERFORM app.enforce_retention();
+
+  -- #strict keeps 7 days, so a 10-day-old message goes even though Alpha's
+  -- own window of 30 days would have kept it.
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a channel window of 7 days left % rows at 10 days', n;
+  END IF;
+
+  -- #forever set 0, which means keep — even past the server's 30 days.
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000004';
+  IF n <> 4 THEN
+    RAISE EXCEPTION 'FAIL: a channel window of 0 should keep everything, left %', n;
+  END IF;
+
+  -- Beta configured nothing, so a sweep that ran for Alpha must not touch it.
   IF NOT EXISTS (SELECT 1 FROM messages WHERE id = 9002) THEN
     RAISE EXCEPTION 'FAIL: retention crossed into a server that set none';
   END IF;
-  RAISE NOTICE 'ok  retention trims by age and cap, per server, opt-in only';
+
+  RAISE NOTICE 'ok  a channel window overrides the server''s, per server';
+END $$;
+
+-- DMs have no per-channel equivalent, so they take the server's cap. It counts
+-- both people together — a conversation is one bucket seen from either side.
+INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+VALUES
+  ('11111111-aaaa-4aaa-8aaa-000000000002', '11111111-aaaa-4aaa-8aaa-000000000001', 'd1', 'n', 's', 1),
+  ('11111111-aaaa-4aaa-8aaa-000000000001', '11111111-aaaa-4aaa-8aaa-000000000002', 'd2', 'n', 's', 1),
+  ('11111111-aaaa-4aaa-8aaa-000000000002', '11111111-aaaa-4aaa-8aaa-000000000001', 'd3', 'n', 's', 1);
+
+DO $$
+DECLARE n INT;
+BEGIN
+  PERFORM app.enforce_retention();
+  SELECT count(*) INTO n FROM dm_messages
+   WHERE LEAST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000001'
+     AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a DM cap of 2 across both directions left % rows', n;
+  END IF;
+  RAISE NOTICE 'ok  the DM cap counts a conversation, not a sender';
+END $$;
+
+-- ── Attachments the messages left behind ────────────────────
+-- app.orphaned_attachments finds blobs with no message, without any linkage —
+-- an object is named for the scope it was uploaded to, and anything older than
+-- the oldest surviving message of that scope belonged to one that is gone.
+
+INSERT INTO storage.objects (bucket_id, name, owner, created_at) VALUES
+  -- Under #forever, which kept all four of its messages: this one predates
+  -- them, so it belonged to something already deleted.
+  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000004/old.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '40 days'),
+  -- Under the same scope but newer than the surviving messages: keep.
+  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000004/live.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 hours'),
+  -- The case the margin exists for. An attachment is uploaded *before* the
+  -- message that carries its key, so a blob belonging to the OLDEST surviving
+  -- message is itself older than the watermark. Without the margin this is
+  -- swept on every run, quietly emptying the oldest message in every channel.
+  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000004/watermark.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002',
+   (SELECT MIN(created_at) - interval '4 seconds' FROM messages
+     WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000004')),
+  -- #strict has nothing left at all, so everything under it is orphaned.
+  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000003/gone.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '3 hours'),
+  -- A channel that no longer exists.
+  ('chat-attachments', 'cccc1111-0000-4000-8000-000000000009/dead.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '3 hours'),
+  -- Uploaded moments ago: its message may still be in flight, so the grace
+  -- period must protect it even though its scope has no messages.
+  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000003/inflight.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 minutes');
+
+DO $$
+DECLARE found TEXT[];
+BEGIN
+  SELECT array_agg(object_name ORDER BY object_name)
+    INTO found FROM app.orphaned_attachments();
+
+  IF NOT ('aaaa1111-0000-4000-8000-000000000004/old.bin' = ANY(found)) THEN
+    RAISE EXCEPTION 'FAIL: a blob older than every surviving message was kept';
+  END IF;
+  IF 'aaaa1111-0000-4000-8000-000000000004/live.bin' = ANY(found) THEN
+    RAISE EXCEPTION 'FAIL: a blob newer than the surviving messages was swept';
+  END IF;
+  IF NOT ('aaaa1111-0000-4000-8000-000000000003/gone.bin' = ANY(found)) THEN
+    RAISE EXCEPTION 'FAIL: a blob in an emptied channel was kept';
+  END IF;
+  IF NOT ('cccc1111-0000-4000-8000-000000000009/dead.bin' = ANY(found)) THEN
+    RAISE EXCEPTION 'FAIL: a blob of a deleted channel was kept';
+  END IF;
+  IF 'aaaa1111-0000-4000-8000-000000000003/inflight.bin' = ANY(found) THEN
+    RAISE EXCEPTION 'FAIL: the grace period did not protect an in-flight upload';
+  END IF;
+  IF 'aaaa1111-0000-4000-8000-000000000004/watermark.bin' = ANY(found) THEN
+    RAISE EXCEPTION
+      'FAIL: swept the attachment of the oldest surviving message — a blob is '
+      'uploaded before its message, so the margin has to cover that';
+  END IF;
+  RAISE NOTICE 'ok  orphaned blobs are found without any message→blob linkage';
+END $$;
+
+-- A DM scope is the client's conversation context with colons swapped for
+-- underscores. If this drifts from DmCubit.conversationContext, every DM
+-- attachment silently reads as orphaned — which would delete live ones.
+UPDATE dm_messages SET created_at = now() - interval '6 hours'
+ WHERE LEAST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000001'
+   AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
+
+INSERT INTO storage.objects (bucket_id, name, owner, created_at) VALUES
+  ('chat-attachments',
+   'dm_11111111-aaaa-4aaa-8aaa-000000000001_11111111-aaaa-4aaa-8aaa-000000000002/live.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 hours');
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM app.orphaned_attachments()
+     WHERE object_name LIKE 'dm\_%live.bin'
+  ) THEN
+    RAISE EXCEPTION
+      'FAIL: a live DM attachment read as orphaned — the scope format drifted '
+      'from DmCubit.conversationContext';
+  END IF;
+  RAISE NOTICE 'ok  the DM scope format matches what the client uploads under';
+END $$;
+
+-- The sweep deletes history, so it must be unreachable from a member session —
+-- both functions are in `app` precisely so PostgREST cannot expose them.
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM app.enforce_retention();
+    RAISE EXCEPTION 'FAIL: a member can run the retention sweep';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM 1 FROM app.orphaned_attachments();
+    RAISE EXCEPTION 'FAIL: a member can list orphaned attachments';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- This one *is* in `public`, so PostgREST exposes it. The grant is the only
+  -- thing standing between a member and a history sweep.
+  BEGIN
+    PERFORM sweep_attachments();
+    RAISE EXCEPTION 'FAIL: a member can call sweep_attachments';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  the sweep functions are out of a member''s reach';
+END $$;
+
+-- ── Who may delete an attachment ────────────────────────────
+-- storage.protect_delete() refuses direct DELETE on storage.objects unless the
+-- Storage API's GUC is set — so set it, exactly as the API does, and the RLS
+-- policy underneath becomes testable.
+SET LOCAL storage.allow_delete_query = 'true';
+
+DO $$
+BEGIN
+  -- Bob uploaded these, so deleting his own message's files is his to do.
+  DELETE FROM storage.objects
+   WHERE name = 'aaaa1111-0000-4000-8000-000000000004/live.bin';
+  IF EXISTS (SELECT 1 FROM storage.objects
+              WHERE name = 'aaaa1111-0000-4000-8000-000000000004/live.bin') THEN
+    RAISE EXCEPTION 'FAIL: an uploader cannot delete their own attachment';
+  END IF;
+  RAISE NOTICE 'ok  an uploader can delete the files of a message they delete';
+END $$;
+
+-- Mallory is on Beta and owns nothing here.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  DELETE FROM storage.objects
+   WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin';
+  IF NOT EXISTS (SELECT 1 FROM storage.objects
+                  WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin') THEN
+    RAISE EXCEPTION 'FAIL: a stranger deleted someone else''s attachment';
+  END IF;
+  RAISE NOTICE 'ok  attachments are not deletable by whoever feels like it';
+END $$;
+
+-- Alice manages channels, so she may remove the files of a message she is
+-- allowed to remove.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  DELETE FROM storage.objects
+   WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin';
+  IF EXISTS (SELECT 1 FROM storage.objects
+              WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin') THEN
+    RAISE EXCEPTION 'FAIL: a channel manager cannot remove an attachment';
+  END IF;
+  RAISE NOTICE 'ok  a moderator can remove the files of a message they delete';
 END $$;
 
 RESET ROLE;
