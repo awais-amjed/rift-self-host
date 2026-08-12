@@ -7,7 +7,7 @@
 -- silently — most of all the ones that assert a *denial*, because a policy that
 -- accidentally permits looks exactly like a working app.
 --
--- Run against a database with 001–006 applied:
+-- Run against a database with 001–007 applied:
 --
 --   docker exec -i supabase-db psql -U postgres -v ON_ERROR_STOP=1 \
 --     -f - < self_hosted_server_migrations/tests/policies_test.sql
@@ -558,6 +558,195 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
   RAISE NOTICE 'ok  a ban applies from the next statement, not the next token';
+END $$;
+
+-- ============================================================
+-- 11. Operator limits
+-- ============================================================
+-- Migration 007. Every limit defaults to 0 = off, so the cases that matter are
+-- the ones that turn one on: a quota that is never reached proves nothing, and
+-- a quota that silently fails to apply looks exactly like a working app.
+
+-- Fresh fixtures rather than the shared ones: earlier sections have been
+-- posting as alice and bob all file, so their 24-hour counts are whatever the
+-- tests above happened to leave. A quota test that starts from an unknown
+-- number is a quota test that passes for the wrong reason.
+RESET ROLE;
+UPDATE users SET is_banned = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+
+-- Alpha: 2 channel messages/day by default, 1 DM/day. Beta sets nothing, so
+-- "the limit is this server's, not the schema's" stays testable.
+UPDATE servers SET default_channel_daily_quota = 2, dm_daily_quota = 1
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+-- #metered inherits the default; #announcements tightens it to 1.
+INSERT INTO channels (id, server_id, name, channel_type, daily_quota) VALUES
+  ('aaaa1111-0000-4000-8000-000000000002', 'aaaa0000-0000-4000-8000-000000000001',
+   'metered', 'text', NULL),
+  ('aaaa1111-0000-4000-8000-000000000003', 'aaaa0000-0000-4000-8000-000000000001',
+   'announcements', 'text', 1);
+
+-- Dave and erin start with no messages and no DMs at all.
+INSERT INTO auth.users (id) VALUES
+  ('11111111-aaaa-4aaa-8aaa-000000000004'),
+  ('11111111-aaaa-4aaa-8aaa-000000000005');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES
+  ('11111111-aaaa-4aaa-8aaa-000000000004', 'aaaa0000-0000-4000-8000-000000000001',
+   'dave', 'Dave', 'pk-dave', 'sid-dave', 'chat-dave'),
+  ('11111111-aaaa-4aaa-8aaa-000000000005', 'aaaa0000-0000-4000-8000-000000000001',
+   'erin', 'Erin', 'pk-erin', 'sid-erin', 'chat-erin');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000004","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-000000000002', 'first', 'n', 's', 1);
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-000000000002', 'second', 'n', 's', 1);
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+    VALUES ('aaaa1111-0000-4000-8000-000000000002', 'third', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a third message passed a channel quota of 2';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'quota_exceeded' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  the server default channel quota is enforced';
+END $$;
+
+-- The budget is per (member, channel): a full #metered must not have spent
+-- anything in a channel that sets its own number.
+DO $$
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-000000000003', 'announce', 'n', 's', 1);
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+    VALUES ('aaaa1111-0000-4000-8000-000000000003', 'announce2', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a second message passed a channel override of 1';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'quota_exceeded' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a per-channel quota overrides the server default';
+END $$;
+
+-- An edit is not a new message and must not cost quota — the rule central
+-- states by having its edit path bypass send_dm().
+DO $$
+BEGIN
+  UPDATE messages SET ciphertext = 'edited-at-the-wall'
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003'
+     AND sender_id  = '11111111-aaaa-4aaa-8aaa-000000000004';
+  RAISE NOTICE 'ok  editing still works with the quota spent';
+END $$;
+
+-- Erin has her own budget in the channel dave just filled.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000005","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-000000000002', 'erins-own-budget', 'n', 's', 1);
+  RAISE NOTICE 'ok  a quota is per member, not a channel-wide total';
+END $$;
+
+-- Alpha allows 1 DM/day, across every conversation rather than per peer.
+DO $$
+BEGIN
+  INSERT INTO dm_messages (recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000004', 'dm-to-dave', 'n', 's', 1);
+  BEGIN
+    INSERT INTO dm_messages (recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000001', 'dm-to-alice', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a second DM to a different peer passed a quota of 1';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'quota_exceeded' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  the DM quota spans the whole surface, like central''s';
+END $$;
+
+-- The meter, from erin's seat: one channel message spent of two, DM spent.
+DO $$
+DECLARE r JSONB;
+BEGIN
+  r := chat_quota('aaaa1111-0000-4000-8000-000000000002');
+  IF (r->>'quota')::INT <> 2 OR (r->>'remaining')::INT <> 1 THEN
+    RAISE EXCEPTION 'FAIL: expected 1 of 2 left for erin, got %', r;
+  END IF;
+
+  r := chat_quota(NULL);
+  IF (r->>'quota')::INT <> 1 OR (r->>'remaining')::INT <> 0 THEN
+    RAISE EXCEPTION 'FAIL: expected erin''s DM quota spent, got %', r;
+  END IF;
+  RAISE NOTICE 'ok  chat_quota answers for channels and DMs alike';
+END $$;
+
+-- Mallory is on Beta, which set nothing: unlimited must read as quota 0 with a
+-- NULL remaining, never as "0 left".
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE r JSONB;
+BEGIN
+  r := chat_quota('bbbb1111-0000-4000-8000-000000000001');
+  IF (r->>'quota')::INT <> 0 OR r->>'remaining' IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: an unconfigured server should read unlimited, got %', r;
+  END IF;
+
+  BEGIN
+    PERFORM chat_quota('aaaa1111-0000-4000-8000-000000000001');
+    RAISE EXCEPTION 'FAIL: mallory read Alpha''s channel quota';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_a_member' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  unlimited is distinguishable from spent, and scoped per server';
+END $$;
+
+-- The retention sweep deletes history, so it must be unreachable from a member
+-- session — it is in `app` precisely so PostgREST cannot expose it.
+DO $$
+BEGIN
+  BEGIN
+    PERFORM app.enforce_retention();
+    RAISE EXCEPTION 'FAIL: a member can run the retention sweep';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  app.enforce_retention is out of a member''s reach';
+END $$;
+
+-- And that it does what it claims when the operator asks for it. Back-dating
+-- needs auth.uid() gone: attest_message() re-pins created_at on every UPDATE.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+UPDATE servers SET message_retention_days = 7, message_history_cap = 1
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+UPDATE messages SET created_at = now() - interval '30 days'
+ WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003';
+
+DO $$
+DECLARE n INT;
+BEGIN
+  PERFORM app.enforce_retention();
+
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000003';
+  IF n <> 0 THEN RAISE EXCEPTION 'FAIL: aged messages survived, % left', n; END IF;
+
+  -- #metered held three, all inside the retention window, so only the cap
+  -- applies — and it keeps the newest one.
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000002';
+  IF n <> 1 THEN RAISE EXCEPTION 'FAIL: a history cap of 1 left % rows', n; END IF;
+
+  -- Beta configured nothing, so its message must be untouched by a sweep that
+  -- ran for Alpha.
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE id = 9002) THEN
+    RAISE EXCEPTION 'FAIL: retention crossed into a server that set none';
+  END IF;
+  RAISE NOTICE 'ok  retention trims by age and cap, per server, opt-in only';
 END $$;
 
 RESET ROLE;
