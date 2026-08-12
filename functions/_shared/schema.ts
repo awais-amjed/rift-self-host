@@ -6,6 +6,13 @@ const DBSchema = {
     name: "name",
     iconUrl: "icon_url",
     livekitUrl: "livekit_url",
+    // Operator limits (migration 007). All default to 0 = no limit except the
+    // attachment cap, which is a size and therefore has a real default.
+    maxAttachmentBytes: "max_attachment_bytes",
+    defaultChannelDailyQuota: "default_channel_daily_quota",
+    dmDailyQuota: "dm_daily_quota",
+    messageRetentionDays: "message_retention_days",
+    messageHistoryCap: "message_history_cap",
   },
   // Split out of `servers` so the rest of that row can be read directly by
   // members under RLS. This table has no grant and no policy: the service role
@@ -53,6 +60,8 @@ const DBSchema = {
     serverId: "server_id",
     name: "name",
     channelType: "channel_type",
+    // NULL inherits servers.default_channel_daily_quota; 0 opts out of it.
+    dailyQuota: "daily_quota",
   },
   invites: {
     tableName: "invites",

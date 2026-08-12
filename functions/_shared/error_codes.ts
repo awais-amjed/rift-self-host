@@ -57,6 +57,9 @@ export const CHAT_KEY_INVALID   = "chat_key_invalid";   // chat_public_key not v
 // ── Permissions ───────────────────────────────────────────────────────────────
 export const PERMISSION_DENIED = "permission_denied";
 
+// ── Operator limits ───────────────────────────────────────────────────────────
+export const LIMIT_INVALID = "limit_invalid"; // a limit is negative, or the size cap is out of range
+
 // ── Generic ───────────────────────────────────────────────────────────────────
 export const MISSING_FIELDS    = "missing_fields";
 export const DB_ERROR          = "db_error";       // unexpected database error
