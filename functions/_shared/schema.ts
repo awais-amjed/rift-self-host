@@ -12,6 +12,11 @@ const DBSchema = {
     maxAttachmentBytes: "max_attachment_bytes",
     messageRetentionDays: "message_retention_days",
     messageHistoryCap: "message_history_cap",
+    // DM overrides (migration 009). Nullable like the channel-level columns,
+    // because they override rather than set the base case: NULL inherits the
+    // two above, 0 opts DMs out of a server-wide sweep.
+    dmRetentionDays: "dm_retention_days",
+    dmHistoryCap: "dm_history_cap",
   },
   // Split out of `servers` so the rest of that row can be read directly by
   // members under RLS. This table has no grant and no policy: the service role

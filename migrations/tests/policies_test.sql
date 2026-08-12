@@ -7,7 +7,7 @@
 -- silently — most of all the ones that assert a *denial*, because a policy that
 -- accidentally permits looks exactly like a working app.
 --
--- Run against a database with 001–008 applied:
+-- Run against a database with 001–009 applied:
 --
 --   docker exec -i supabase-db psql -U postgres -v ON_ERROR_STOP=1 \
 --     -f - < self_hosted_server_migrations/tests/policies_test.sql
@@ -679,6 +679,150 @@ BEGIN
   END IF;
   RAISE NOTICE 'ok  the DM cap counts a conversation, not a sender';
 END $$;
+
+-- ── DMs get the channels' override ──────────────────────────
+-- Migration 009. Same three-valued rule as a channel's columns, on `servers`
+-- because a DM has no single row to hang a setting off — and because a
+-- conversation belongs to two people, neither of whom should be deciding how
+-- long the other's messages survive.
+
+DO $$
+DECLARE n INT;
+BEGIN
+  -- Alpha's server-wide cap is 2 and the pair currently sits at it. A DM cap of
+  -- 1 has to win.
+  UPDATE servers SET dm_history_cap = 1
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  PERFORM app.enforce_retention();
+
+  SELECT count(*) INTO n FROM dm_messages
+   WHERE LEAST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000001'
+     AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a DM cap of 1 should beat the server''s 2, left %', n;
+  END IF;
+
+  -- And the channels must not have moved: overriding DMs overrides only DMs.
+  SELECT count(*) INTO n FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000002';
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a DM override changed a channel, left % rows', n;
+  END IF;
+
+  RAISE NOTICE 'ok  a DM cap overrides the server''s, and only for DMs';
+END $$;
+
+DO $$
+DECLARE n INT;
+BEGIN
+  -- 0 is the whole point of the feature: trim the channels, keep the DMs.
+  UPDATE servers SET dm_history_cap = 0
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  SELECT '11111111-aaaa-4aaa-8aaa-000000000002', '11111111-aaaa-4aaa-8aaa-000000000001',
+         'k' || g, 'n', 's', 1
+    FROM generate_series(1, 3) AS g;
+  PERFORM app.enforce_retention();
+
+  SELECT count(*) INTO n FROM dm_messages
+   WHERE LEAST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000001'
+     AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
+  IF n <> 4 THEN
+    RAISE EXCEPTION 'FAIL: a DM cap of 0 should opt out of the server''s 2, left %', n;
+  END IF;
+  RAISE NOTICE 'ok  a DM cap of 0 opts out of a server-wide cap';
+END $$;
+
+-- Age, and the same three-way override. Back-dating needs auth.uid() gone.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+UPDATE dm_messages SET created_at = now() - interval '10 days'
+ WHERE LEAST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000001'
+   AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
+
+DO $$
+DECLARE n INT;
+BEGIN
+  -- Alpha's window is 30 days, so at 10 days these survive on the server's
+  -- number. A DM window of 7 has to take them.
+  UPDATE servers SET dm_retention_days = 7
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  PERFORM app.enforce_retention();
+
+  SELECT count(*) INTO n FROM dm_messages
+   WHERE LEAST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000001'
+     AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a DM window of 7 days left % rows at 10 days', n;
+  END IF;
+  RAISE NOTICE 'ok  a DM window overrides the server''s';
+END $$;
+
+DO $$
+DECLARE n INT;
+BEGIN
+  -- The mirror image, and the case an operator actually asks for: sweep the
+  -- channels by age, exempt the DMs.
+  UPDATE servers SET message_retention_days = 5, dm_retention_days = 0
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  INSERT INTO dm_messages (created_at, sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES (now() - interval '10 days',
+          '11111111-aaaa-4aaa-8aaa-000000000002', '11111111-aaaa-4aaa-8aaa-000000000001',
+          'exempt', 'n', 's', 1);
+  INSERT INTO messages (created_at, channel_id, sender_id, ciphertext, nonce, signature, key_version)
+  VALUES (now() - interval '10 days', 'aaaa1111-0000-4000-8000-000000000002',
+          '11111111-aaaa-4aaa-8aaa-000000000002', 'swept', 'n', 's', 1);
+
+  PERFORM app.enforce_retention();
+
+  SELECT count(*) INTO n FROM dm_messages WHERE ciphertext = 'exempt';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a DM window of 0 should exempt DMs from the server''s 5 days';
+  END IF;
+
+  SELECT count(*) INTO n FROM messages WHERE ciphertext = 'swept';
+  IF n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: exempting DMs also exempted the channels';
+  END IF;
+
+  RAISE NOTICE 'ok  DMs opt out by age while the channels are still swept';
+END $$;
+
+-- Beta needs a second member before it can have a conversation of its own to
+-- protect: the shared fixtures give it only mallory, and `sender_id <>
+-- recipient_id` rules out talking to yourself.
+INSERT INTO auth.users (id) VALUES ('22222222-bbbb-4bbb-8bbb-000000000002');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES ('22222222-bbbb-4bbb-8bbb-000000000002', 'bbbb0000-0000-4000-8000-000000000001',
+        'niles', 'Niles', 'pk-niles', 'sid-niles', 'chat-niles');
+INSERT INTO dm_messages (created_at, sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+VALUES (now() - interval '10 days',
+        '22222222-bbbb-4bbb-8bbb-000000000001', '22222222-bbbb-4bbb-8bbb-000000000002',
+        'beta-dm', 'n', 's', 1);
+
+DO $$
+BEGIN
+  PERFORM app.enforce_retention();
+
+  -- Beta set none of this, and a column written on Alpha must stay on Alpha.
+  IF EXISTS (SELECT 1 FROM servers
+              WHERE id = 'bbbb0000-0000-4000-8000-000000000001'
+                AND (dm_retention_days IS NOT NULL OR dm_history_cap IS NOT NULL)) THEN
+    RAISE EXCEPTION 'FAIL: a DM override leaked onto another server';
+  END IF;
+
+  -- Ten days old, which Alpha's 5-day window would have taken. Beta configured
+  -- nothing, so the same run must leave it standing.
+  IF NOT EXISTS (SELECT 1 FROM dm_messages WHERE ciphertext = 'beta-dm') THEN
+    RAISE EXCEPTION 'FAIL: a DM sweep crossed into a server that set none';
+  END IF;
+
+  RAISE NOTICE 'ok  a DM override belongs to one server';
+END $$;
+
+-- Back to inheriting, so the sections below see the 007 numbers they expect.
+UPDATE servers SET message_retention_days = 30, dm_retention_days = NULL, dm_history_cap = NULL
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
 
 -- ── A bucket per server ─────────────────────────────────────
 -- Migration 008. `file_size_limit` is a property of a bucket, so a shared one
