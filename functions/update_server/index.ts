@@ -14,6 +14,11 @@ const supabase = createClient(
 /** Storage refuses an object larger than this, so a cap past it can't be met. */
 const MAX_ATTACHMENT_CEILING = 524288000; // 500 MB
 
+// Nothing here touches storage. Each server owns a `chat-<serverId>` bucket and
+// a trigger on `servers` moves that bucket's file_size_limit whenever the
+// column changes (migration 008) — in the same statement, so it cannot be
+// skipped or raced. This endpoint only has to write the row.
+
 /**
  * The operator limits from migration 007, as (request field → column) pairs.
  *
@@ -23,8 +28,6 @@ const MAX_ATTACHMENT_CEILING = 524288000; // 500 MB
  */
 const LIMIT_FIELDS = [
   { key: "max_attachment_bytes", column: DBSchema.servers.maxAttachmentBytes, min: 1, max: MAX_ATTACHMENT_CEILING },
-  { key: "default_channel_daily_quota", column: DBSchema.servers.defaultChannelDailyQuota, min: 0 },
-  { key: "dm_daily_quota", column: DBSchema.servers.dmDailyQuota, min: 0 },
   { key: "message_retention_days", column: DBSchema.servers.messageRetentionDays, min: 0 },
   { key: "message_history_cap", column: DBSchema.servers.messageHistoryCap, min: 0 },
 ] as const;
@@ -36,33 +39,6 @@ const SERVER_SELECT = [
   DBSchema.servers.livekitUrl,
   ...LIMIT_FIELDS.map((f) => f.column),
 ].join(", ");
-
-/**
- * Push the largest configured cap onto the shared `chat-attachments` bucket.
- *
- * The column on `servers` is what the client reads to refuse a file before
- * uploading it; this is what makes the cap true for a client that doesn't
- * bother asking. It has to be the MAX across servers because one Supabase
- * project can host several of them and they share the bucket — a stricter
- * server's limit is still enforced, by its own trigger-free path: the client
- * check plus the fact that nobody else's messages reference its blobs.
- *
- * Best-effort on purpose. A bucket that won't update is a weaker ceiling, not
- * a reason to refuse an admin's settings change.
- */
-async function mirrorAttachmentCap(): Promise<void> {
-  const { data, error } = await supabase
-    .from(DBSchema.servers.tableName)
-    .select(DBSchema.servers.maxAttachmentBytes);
-  if (error || !data?.length) return;
-
-  const ceiling = Math.max(
-    ...data.map((r) => Number((r as Record<string, unknown>)[DBSchema.servers.maxAttachmentBytes] ?? 0)),
-  );
-  if (!Number.isFinite(ceiling) || ceiling <= 0) return;
-
-  await supabase.storage.updateBucket("chat-attachments", { fileSizeLimit: ceiling });
-}
 
 /** A `servers` row as the client reads it — snake_case, limits included. */
 function toServerResponse(row: Record<string, any> | null) {
@@ -178,12 +154,6 @@ Deno.serve(async (req) => {
     }
     if (!data) {
       return CustomResponse.error("Server not found", EC.SERVER_NOT_FOUND);
-    }
-
-    // After the row, not before: the bucket should follow what was actually
-    // saved, and a rejected update must not move the ceiling.
-    if (limitsGiven.some((f) => f.key === "max_attachment_bytes")) {
-      await mirrorAttachmentCap();
     }
 
     return CustomResponse.success(toServerResponse(data as Record<string, any>));

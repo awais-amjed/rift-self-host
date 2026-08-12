@@ -10,8 +10,6 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-const BUCKET = "chat-attachments";
-
 /** How many blobs one call will remove. A backlog is drained by calling again. */
 const BATCH = 1000;
 
@@ -50,14 +48,27 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error running the sweep", EC.DB_ERROR, error);
     }
 
-    const orphans = ((data as Record<string, unknown> | null)?.orphans ?? []) as string[];
+    const orphans = ((data as Record<string, unknown> | null)?.orphans ?? []) as Array<
+      { bucket: string; name: string }
+    >;
     if (orphans.length === 0) {
       return CustomResponse.success({ swept: 0, more: false });
     }
 
-    const { error: removeError } = await supabase.storage.from(BUCKET).remove(orphans);
-    if (removeError) {
-      return CustomResponse.error("Error removing attachments", EC.DB_ERROR, removeError);
+    // Each server owns its own bucket (migration 008), so a batch can span
+    // several of them on a project hosting more than one server.
+    const byBucket = new Map<string, string[]>();
+    for (const orphan of orphans) {
+      const names = byBucket.get(orphan.bucket) ?? [];
+      names.push(orphan.name);
+      byBucket.set(orphan.bucket, names);
+    }
+
+    for (const [bucket, names] of byBucket) {
+      const { error: removeError } = await supabase.storage.from(bucket).remove(names);
+      if (removeError) {
+        return CustomResponse.error("Error removing attachments", EC.DB_ERROR, removeError);
+      }
     }
 
     // `more` tells the caller the batch was full and another pass has work. A

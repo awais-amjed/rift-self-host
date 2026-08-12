@@ -7,7 +7,7 @@
 -- silently — most of all the ones that assert a *denial*, because a policy that
 -- accidentally permits looks exactly like a working app.
 --
--- Run against a database with 001–007 applied:
+-- Run against a database with 001–008 applied:
 --
 --   docker exec -i supabase-db psql -U postgres -v ON_ERROR_STOP=1 \
 --     -f - < self_hosted_server_migrations/tests/policies_test.sql
@@ -680,6 +680,47 @@ BEGIN
   RAISE NOTICE 'ok  the DM cap counts a conversation, not a sender';
 END $$;
 
+-- ── A bucket per server ─────────────────────────────────────
+-- Migration 008. `file_size_limit` is a property of a bucket, so a shared one
+-- could carry only a single number for the whole project — 007 mirrored the MAX
+-- across servers and accepted that a stricter server's cap was client-enforced
+-- only. A bucket each makes it exact, and the triggers are what keep it honest.
+
+RESET ROLE;
+DO $$
+DECLARE lim BIGINT;
+BEGIN
+  -- Both fixture servers should have been given one on INSERT.
+  SELECT file_size_limit INTO lim FROM storage.buckets
+   WHERE id = 'chat-aaaa0000-0000-4000-8000-000000000001';
+  IF lim IS NULL THEN
+    RAISE EXCEPTION 'FAIL: a new server did not get its own bucket';
+  END IF;
+  RAISE NOTICE 'ok  creating a server mints its attachment bucket';
+END $$;
+
+DO $$
+DECLARE alpha BIGINT; beta BIGINT;
+BEGIN
+  UPDATE servers SET max_attachment_bytes = 1048576
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  SELECT file_size_limit INTO alpha FROM storage.buckets
+   WHERE id = 'chat-aaaa0000-0000-4000-8000-000000000001';
+  IF alpha <> 1048576 THEN
+    RAISE EXCEPTION 'FAIL: the bucket did not follow the column, got %', alpha;
+  END IF;
+
+  -- The whole point: one server's cap is its own. Under the shared bucket this
+  -- was impossible to express.
+  SELECT file_size_limit INTO beta FROM storage.buckets
+   WHERE id = 'chat-bbbb0000-0000-4000-8000-000000000001';
+  IF beta = 1048576 THEN
+    RAISE EXCEPTION 'FAIL: changing Alpha''s cap moved Beta''s bucket too';
+  END IF;
+  RAISE NOTICE 'ok  a cap change moves that server''s bucket and no other';
+END $$;
+
 -- ── Attachments the messages left behind ────────────────────
 -- app.orphaned_attachments finds blobs with no message, without any linkage —
 -- an object is named for the scope it was uploaded to, and anything older than
@@ -688,28 +729,28 @@ END $$;
 INSERT INTO storage.objects (bucket_id, name, owner, created_at) VALUES
   -- Under #forever, which kept all four of its messages: this one predates
   -- them, so it belonged to something already deleted.
-  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000004/old.bin',
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000004/old.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '40 days'),
   -- Under the same scope but newer than the surviving messages: keep.
-  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000004/live.bin',
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000004/live.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 hours'),
   -- The case the margin exists for. An attachment is uploaded *before* the
   -- message that carries its key, so a blob belonging to the OLDEST surviving
   -- message is itself older than the watermark. Without the margin this is
   -- swept on every run, quietly emptying the oldest message in every channel.
-  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000004/watermark.bin',
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000004/watermark.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002',
    (SELECT MIN(created_at) - interval '4 seconds' FROM messages
      WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000004')),
   -- #strict has nothing left at all, so everything under it is orphaned.
-  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000003/gone.bin',
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000003/gone.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '3 hours'),
   -- A channel that no longer exists.
-  ('chat-attachments', 'cccc1111-0000-4000-8000-000000000009/dead.bin',
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'cccc1111-0000-4000-8000-000000000009/dead.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '3 hours'),
   -- Uploaded moments ago: its message may still be in flight, so the grace
   -- period must protect it even though its scope has no messages.
-  ('chat-attachments', 'aaaa1111-0000-4000-8000-000000000003/inflight.bin',
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000003/inflight.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 minutes');
 
 DO $$
@@ -749,7 +790,7 @@ UPDATE dm_messages SET created_at = now() - interval '6 hours'
    AND GREATEST(sender_id, recipient_id) = '11111111-aaaa-4aaa-8aaa-000000000002';
 
 INSERT INTO storage.objects (bucket_id, name, owner, created_at) VALUES
-  ('chat-attachments',
+  ('chat-aaaa0000-0000-4000-8000-000000000001',
    'dm_11111111-aaaa-4aaa-8aaa-000000000001_11111111-aaaa-4aaa-8aaa-000000000002/live.bin',
    '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 hours');
 
@@ -802,7 +843,12 @@ SET LOCAL storage.allow_delete_query = 'true';
 
 DO $$
 BEGIN
-  -- Bob uploaded these, so deleting his own message's files is his to do.
+  -- Bob uploaded these, so deleting his own message's files is his to do. He
+  -- can see his own server's bucket, so his own view is a fair check here.
+  IF NOT EXISTS (SELECT 1 FROM storage.objects
+                  WHERE name = 'aaaa1111-0000-4000-8000-000000000004/live.bin') THEN
+    RAISE EXCEPTION 'FAIL: a member cannot see their own server''s attachments';
+  END IF;
   DELETE FROM storage.objects
    WHERE name = 'aaaa1111-0000-4000-8000-000000000004/live.bin';
   IF EXISTS (SELECT 1 FROM storage.objects
@@ -812,19 +858,35 @@ BEGIN
   RAISE NOTICE 'ok  an uploader can delete the files of a message they delete';
 END $$;
 
--- Mallory is on Beta and owns nothing here.
+-- Mallory is on Beta. Before 008 every authenticated caller could read every
+-- object in the one shared bucket; now a bucket belongs to a server, so she can
+-- neither see Alpha's attachments nor delete them. Checked from the superuser
+-- afterwards, because her own view is exactly what is being denied — asking her
+-- "is it still there?" would read her blindness as a successful delete.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
 DO $$
 BEGIN
+  IF EXISTS (SELECT 1 FROM storage.objects
+              WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin') THEN
+    RAISE EXCEPTION 'FAIL: a member of another server can read these objects';
+  END IF;
   DELETE FROM storage.objects
    WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin';
+  RAISE NOTICE 'ok  another server''s attachments are invisible, not just undeletable';
+END $$;
+
+RESET ROLE;
+DO $$
+BEGIN
   IF NOT EXISTS (SELECT 1 FROM storage.objects
                   WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin') THEN
     RAISE EXCEPTION 'FAIL: a stranger deleted someone else''s attachment';
   END IF;
-  RAISE NOTICE 'ok  attachments are not deletable by whoever feels like it';
+  RAISE NOTICE 'ok  and the object really did survive the attempt';
 END $$;
+SET LOCAL ROLE authenticated;
+SET LOCAL storage.allow_delete_query = 'true';
 
 -- Alice manages channels, so she may remove the files of a message she is
 -- allowed to remove.

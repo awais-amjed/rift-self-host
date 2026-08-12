@@ -6,11 +6,10 @@ const DBSchema = {
     name: "name",
     iconUrl: "icon_url",
     livekitUrl: "livekit_url",
-    // Operator limits (migration 007). All default to 0 = no limit except the
-    // attachment cap, which is a size and therefore has a real default.
+    // Operator limits (migration 007). Both sweeps default to 0 = off; the
+    // attachment cap is a size and therefore has a real default. There is no
+    // daily message quota — a rate limit does not bound storage.
     maxAttachmentBytes: "max_attachment_bytes",
-    defaultChannelDailyQuota: "default_channel_daily_quota",
-    dmDailyQuota: "dm_daily_quota",
     messageRetentionDays: "message_retention_days",
     messageHistoryCap: "message_history_cap",
   },
@@ -60,8 +59,10 @@ const DBSchema = {
     serverId: "server_id",
     name: "name",
     channelType: "channel_type",
-    // NULL inherits servers.default_channel_daily_quota; 0 opts out of it.
-    dailyQuota: "daily_quota",
+    // Per-channel retention overrides. NULL inherits the server's number;
+    // 0 explicitly opts this channel out of a server-wide sweep.
+    retentionDays: "retention_days",
+    historyCap: "history_cap",
   },
   invites: {
     tableName: "invites",
