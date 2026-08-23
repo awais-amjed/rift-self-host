@@ -101,7 +101,16 @@ CREATE OR REPLACE FUNCTION moderate_user(
 DECLARE
   v_target users%ROWTYPE;
 BEGIN
-  IF NOT app.is_admin() THEN
+  -- Two permissions, because these are not the same act. Muting and deafening
+  -- are what a channel manager is *for* — they already move and disconnect
+  -- people — and gating them on admin meant the client offered buttons that
+  -- always came back not_authorized. Banning stays with admins: it ends
+  -- somebody's membership, which is the same weight as granting a role.
+  IF p_banned IS NOT NULL THEN
+    IF NOT app.is_admin() THEN
+      RAISE EXCEPTION 'not_authorized';
+    END IF;
+  ELSIF NOT app.can_manage_channels() THEN
     RAISE EXCEPTION 'not_authorized';
   END IF;
 
