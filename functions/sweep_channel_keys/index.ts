@@ -16,9 +16,12 @@ const supabase = createClient(
  * every text channel where the caller can do healing work —
  * - channels whose current key version the caller holds while other keyed
  *   members lack an entry (returns the caller's sealed key + the missing
- *   members' chat public keys), and
+ *   members' chat public keys),
  * - channels with no key at all (`key_version: 0`) so the caller can
- *   bootstrap v1.
+ *   bootstrap v1, and
+ * - channels whose current key was sealed to somebody since banned
+ *   (`rotate: true`), so the caller can mint the next version for the people
+ *   still here.
  * Clients run this on launch/server-select and when the key-sweep doorbell
  * rings, so a new member gets access as soon as any member is online.
  */
@@ -47,20 +50,32 @@ Deno.serve(async (req) => {
       return CustomResponse.success({ work: [] });
     }
 
-    // All keyed members of the server.
-    const { data: membersData, error: membersError } = await supabase
+    // Everyone on the server, banned included: the banned are not people to
+    // seal a key to, but they are exactly who makes a rotation due, so they
+    // have to be visible here rather than filtered away by the query.
+    const { data: usersData, error: membersError } = await supabase
       .from(DBSchema.users.tableName)
-      .select(`${DBSchema.users.id}, ${DBSchema.users.chatPublicKey}`)
+      .select(
+        `${DBSchema.users.id}, ${DBSchema.users.chatPublicKey},` +
+        ` ${DBSchema.users.isBanned}`,
+      )
       .eq(DBSchema.users.serverId, auth.serverId)
-      .eq(DBSchema.users.isBanned, false)
       .not(DBSchema.users.chatPublicKey, "is", null);
     if (membersError) {
       return CustomResponse.error("Error reading members", EC.DB_ERROR, membersError);
     }
-    const members = ((membersData ?? []) as Record<string, any>[]).map((m) => ({
-      user_id: m[DBSchema.users.id] as string,
-      chat_public_key: m[DBSchema.users.chatPublicKey] as string,
-    }));
+    const allUsers = (usersData ?? []) as Record<string, any>[];
+    const members = allUsers
+      .filter((m) => m[DBSchema.users.isBanned] !== true)
+      .map((m) => ({
+        user_id: m[DBSchema.users.id] as string,
+        chat_public_key: m[DBSchema.users.chatPublicKey] as string,
+      }));
+    const bannedIds = new Set(
+      allUsers
+        .filter((m) => m[DBSchema.users.isBanned] === true)
+        .map((m) => m[DBSchema.users.id] as string),
+    );
 
     // Whole keyring for those channels in one query.
     const { data: ringData, error: ringError } = await supabase
@@ -95,6 +110,7 @@ Deno.serve(async (req) => {
           work.push({
             channel_id: channelId,
             key_version: 0,
+            rotate: false,
             my_key: null,
             members_missing: members,
           });
@@ -113,10 +129,43 @@ Deno.serve(async (req) => {
       );
       const missing = members.filter((m) => !covered.has(m.user_id));
 
-      if (mine && missing.length > 0) {
+      if (!mine) continue;
+
+      // Rotation takes precedence over healing. A ban leaves the banned member
+      // holding the current key — the server can stop serving them, but it
+      // cannot take back what they already unwrapped — so everything sent
+      // under that key from now on has to move to a new one.
+      //
+      // Being sealed into the current version is itself the signal, and it
+      // clears itself: the next version is sealed only to people still here,
+      // so the same check comes back false once the rotation lands. No flag to
+      // set, and nothing to reset if an unban follows.
+      //
+      // The rotation supersedes healing rather than following it: it seals to
+      // every eligible member, so anyone who was missing an entry gets one out
+      // of the same pass.
+      const rotationDue = current.some(
+        (r) => bannedIds.has(r[DBSchema.channelKeyring.userId] as string),
+      );
+      if (rotationDue) {
         work.push({
           channel_id: channelId,
           key_version: currentVersion,
+          rotate: true,
+          // The next key is generated, not unwrapped, so there is nothing to
+          // hand back. Only a member who holds the current one is offered the
+          // job, so whoever rotates can still read what came before.
+          my_key: null,
+          members_missing: members,
+        });
+        continue;
+      }
+
+      if (missing.length > 0) {
+        work.push({
+          channel_id: channelId,
+          key_version: currentVersion,
+          rotate: false,
           my_key: {
             ephemeral_public_key: mine[DBSchema.channelKeyring.ephemeralPublicKey],
             ciphertext: mine[DBSchema.channelKeyring.ciphertext],
