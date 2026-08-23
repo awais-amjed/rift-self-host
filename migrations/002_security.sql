@@ -170,6 +170,22 @@ DROP POLICY IF EXISTS users_select_members ON users;
 CREATE POLICY users_select_members ON users FOR SELECT TO authenticated
   USING (server_id = app.server_id());
 
+-- You can always read your own row, even banned.
+--
+-- Every other policy here routes through app.server_id(), which returns NULL
+-- for a banned member — so a ban did not merely take their access away, it
+-- took away any way of finding out. The client had nothing to read and nothing
+-- to be told: the app simply stopped working, which is indistinguishable from
+-- being broken.
+--
+-- This is the one row that has to stay legible. It is their own, they could
+-- read it a moment ago, and `users` is in the realtime publication — so the
+-- UPDATE that bans them reaches them, and so does the one that lifts it, which
+-- is what lets a client recover without a restart.
+DROP POLICY IF EXISTS users_select_self ON users;
+CREATE POLICY users_select_self ON users FOR SELECT TO authenticated
+  USING (id = auth.uid());
+
 DROP POLICY IF EXISTS users_update_self ON users;
 CREATE POLICY users_update_self ON users FOR UPDATE TO authenticated
   USING (id = auth.uid() AND server_id = app.server_id())
