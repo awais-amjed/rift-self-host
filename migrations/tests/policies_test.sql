@@ -277,6 +277,20 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
+  -- The signing key is write-once, and that is load-bearing rather than
+  -- incidental. Every message carries a signature but not the key that made
+  -- it: readers verify against whatever `users.public_key` says *now*. So the
+  -- moment this column becomes writable, changing it silently invalidates
+  -- every message its owner has ever sent — and a failed signature is dropped
+  -- without being rendered, so the history would simply disappear with no
+  -- error anywhere. `chat_public_key` next door is deliberately writable,
+  -- which is exactly why this needs saying out loud.
+  BEGIN
+    UPDATE users SET public_key = 'AAAA' WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+    RAISE EXCEPTION 'FAIL: a member can replace their own signing key';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
   UPDATE users SET display_name = 'Pwned' WHERE id = '11111111-aaaa-4aaa-8aaa-000000000001';
   IF (SELECT display_name FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000001') = 'Pwned' THEN
     RAISE EXCEPTION 'FAIL: a member renamed someone else';
@@ -548,8 +562,19 @@ BEGIN
   IF EXISTS (SELECT 1 FROM messages) THEN
     RAISE EXCEPTION 'FAIL: a banned member can still read messages';
   END IF;
-  IF EXISTS (SELECT 1 FROM users) THEN
-    RAISE EXCEPTION 'FAIL: a banned member can still read the member list';
+  -- Their own row, and only their own. `users_select_self` exists so that a
+  -- ban can be *told* to the person it happened to: every other policy routes
+  -- through app.server_id(), which is null once banned, so without this the
+  -- client reads nothing at all and cannot tell being closed out from being
+  -- broken. It must stay this narrow — one row, theirs.
+  IF (SELECT count(*) FROM users) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a banned member sees % user rows, expected only their own',
+      (SELECT count(*) FROM users);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM users
+                  WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002'
+                    AND is_banned) THEN
+    RAISE EXCEPTION 'FAIL: the one row a banned member reads is not their own ban';
   END IF;
   BEGIN
     INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
