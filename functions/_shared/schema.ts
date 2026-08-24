@@ -69,6 +69,25 @@ const DBSchema = {
     retentionDays: "retention_days",
     historyCap: "history_cap",
   },
+  // Where each member's phones can be reached, and the credential this server
+  // rings them over (migration 010). `push_config` has no grant and no policy:
+  // the ring triggers read it as SECURITY DEFINER and no session can.
+  deviceTokens: {
+    tableName: "device_tokens",
+    token: "token",
+    userId: "user_id",
+    platform: "platform",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  },
+  pushConfig: {
+    tableName: "push_config",
+    serverId: "server_id",
+    endpoint: "endpoint",
+    relayId: "relay_id",
+    secret: "secret",
+    updatedAt: "updated_at",
+  },
   invites: {
     tableName: "invites",
     id: "id",
