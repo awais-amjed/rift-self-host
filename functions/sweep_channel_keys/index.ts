@@ -57,7 +57,7 @@ Deno.serve(async (req) => {
       .from(DBSchema.users.tableName)
       .select(
         `${DBSchema.users.id}, ${DBSchema.users.chatPublicKey},` +
-        ` ${DBSchema.users.isBanned}`,
+        ` ${DBSchema.users.isBanned}, ${DBSchema.users.isBot}`,
       )
       .eq(DBSchema.users.serverId, auth.serverId)
       // See get_channel_key: a bot is not a member awaiting a key, and a sweep
@@ -80,6 +80,11 @@ Deno.serve(async (req) => {
         .filter((m) => m[DBSchema.users.isBanned] === true)
         .map((m) => m[DBSchema.users.id] as string),
     );
+    const botIds = new Set(
+      allUsers
+        .filter((m) => m[DBSchema.users.isBot] === true)
+        .map((m) => m[DBSchema.users.id] as string),
+    );
 
     // Whole keyring for those channels in one query.
     const { data: ringData, error: ringError } = await supabase
@@ -97,6 +102,44 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error reading keyring", EC.DB_ERROR, ringError);
     }
     const ring = (ringData ?? []) as Record<string, any>[];
+
+    // Who may hold a key in each channel, and from which version (migration
+    // 017). A bot is keyed only where somebody granted it, and only forward of
+    // that grant — which is also what makes the two rotation signals below
+    // computable without a flag anybody has to remember to clear.
+    const { data: grantData, error: grantError } = await supabase
+      .from("bot_channel_keys")
+      .select("channel_id, bot_id, from_key_version")
+      .in("channel_id", channelIds);
+    if (grantError) {
+      return CustomResponse.error("Error reading bot grants", EC.DB_ERROR, grantError);
+    }
+    const grants = (grantData ?? []) as Record<string, any>[];
+    const grantFor = (channelId: string, botId: string) =>
+      grants.find(
+        (g) => g.channel_id === channelId && g.bot_id === botId,
+      ) as { from_key_version: number } | undefined;
+
+    /// Who a key for [channelId] at [version] may be sealed to: every member,
+    /// plus the bots granted this channel from at or below that version.
+    ///
+    /// The bots have to be added *per channel and per version*, which is why
+    /// this cannot just widen the `members` query — a grant is not a property
+    /// of the bot, it is a property of the pair, and it starts somewhere.
+    const eligibleFor = (channelId: string, version: number) => [
+      ...members,
+      ...allUsers
+        .filter((m) => {
+          if (m[DBSchema.users.isBot] !== true) return false;
+          if (m[DBSchema.users.isBanned] === true) return false;
+          const grant = grantFor(channelId, m[DBSchema.users.id] as string);
+          return grant !== undefined && version >= grant.from_key_version;
+        })
+        .map((m) => ({
+          user_id: m[DBSchema.users.id] as string,
+          chat_public_key: m[DBSchema.users.chatPublicKey] as string,
+        })),
+    ];
 
     const work: Record<string, any>[] = [];
     for (const channelId of channelIds) {
@@ -116,7 +159,7 @@ Deno.serve(async (req) => {
             key_version: 0,
             rotate: false,
             my_key: null,
-            members_missing: members,
+            members_missing: eligibleFor(channelId, 1),
           });
         }
         continue;
@@ -131,7 +174,9 @@ Deno.serve(async (req) => {
       const mine = current.find(
         (r) => r[DBSchema.channelKeyring.userId] === auth.userId,
       );
-      const missing = members.filter((m) => !covered.has(m.user_id));
+      const missing = eligibleFor(channelId, currentVersion).filter(
+        (m) => !covered.has(m.user_id),
+      );
 
       if (!mine) continue;
 
@@ -148,9 +193,33 @@ Deno.serve(async (req) => {
       // The rotation supersedes healing rather than following it: it seals to
       // every eligible member, so anyone who was missing an entry gets one out
       // of the same pass.
-      const rotationDue = current.some(
-        (r) => bannedIds.has(r[DBSchema.channelKeyring.userId] as string),
+      // Three signals, all self-clearing for the same reason: the next version
+      // is sealed only to whoever is eligible *then*, so each check comes back
+      // false once the rotation lands.
+      //
+      //   * a banned member still sealed into the current version (the
+      //     original);
+      //   * a bot still sealed into it whose grant has been revoked — the same
+      //     shape, for the same reason;
+      //   * a bot whose grant begins *above* the current version. That is a
+      //     grant just made, and the rotation is precisely what makes it
+      //     forward-only: without it the bot would be handed a key that opens
+      //     everything already said under it.
+      const revokedBotSealed = current.some((r) => {
+        const id = r[DBSchema.channelKeyring.userId] as string;
+        return botIds.has(id) && !grantFor(channelId, id);
+      });
+      const grantAwaitingRotation = grants.some(
+        (g) =>
+          g.channel_id === channelId &&
+          (g.from_key_version as number) > currentVersion,
       );
+      const rotationDue =
+        current.some(
+          (r) => bannedIds.has(r[DBSchema.channelKeyring.userId] as string),
+        ) ||
+        revokedBotSealed ||
+        grantAwaitingRotation;
       if (rotationDue) {
         work.push({
           channel_id: channelId,
@@ -160,7 +229,9 @@ Deno.serve(async (req) => {
           // hand back. Only a member who holds the current one is offered the
           // job, so whoever rotates can still read what came before.
           my_key: null,
-          members_missing: members,
+          // The version being sealed is the *next* one, which is what makes a
+          // just-granted bot eligible for it and a just-revoked one not.
+          members_missing: eligibleFor(channelId, currentVersion + 1),
         });
         continue;
       }

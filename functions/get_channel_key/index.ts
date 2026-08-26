@@ -75,16 +75,30 @@ Deno.serve(async (req) => {
     // When currentVersion is 0 this is every keyed member — the bootstrap set.
     const { data: membersData, error: membersError } = await supabase
       .from(DBSchema.users.tableName)
-      .select(`${DBSchema.users.id}, ${DBSchema.users.chatPublicKey}`)
+      .select(
+        `${DBSchema.users.id}, ${DBSchema.users.chatPublicKey},` +
+        ` ${DBSchema.users.isBot}`,
+      )
       .eq(DBSchema.users.serverId, auth.serverId)
       .eq(DBSchema.users.isBanned, false)
-      // Bots are never "missing" a key — they are not supposed to have one
-      // (BOTS.md §2). Without this the first member to open the channel would
-      // wrap it for them as a courtesy, having been asked to do nothing.
-      // `channel_keyring` refuses the row anyway (migration 014); this keeps
-      // clients from trying and reporting a failure they cannot act on.
-      .eq(DBSchema.users.isBot, false)
       .not(DBSchema.users.chatPublicKey, "is", null);
+
+    // Bots are not members awaiting a key: `channel_keyring` refuses them
+    // (migration 014), so offering one as "missing" would hand every client an
+    // insert the database is going to reject. The exception is a bot somebody
+    // explicitly granted this channel (017) — and even then only from the
+    // version the grant begins at, which is what keeps it out of the history it
+    // was not in the room for.
+    const { data: grantData } = await supabase
+      .from("bot_channel_keys")
+      .select("bot_id, from_key_version")
+      .eq("channel_id", channel_id);
+    const grants = (grantData ?? []) as Record<string, any>[];
+    const mayHoldKey = (row: Record<string, any>, version: number) => {
+      if (row[DBSchema.users.isBot] !== true) return true;
+      const grant = grants.find((g) => g.bot_id === row[DBSchema.users.id]);
+      return grant !== undefined && version >= (grant.from_key_version as number);
+    };
 
     if (membersError) {
       return CustomResponse.error("Error reading members", EC.DB_ERROR, membersError);
@@ -98,6 +112,7 @@ Deno.serve(async (req) => {
 
     const membersMissing = ((membersData ?? []) as Record<string, any>[])
       .filter((m) => !covered.has(m[DBSchema.users.id] as string))
+      .filter((m) => mayHoldKey(m, Math.max(currentVersion, 1)))
       .map((m) => ({
         user_id: m[DBSchema.users.id],
         chat_public_key: m[DBSchema.users.chatPublicKey],
