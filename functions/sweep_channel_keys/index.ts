@@ -60,6 +60,10 @@ Deno.serve(async (req) => {
         ` ${DBSchema.users.isBanned}`,
       )
       .eq(DBSchema.users.serverId, auth.serverId)
+      // See get_channel_key: a bot is not a member awaiting a key, and a sweep
+      // that offered one as work would hand every client an insert the
+      // database is going to refuse.
+      .eq(DBSchema.users.isBot, false)
       .not(DBSchema.users.chatPublicKey, "is", null);
     if (membersError) {
       return CustomResponse.error("Error reading members", EC.DB_ERROR, membersError);

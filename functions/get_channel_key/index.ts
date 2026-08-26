@@ -78,6 +78,12 @@ Deno.serve(async (req) => {
       .select(`${DBSchema.users.id}, ${DBSchema.users.chatPublicKey}`)
       .eq(DBSchema.users.serverId, auth.serverId)
       .eq(DBSchema.users.isBanned, false)
+      // Bots are never "missing" a key — they are not supposed to have one
+      // (BOTS.md §2). Without this the first member to open the channel would
+      // wrap it for them as a courtesy, having been asked to do nothing.
+      // `channel_keyring` refuses the row anyway (migration 014); this keeps
+      // clients from trying and reporting a failure they cannot act on.
+      .eq(DBSchema.users.isBot, false)
       .not(DBSchema.users.chatPublicKey, "is", null);
 
     if (membersError) {

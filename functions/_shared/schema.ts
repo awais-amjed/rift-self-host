@@ -44,6 +44,10 @@ const DBSchema = {
     isDeafened: "is_deafened",
     chatPublicKey: "chat_public_key",
     avatarPath: "avatar_path",
+    // A program, not a person (migration 014). Bots are filtered out of every
+    // key-distribution list below; the database refuses them a keyring entry
+    // regardless, so these filters save a round trip rather than enforce a rule.
+    isBot: "is_bot",
   },
   channelKeyring: {
     tableName: "channel_keyring",

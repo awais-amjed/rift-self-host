@@ -91,7 +91,7 @@ Deno.serve(async (req) => {
     const userIds = [...new Set(entries.map((e: Record<string, any>) => e.user_id as string))];
     const { data: usersData, error: usersError } = await supabase
       .from(DBSchema.users.tableName)
-      .select(DBSchema.users.id)
+      .select(`${DBSchema.users.id}, ${DBSchema.users.isBot}`)
       .eq(DBSchema.users.serverId, auth.serverId)
       .in(DBSchema.users.id, userIds);
 
@@ -100,6 +100,20 @@ Deno.serve(async (req) => {
     }
     if ((usersData ?? []).length !== userIds.length) {
       return CustomResponse.error("Unknown user in entries", EC.USER_NOT_FOUND);
+    }
+
+    // A bot may not hold a channel key (BOTS.md §2). `channel_keyring` refuses
+    // the row too, but a trigger raises for the whole statement — so one bot
+    // in a batch would fail the wrap for every real member beside it, and the
+    // client would see a database error rather than the reason. Refusing here
+    // names it, and does so before anything is written.
+    const bots = ((usersData ?? []) as Record<string, any>[])
+      .filter((u) => u[DBSchema.users.isBot] === true);
+    if (bots.length > 0) {
+      return CustomResponse.error(
+        "Channel keys cannot be wrapped for a bot",
+        EC.PERMISSION_DENIED,
+      );
     }
 
     const rows = entries.map((entry: Record<string, any>) => ({
