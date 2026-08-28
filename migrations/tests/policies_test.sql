@@ -60,17 +60,36 @@ VALUES
   ('22222222-bbbb-4bbb-8bbb-000000000001', 'bbbb0000-0000-4000-8000-000000000001',
    'mallory', 'Mallory', 'pk-mal', 'sid-mal', 'chat-mal', false, false, false);
 
-INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature, key_version) VALUES
-  (9001, 'aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000002',
-   'alpha-from-bob', 'n', 's', 1),
-  (9002, 'bbbb1111-0000-4000-8000-000000000001', '22222222-bbbb-4bbb-8bbb-000000000001',
-   'beta-from-mallory', 'n', 's', 1),
-  (9003, 'aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000001',
-   'alpha-from-alice', 'n', 's', 1);
+-- `attest_message` stamps `sender_id := auth.uid()` on every insert, so a
+-- fixture written as the superuser — who has no claim — came out with no sender
+-- at all, and 013's `messages_one_origin` refuses a row that is neither a
+-- person nor a webhook. Setting the claim per sender costs three lines and is
+-- worth more than disabling the trigger would be: these rows are then written
+-- exactly the way the app writes them, attestation included.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
 
-INSERT INTO dm_messages (id, sender_id, recipient_id, ciphertext, nonce, signature, key_version) VALUES
-  (8001, '11111111-aaaa-4aaa-8aaa-000000000002', '11111111-aaaa-4aaa-8aaa-000000000001',
-   'dm-bob-to-alice', 'n', 's', 1);
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9001, 'aaaa1111-0000-4000-8000-000000000001', 'alpha-from-bob', 'n', 's', 1);
+
+INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version) VALUES
+  (8001, '11111111-aaaa-4aaa-8aaa-000000000001', 'dm-bob-to-alice', 'n', 's', 1);
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9002, 'bbbb1111-0000-4000-8000-000000000001', 'beta-from-mallory', 'n', 's', 1);
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9003, 'aaaa1111-0000-4000-8000-000000000001', 'alpha-from-alice', 'n', 's', 1);
+
+-- Section 1 is about somebody with no session at all, so the fixtures do not
+-- get to leave one lying around.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '{}', true); END $$;
 
 -- ============================================================
 -- 1. The unauthenticated role
