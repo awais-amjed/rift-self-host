@@ -1690,5 +1690,74 @@ END $$;
 
 SET LOCAL ROLE authenticated;
 
+-- ---------- walking out ----------
+-- Leaving is not a manager's act. `set_channel_members` needs the manage bit,
+-- which is the right answer for who *else* is in a room and the wrong one for
+-- whether you are — so somebody added to a private channel could not get out of
+-- it without asking the person who put them there (023).
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_channel UUID; v_result JSONB;
+BEGIN
+  v_channel := (create_channel('exit-row', 'text', true,
+                  ARRAY['11111111-aaaa-4aaa-8aaa-000000000003']::UUID[])
+                ->>'id')::UUID;
+
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true);
+
+  -- Carol holds no manage bit here, which is the whole point of the test.
+  IF EXISTS (SELECT 1 FROM channel_members
+              WHERE channel_id = v_channel
+                AND user_id = '11111111-aaaa-4aaa-8aaa-000000000003'
+                AND can_manage) THEN
+    RAISE EXCEPTION 'FAIL: the fixture gave the leaver the manage bit';
+  END IF;
+
+  v_result := leave_channel(v_channel);
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a member could not leave: %', v_result;
+  END IF;
+  IF EXISTS (SELECT 1 FROM channels WHERE id = v_channel) THEN
+    RAISE EXCEPTION 'FAIL: the room is still visible to somebody who left it';
+  END IF;
+  RAISE NOTICE 'ok  leaving needs nobody''s permission';
+END $$;
+
+-- Access through a role is not yours to give up: deleting your own row would
+-- leave you in the room and the button looking broken, and dropping the role
+-- grant would take everybody holding that role out with you.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_channel UUID; v_role UUID; v_result JSONB;
+BEGIN
+  v_channel := (create_channel('role-room', 'text', true, ARRAY[]::UUID[])
+                ->>'id')::UUID;
+  SELECT id INTO v_role FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+     AND legacy_key = 'moderator';
+  PERFORM set_channel_role_access(v_channel, v_role, true);
+
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true);
+
+  IF NOT EXISTS (SELECT 1 FROM channels WHERE id = v_channel) THEN
+    RAISE EXCEPTION 'FAIL: a role grant did not let its holder in';
+  END IF;
+
+  v_result := leave_channel(v_channel);
+  IF v_result->>'reason' <> 'in_by_role' THEN
+    RAISE EXCEPTION 'FAIL: leaving a role-granted channel returned %', v_result;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM channels WHERE id = v_channel) THEN
+    RAISE EXCEPTION 'FAIL: the refusal removed them anyway';
+  END IF;
+  RAISE NOTICE 'ok  you cannot walk out of a room a role put you in';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
