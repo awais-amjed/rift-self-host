@@ -60,6 +60,18 @@ VALUES
   ('22222222-bbbb-4bbb-8bbb-000000000001', 'bbbb0000-0000-4000-8000-000000000001',
    'mallory', 'Mallory', 'pk-mal', 'sid-mal', 'chat-mal', false, false, false);
 
+-- The four default roles arrive with each server (018's `seed_default_roles`).
+-- Assigning them from the same three booleans is what `register_user` does, so
+-- doing it here keeps the fixture honest: every later test sees a member whose
+-- roles and whose cached booleans agree.
+INSERT INTO member_roles (user_id, role_id)
+SELECT u.id, r.id
+  FROM users u
+  JOIN roles r ON r.server_id = u.server_id AND r.legacy_key IS NOT NULL
+ WHERE ((r.legacy_key = 'admin'     AND u.is_server_admin)
+     OR (r.legacy_key = 'moderator' AND u.is_channel_manager)
+     OR (r.legacy_key = 'members'   AND u.can_create_tokens));
+
 -- `attest_message` stamps `sender_id := auth.uid()` on every insert, so a
 -- fixture written as the superuser — who has no claim — came out with no sender
 -- at all, and 013's `messages_one_origin` refuses a row that is neither a
@@ -1089,6 +1101,260 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a channel manager cannot remove an attachment';
   END IF;
   RAISE NOTICE 'ok  a moderator can remove the files of a message they delete';
+END $$;
+
+-- ============================================================
+-- 12. Roles and granular permissions (018)
+-- ============================================================
+-- The three booleans are now a cache of three bits. Every test here guards a
+-- way that cache, or the delegation rules that feed it, could go wrong while
+-- the app still looked fine.
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+-- The backfill has to reproduce exactly what the booleans meant. If it does
+-- not, every policy in this file is now testing a different server than the one
+-- that shipped.
+DO $$
+BEGIN
+  IF NOT app.has_perm('MANAGE_CHANNELS') THEN
+    RAISE EXCEPTION 'FAIL: alice lost channel management in the backfill';
+  END IF;
+  -- She never held the bit. `ADMINISTRATOR` is what answers, and folding it
+  -- into the mask rather than branching is the only reason that is true
+  -- everywhere at once.
+  IF NOT app.has_perm('BAN_MEMBERS') THEN
+    RAISE EXCEPTION 'FAIL: ADMINISTRATOR does not imply BAN_MEMBERS';
+  END IF;
+  RAISE NOTICE 'ok  an administrator holds every bit without being given one';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  -- Bob holds no roles at all, so everything he can do comes from @everyone.
+  IF NOT app.has_perm('SEND_MESSAGES') THEN
+    RAISE EXCEPTION 'FAIL: @everyone is not being folded in for a member with no roles';
+  END IF;
+  IF app.has_perm('CREATE_INVITE') THEN
+    RAISE EXCEPTION 'FAIL: bob could never mint invites, and can now';
+  END IF;
+  IF app.has_perm('MANAGE_ROLES') THEN
+    RAISE EXCEPTION 'FAIL: a plain member can manage roles';
+  END IF;
+  RAISE NOTICE 'ok  @everyone is implicit, and grants only what it says';
+END $$;
+
+-- A misspelled permission must not read as "denied". A policy that quietly
+-- denies everything looks like a working policy until it is the only thing
+-- between somebody and a room.
+DO $$
+BEGIN
+  BEGIN
+    PERFORM app.has_perm('MANAGE_CHANELS');
+    RAISE EXCEPTION 'FAIL: an unknown permission name was accepted';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  an unknown permission name raises rather than denying';
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO roles (server_id, name, position, permissions)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Bobs Role', 1, 0);
+    RAISE EXCEPTION 'FAIL: a member without MANAGE_ROLES created a role';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  creating a role needs MANAGE_ROLES';
+END $$;
+
+-- ---------- delegation ----------
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_role UUID;
+BEGIN
+  INSERT INTO roles (server_id, name, position, permissions)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Helper', 1,
+          app.perm('MANAGE_MESSAGES'))
+  RETURNING id INTO v_role;
+  IF v_role IS NULL THEN
+    RAISE EXCEPTION 'FAIL: an admin could not create a role below her';
+  END IF;
+
+  -- Alice's own rank is 3 (Admin). Strictly-below applies to her too: nobody
+  -- edits the role they are standing on, or promotes one up to it.
+  BEGIN
+    INSERT INTO roles (server_id, name, position, permissions)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Peer', 3, 0);
+    RAISE EXCEPTION 'FAIL: an admin created a role at her own rank';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  roles are created strictly below the creator';
+END $$;
+
+-- The baseline is not a role you can hand out or remove. Two answers to "what
+-- can everyone do" would drift, and the drift would be silent.
+DO $$
+DECLARE v_everyone UUID;
+BEGIN
+  SELECT id INTO v_everyone FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone;
+
+  BEGIN
+    INSERT INTO member_roles (user_id, role_id)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000002', v_everyone);
+    RAISE EXCEPTION 'FAIL: @everyone was assigned to somebody';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+
+  BEGIN
+    DELETE FROM roles WHERE id = v_everyone;
+    RAISE EXCEPTION 'FAIL: @everyone was deleted';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  @everyone cannot be assigned or deleted';
+END $$;
+
+-- ---------- the cache ----------
+-- This is the one that keeps every *other* policy in this file working: the
+-- three columns are no longer written by anything, so if the trigger stops
+-- firing, authority silently drains out of the server.
+DO $$
+DECLARE v_moderator UUID;
+BEGIN
+  SELECT id INTO v_moderator FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+     AND legacy_key = 'moderator';
+
+  INSERT INTO member_roles (user_id, role_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000002', v_moderator);
+
+  IF NOT (SELECT is_channel_manager FROM users
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: granting Moderator did not reach is_channel_manager';
+  END IF;
+
+  DELETE FROM member_roles
+   WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000002'
+     AND role_id = v_moderator;
+
+  IF (SELECT is_channel_manager FROM users
+       WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: removing Moderator left is_channel_manager set';
+  END IF;
+  RAISE NOTICE 'ok  the boolean cache follows role membership both ways';
+END $$;
+
+-- Editing a role moves everybody holding it, not just whoever is next to log
+-- in. Without this the cache is correct only at the moment it is written.
+DO $$
+DECLARE v_helper UUID;
+BEGIN
+  SELECT id INTO v_helper FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Helper';
+  INSERT INTO member_roles (user_id, role_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000002', v_helper);
+
+  UPDATE roles SET permissions = permissions | app.perm('MANAGE_CHANNELS')
+   WHERE id = v_helper;
+
+  IF NOT (SELECT is_channel_manager FROM users
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: editing a role did not resync its holders';
+  END IF;
+  RAISE NOTICE 'ok  editing a role resyncs everybody holding it';
+END $$;
+
+-- ---------- the subset rule ----------
+-- Position alone is not enough. Somebody who may manage rank 1 could otherwise
+-- put `BAN_MEMBERS` on it and hand it to themselves.
+DO $$
+DECLARE v_staff UUID;
+BEGIN
+  INSERT INTO roles (server_id, name, position, permissions)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Staff', 2,
+          app.perm('MANAGE_ROLES'))
+  RETURNING id INTO v_staff;
+  INSERT INTO member_roles (user_id, role_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000003', v_staff);
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT app.has_perm('MANAGE_ROLES') THEN
+    RAISE EXCEPTION 'FAIL: carol did not receive MANAGE_ROLES';
+  END IF;
+
+  BEGIN
+    INSERT INTO roles (server_id, name, position, permissions)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Sneak', 1,
+            app.perm('BAN_MEMBERS'));
+    RAISE EXCEPTION 'FAIL: a permission was granted by somebody who lacks it';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+
+  -- ...and she may still make one out of what she actually holds.
+  INSERT INTO roles (server_id, name, position, permissions)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Greeter', 1,
+          app.perm('CREATE_INVITE'));
+  RAISE NOTICE 'ok  a role may only carry permissions its author holds';
+END $$;
+
+-- Rank is checked on the role being handed out, not on the person handing it.
+DO $$
+DECLARE v_admin UUID;
+BEGIN
+  SELECT id INTO v_admin FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND legacy_key = 'admin';
+  BEGIN
+    INSERT INTO member_roles (user_id, role_id)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000003', v_admin);
+    RAISE EXCEPTION 'FAIL: somebody granted themselves a role above their rank';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  nobody hands out a role they do not outrank';
+END $$;
+
+-- ---------- the legacy RPC ----------
+-- The app still says "make this person a channel manager". It has to keep
+-- meaning that, or the roles migration is a breaking change wearing a
+-- non-breaking one's clothes.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  PERFORM set_user_permissions('11111111-aaaa-4aaa-8aaa-000000000003',
+                               NULL, true, NULL);
+  IF NOT EXISTS (
+    SELECT 1 FROM member_roles mr
+      JOIN roles r ON r.id = mr.role_id
+     WHERE mr.user_id = '11111111-aaaa-4aaa-8aaa-000000000003'
+       AND r.legacy_key = 'moderator') THEN
+    RAISE EXCEPTION 'FAIL: set_user_permissions did not write a role';
+  END IF;
+  IF NOT (SELECT is_channel_manager FROM users
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
+    RAISE EXCEPTION 'FAIL: set_user_permissions no longer reaches the column';
+  END IF;
+  RAISE NOTICE 'ok  the old permissions RPC writes roles and reads back the same';
 END $$;
 
 RESET ROLE;
