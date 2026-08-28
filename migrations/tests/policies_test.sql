@@ -1819,5 +1819,104 @@ BEGIN
   RAISE NOTICE 'ok  you cannot walk out of a room a role put you in';
 END $$;
 
+-- ============================================================
+-- 14. The bot key grant (017, 028)
+-- ============================================================
+-- The one grant that spends the trust model. Everything else a bot can do was
+-- arranged so it never needs a key; this hands one over, and the four rules in
+-- BOTS.md §6 are what make it something you can offer rather than regret.
+
+RESET ROLE;
+
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b0');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b0',
+        'aaaa0000-0000-4000-8000-000000000001',
+        'modbot', 'ModBot', 'pk-bot', 'sid-bot', 'chat-bot', true);
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF grant_bot_channel_key('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                           'aaaa1111-0000-4000-8000-000000000001')->>'reason'
+     <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: a plain member handed a bot a channel key';
+  END IF;
+  RAISE NOTICE 'ok  handing a bot a key needs MANAGE_BOTS';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+-- Counted rather than compared by id: the fixtures above insert messages with
+-- explicit ids in the 9000s, which are far above the sequence, so a row this
+-- function really writes comes out *below* them.
+DECLARE v_result JSONB; v_before INT;
+BEGIN
+  SELECT count(*) INTO v_before FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000001'
+     AND origin_name = 'Rift';
+
+  v_result := grant_bot_channel_key('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                    'aaaa1111-0000-4000-8000-000000000001');
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin could not grant: %', v_result;
+  END IF;
+
+  -- Forward-only. The channel has no keyring in this fixture, so the floor is
+  -- 1 — the version its first member will bootstrap, with no history behind it.
+  IF (v_result->>'from_key_version')::INT < 1 THEN
+    RAISE EXCEPTION 'FAIL: the grant reaches back before it was made';
+  END IF;
+
+  -- Rule 4, the half a header chip cannot do: the people already in the room
+  -- when it happened.
+  IF (SELECT count(*) FROM messages
+       WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000001'
+         AND origin_name = 'Rift'
+         AND key_version = 0
+         AND ciphertext LIKE '%ModBot%') <> v_before + 1 THEN
+    RAISE EXCEPTION 'FAIL: the grant left no trace in the channel';
+  END IF;
+  RAISE NOTICE 'ok  a grant says so in the channel it was made in';
+END $$;
+
+-- The system message is written with the claim dropped, so `attest_message`
+-- leaves it alone. If that restore ever stopped happening, everything after it
+-- in the same transaction would be running as nobody.
+DO $$
+BEGIN
+  IF app.server_id() IS DISTINCT FROM 'aaaa0000-0000-4000-8000-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: the session was left without a claim';
+  END IF;
+  RAISE NOTICE 'ok  the caller gets their session back afterwards';
+END $$;
+
+DO $$
+DECLARE v_before INT;
+BEGIN
+  SELECT count(*) INTO v_before FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000001'
+     AND origin_name = 'Rift';
+
+  PERFORM revoke_bot_channel_key('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                 'aaaa1111-0000-4000-8000-000000000001');
+  IF EXISTS (SELECT 1 FROM bot_channel_keys
+              WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: the grant survived being revoked';
+  END IF;
+  IF (SELECT count(*) FROM messages
+       WHERE channel_id = 'aaaa1111-0000-4000-8000-000000000001'
+         AND origin_name = 'Rift') <> v_before + 1 THEN
+    RAISE EXCEPTION 'FAIL: taking it away was quieter than giving it';
+  END IF;
+  RAISE NOTICE 'ok  and says so again when it is taken away';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
