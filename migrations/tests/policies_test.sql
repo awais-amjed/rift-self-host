@@ -1918,5 +1918,128 @@ BEGIN
   RAISE NOTICE 'ok  and says so again when it is taken away';
 END $$;
 
+-- ============================================================
+-- 15. The server-wide bot grant (030)
+-- ============================================================
+-- The rule that keeps per-channel granting honest rather than merely strict:
+-- an admin who has to tick thirty boxes will ask for one button, and the button
+-- somebody eventually builds without thinking about it is the dangerous one.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000c1',
+   'aaaa0000-0000-4000-8000-000000000001', 'lobby', 'text'),
+  ('aaaa1111-0000-4000-8000-0000000000c2',
+   'aaaa0000-0000-4000-8000-000000000001', 'shed', 'text');
+
+INSERT INTO channel_members (channel_id, user_id, can_manage)
+VALUES ('aaaa1111-0000-4000-8000-0000000000c2',
+        '11111111-aaaa-4aaa-8aaa-000000000001', true);
+UPDATE channels SET is_private = true
+ WHERE id = 'aaaa1111-0000-4000-8000-0000000000c2';
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := grant_bot_server_key('11111111-aaaa-4aaa-8aaa-0000000000b0');
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin could not grant the server: %', v_result;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM bot_channel_keys
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000c1') THEN
+    RAISE EXCEPTION 'FAIL: a public channel was left out of a server grant';
+  END IF;
+
+  -- The carve-out, and the whole reason 020 wrote `is_private` before there
+  -- were private channels to write it for.
+  IF EXISTS (SELECT 1 FROM bot_channel_keys
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000c2') THEN
+    RAISE EXCEPTION 'FAIL: a server-wide grant reached into a private channel';
+  END IF;
+  RAISE NOTICE 'ok  a server grant covers the public channels and no others';
+END $$;
+
+-- Intent, not a snapshot: a channel made afterwards is covered, or an admin
+-- grants a bot the server, adds a channel, and the bot silently does not work
+-- there.
+DO $$
+DECLARE v_new UUID;
+BEGIN
+  v_new := (create_channel('added-later', 'text', false, ARRAY[]::UUID[])
+            ->>'id')::UUID;
+  IF NOT EXISTS (SELECT 1 FROM bot_channel_keys WHERE channel_id = v_new) THEN
+    RAISE EXCEPTION 'FAIL: a channel made after the grant was not covered';
+  END IF;
+
+  -- ...and one made private is not, for the same reason as the first.
+  v_new := (create_channel('added-private', 'text', true, ARRAY[]::UUID[])
+            ->>'id')::UUID;
+  IF EXISTS (SELECT 1 FROM bot_channel_keys WHERE channel_id = v_new) THEN
+    RAISE EXCEPTION 'FAIL: a private channel made after the grant was covered';
+  END IF;
+  RAISE NOTICE 'ok  a channel made later is covered, unless it is private';
+END $$;
+
+-- Closing a channel takes it out of the grant without cancelling the grant.
+-- This is the case a trigger on `bot_channel_keys` got wrong: every deletion
+-- looks the same to a row, and only one of them is somebody deciding.
+DO $$
+BEGIN
+  PERFORM set_channel_private('aaaa1111-0000-4000-8000-0000000000c1', true);
+
+  IF EXISTS (SELECT 1 FROM bot_channel_keys
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000c1') THEN
+    RAISE EXCEPTION 'FAIL: a closed channel kept its server-wide grant';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM bot_server_grants
+                  WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: closing one channel cancelled the whole grant';
+  END IF;
+  RAISE NOTICE 'ok  closing a channel drops it from the grant, not the grant';
+END $$;
+
+-- Revoking one *is* somebody deciding, and it means "not the whole server any
+-- more". The channels it already covers keep their rows.
+DO $$
+DECLARE v_covered INT;
+BEGIN
+  SELECT count(*) INTO v_covered FROM bot_channel_keys
+    JOIN channels c ON c.id = bot_channel_keys.channel_id
+   WHERE c.server_id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  PERFORM revoke_bot_channel_key('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                 'aaaa1111-0000-4000-8000-000000000001');
+
+  IF EXISTS (SELECT 1 FROM bot_server_grants
+              WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: naming one channel left the grant server-wide';
+  END IF;
+  IF (SELECT count(*) FROM bot_channel_keys
+        JOIN channels c ON c.id = bot_channel_keys.channel_id
+       WHERE c.server_id = 'aaaa0000-0000-4000-8000-000000000001')
+     <> v_covered - 1 THEN
+    RAISE EXCEPTION 'FAIL: downgrading took more than the one channel named';
+  END IF;
+  RAISE NOTICE 'ok  revoking one channel downgrades rather than cancels';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF grant_bot_server_key('11111111-aaaa-4aaa-8aaa-0000000000b0')->>'reason'
+     <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: a plain member granted a bot the whole server';
+  END IF;
+  RAISE NOTICE 'ok  granting the server needs MANAGE_BOTS too';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
