@@ -68,9 +68,15 @@ INSERT INTO member_roles (user_id, role_id)
 SELECT u.id, r.id
   FROM users u
   JOIN roles r ON r.server_id = u.server_id
- WHERE ((r.name = 'Admin'     AND u.is_server_admin)
+ -- Scoped to the two fixture servers. Without it this walks every user in the
+ -- database the suite is being run against, which was harmless only for as
+ -- long as nobody outside the fixtures held a role.
+ WHERE u.server_id IN ('aaaa0000-0000-4000-8000-000000000001',
+                       'bbbb0000-0000-4000-8000-000000000001')
+   AND ((r.name = 'Admin'     AND u.is_server_admin)
      OR (r.name = 'Moderator' AND u.is_channel_manager)
-     OR (r.name = 'Members'   AND u.can_create_tokens));
+     OR (r.name = 'Members'   AND u.can_create_tokens))
+ON CONFLICT DO NOTHING;
 
 -- `attest_message` stamps `sender_id := auth.uid()` on every insert, so a
 -- fixture written as the superuser — who has no claim — came out with no sender

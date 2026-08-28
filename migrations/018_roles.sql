@@ -45,6 +45,24 @@
 -- by definition, and from position by being the top.
 
 -- ============================================================
+-- 0. What the three booleans said, before this file touches anything
+-- ============================================================
+-- The backfill in §5 reads these columns to work out who held what. It cannot
+-- read them off `users` by the time it runs: creating the `@everyone` role in
+-- that same block fires `roles_sync_cache`, which recomputes all three from
+-- the roles a member holds — none, yet — and writes `false` over every one of
+-- them. The backfill then finds an empty server and grants nobody anything.
+--
+-- Every admin on every server, silently, in the migration that was supposed to
+-- preserve them. The snapshot is taken here, before the tables and triggers in
+-- §2 and §4 exist at all, and §5 reads it instead.
+
+DROP TABLE IF EXISTS legacy_user_permissions;
+CREATE TEMP TABLE legacy_user_permissions AS
+  SELECT id, server_id, is_server_admin, is_channel_manager, can_create_tokens
+    FROM users;
+
+-- ============================================================
 -- 1. The permission set
 -- ============================================================
 -- Named rather than numbered at the call site: `app.has_perm('BAN_MEMBERS')`
@@ -352,9 +370,9 @@ $$;
 -- 5. Backfill
 -- ============================================================
 -- Four roles per server, reproducing exactly what the three booleans meant.
--- Idempotent, and self-checking: the cache trigger recomputes the same three
--- columns from the roles it just created, so a server whose booleans do not
--- come back unchanged had a role mapped wrong.
+-- Idempotent, and reading the §0 snapshot rather than the live columns —
+-- which by now say nothing, because creating `@everyone` above has already
+-- recomputed every one of them from a member's roles, and nobody has any yet.
 --
 --   @everyone   what every member could always do, bots included
 --   Members     CREATE_INVITE — a person got this on joining (014); a bot only
@@ -396,7 +414,7 @@ BEGIN
 
     INSERT INTO member_roles (user_id, role_id)
     SELECT u.id, r.id
-      FROM users u
+      FROM legacy_user_permissions u
       JOIN roles r ON r.server_id = u.server_id AND r.legacy_key IS NOT NULL
      WHERE u.server_id = v_server.id
        AND ((r.legacy_key = 'admin'     AND u.is_server_admin)
@@ -405,6 +423,8 @@ BEGIN
     ON CONFLICT DO NOTHING;
   END LOOP;
 END $backfill$;
+
+DROP TABLE legacy_user_permissions;
 
 -- A server created after this migration needs its four roles too, and the one
 -- place that knows a server was created is the row appearing.
