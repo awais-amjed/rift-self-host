@@ -104,17 +104,33 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error creating default channels", EC.DB_ERROR, channelsError);
     }
 
-    // Generate an admin invite code (single-use)
+    // Generate an admin invite code (single-use).
+    //
+    // It names a role now rather than three booleans (migration 025). The one
+    // it wants is the most senior on a server that has existed for a
+    // millisecond and has exactly the four roles its own trigger just seeded —
+    // so "highest position" is `Admin`, without this having to know the name.
     const inviteCode = generateInviteCode();
+
+    const { data: topRole, error: roleError } = await supabase
+      .from("roles")
+      .select("id")
+      .eq("server_id", server_id)
+      .eq("is_everyone", false)
+      .order("position", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (roleError || !topRole) {
+      return CustomResponse.error("Error reading server roles", EC.DB_ERROR, roleError);
+    }
 
     const { error: inviteError } = await supabase
       .from(DBSchema.invites.tableName)
       .insert({
         [DBSchema.invites.serverId]: server_id,
         [DBSchema.invites.code]: inviteCode,
-        [DBSchema.invites.isServerAdmin]: true,
-        [DBSchema.invites.isChannelManager]: true,
-        [DBSchema.invites.canCreateTokens]: true,
+        [DBSchema.invites.roleId]: (topRole as Record<string, any>).id,
         [DBSchema.invites.maxUses]: 1,
         [DBSchema.invites.uses]: 0,
       });

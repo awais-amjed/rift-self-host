@@ -67,10 +67,10 @@ VALUES
 INSERT INTO member_roles (user_id, role_id)
 SELECT u.id, r.id
   FROM users u
-  JOIN roles r ON r.server_id = u.server_id AND r.legacy_key IS NOT NULL
- WHERE ((r.legacy_key = 'admin'     AND u.is_server_admin)
-     OR (r.legacy_key = 'moderator' AND u.is_channel_manager)
-     OR (r.legacy_key = 'members'   AND u.can_create_tokens));
+  JOIN roles r ON r.server_id = u.server_id
+ WHERE ((r.name = 'Admin'     AND u.is_server_admin)
+     OR (r.name = 'Moderator' AND u.is_channel_manager)
+     OR (r.name = 'Members'   AND u.can_create_tokens));
 
 -- `attest_message` stamps `sender_id := auth.uid()` on every insert, so a
 -- fixture written as the superuser — who has no claim — came out with no sender
@@ -398,11 +398,17 @@ BEGIN
     RAISE EXCEPTION 'FAIL: the invite code default did not produce a 10-char code (got %)', v_code;
   END IF;
 
-  -- Carol may invite, but she is not an admin, so she cannot mint one.
+  -- Carol may invite. She may not invite somebody straight into Admin, which
+  -- since 025 is one rule instead of three: an invite may only name a role its
+  -- maker could have handed out by hand.
   BEGIN
-    INSERT INTO invites (server_id, created_by, is_server_admin)
-    VALUES ('aaaa0000-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000003', true);
-    RAISE EXCEPTION 'FAIL: an inviter granted a permission they do not hold';
+    INSERT INTO invites (server_id, created_by, role_id)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001',
+            '11111111-aaaa-4aaa-8aaa-000000000003',
+            (SELECT id FROM roles
+              WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                AND name = 'Admin'));
+    RAISE EXCEPTION 'FAIL: an inviter granted a role they do not hold';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
   RAISE NOTICE 'ok  invites generate a code and cannot grant what you lack';
@@ -529,11 +535,15 @@ BEGIN
   EXCEPTION WHEN raise_exception THEN
     IF SQLERRM <> 'not_authorized' THEN RAISE; END IF;
   END;
+  -- 025 removed `set_user_permissions`; handing out a role is the only way to
+  -- grant anything now, and it refuses on the row rather than in a function.
   BEGIN
-    PERFORM set_user_permissions('11111111-aaaa-4aaa-8aaa-000000000003', true, NULL, NULL);
+    INSERT INTO member_roles (user_id, role_id)
+    SELECT '11111111-aaaa-4aaa-8aaa-000000000003', id FROM roles
+     WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Admin';
     RAISE EXCEPTION 'FAIL: a non-admin can grant permissions';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'not_authorized' THEN RAISE; END IF;
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
   END;
   BEGIN
     PERFORM register_user('x', auth.uid(), 'a', 'b', 'c', 'd');
@@ -567,11 +577,20 @@ BEGIN
     IF SQLERRM <> 'cannot_moderate_self' THEN RAISE; END IF;
   END;
 
+  -- The last-admin lockout used to be a named refusal inside
+  -- `set_user_permissions`. It is the position rule now, and it is stronger:
+  -- nobody edits or hands out the role they are standing on, so an admin
+  -- cannot take their own away by any route.
   BEGIN
-    PERFORM set_user_permissions(auth.uid(), false, NULL, NULL);
-    RAISE EXCEPTION 'FAIL: an admin can demote themselves (last-admin lockout)';
-  EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM <> 'cannot_change_own_permissions' THEN RAISE; END IF;
+    DELETE FROM member_roles
+     WHERE user_id = auth.uid()
+       AND role_id IN (SELECT id FROM roles
+                        WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                          AND name = 'Admin');
+    IF NOT EXISTS (SELECT 1 FROM member_roles mr JOIN roles r ON r.id = mr.role_id
+                    WHERE mr.user_id = auth.uid() AND r.name = 'Admin') THEN
+      RAISE EXCEPTION 'FAIL: an admin demoted themselves (last-admin lockout)';
+    END IF;
   END;
   RAISE NOTICE 'ok  moderation is admin-only, same-server, and never self-inflicted';
 END $$;
@@ -1237,7 +1256,7 @@ DECLARE v_moderator UUID;
 BEGIN
   SELECT id INTO v_moderator FROM roles
    WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
-     AND legacy_key = 'moderator';
+     AND name = 'Moderator';
 
   INSERT INTO member_roles (user_id, role_id)
   VALUES ('11111111-aaaa-4aaa-8aaa-000000000002', v_moderator);
@@ -1322,7 +1341,7 @@ DO $$
 DECLARE v_admin UUID;
 BEGIN
   SELECT id INTO v_admin FROM roles
-   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND legacy_key = 'admin';
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Admin';
   BEGIN
     INSERT INTO member_roles (user_id, role_id)
     VALUES ('11111111-aaaa-4aaa-8aaa-000000000003', v_admin);
@@ -1333,29 +1352,63 @@ BEGIN
   RAISE NOTICE 'ok  nobody hands out a role they do not outrank';
 END $$;
 
--- ---------- the legacy RPC ----------
--- The app still says "make this person a channel manager". It has to keep
--- meaning that, or the roles migration is a breaking change wearing a
--- non-breaking one's clothes.
+-- The other direction, and the one 018 got wrong. Administrators are exempt
+-- from the position rule when *handing out* a role, so that the only admin on
+-- a server can make a second one — and the exemption applied to removals too,
+-- which let an admin take Admin off themselves and leave a server with no
+-- administrator and no way to appoint one (026).
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_admin UUID;
+BEGIN
+  SELECT id INTO v_admin FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Admin';
+
+  DELETE FROM member_roles WHERE user_id = auth.uid() AND role_id = v_admin;
+  IF NOT EXISTS (SELECT 1 FROM member_roles
+                  WHERE user_id = auth.uid() AND role_id = v_admin) THEN
+    RAISE EXCEPTION 'FAIL: an admin took their own Admin role off';
+  END IF;
+
+  -- ...but a role she genuinely stands above is hers to drop.
+  INSERT INTO member_roles (user_id, role_id)
+  SELECT auth.uid(), id FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Members'
+  ON CONFLICT DO NOTHING;
+  DELETE FROM member_roles
+   WHERE user_id = auth.uid()
+     AND role_id IN (SELECT id FROM roles
+                      WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                        AND name = 'Members');
+  IF EXISTS (SELECT 1 FROM member_roles mr JOIN roles r ON r.id = mr.role_id
+              WHERE mr.user_id = auth.uid() AND r.name = 'Members') THEN
+    RAISE EXCEPTION 'FAIL: a role below her own could not be dropped';
+  END IF;
+  RAISE NOTICE 'ok  nobody demotes themselves out of the server';
+END $$;
+
+-- ---------- granting a role reaches the cache ----------
+-- The three columns on `users` are what every policy written before 018 reads,
+-- and nothing writes them by hand any more. If the trigger stops firing,
+-- authority drains out of the server silently — the roles look right and none
+-- of them do anything.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
 
 DO $$
 BEGIN
-  PERFORM set_user_permissions('11111111-aaaa-4aaa-8aaa-000000000003',
-                               NULL, true, NULL);
-  IF NOT EXISTS (
-    SELECT 1 FROM member_roles mr
-      JOIN roles r ON r.id = mr.role_id
-     WHERE mr.user_id = '11111111-aaaa-4aaa-8aaa-000000000003'
-       AND r.legacy_key = 'moderator') THEN
-    RAISE EXCEPTION 'FAIL: set_user_permissions did not write a role';
-  END IF;
+  INSERT INTO member_roles (user_id, role_id)
+  SELECT '11111111-aaaa-4aaa-8aaa-000000000003', id FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+     AND name = 'Moderator';
+
   IF NOT (SELECT is_channel_manager FROM users
            WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
-    RAISE EXCEPTION 'FAIL: set_user_permissions no longer reaches the column';
+    RAISE EXCEPTION 'FAIL: granting a role did not reach the cached column';
   END IF;
-  RAISE NOTICE 'ok  the old permissions RPC writes roles and reads back the same';
+  RAISE NOTICE 'ok  a role granted by hand reads back through the old columns';
 END $$;
 
 -- Registration is the service role's, and `register_user` is not SECURITY
@@ -1384,7 +1437,7 @@ BEGIN
     SELECT 1 FROM member_roles mr
       JOIN roles r ON r.id = mr.role_id
      WHERE mr.user_id = '11111111-aaaa-4aaa-8aaa-00000000000a'
-       AND r.legacy_key = 'members') THEN
+       AND r.is_default) THEN
     RAISE EXCEPTION 'FAIL: a new member did not receive their roles';
   END IF;
   RAISE NOTICE 'ok  somebody can still join a server';
@@ -1564,7 +1617,7 @@ DO $$
 DECLARE v_admin UUID;
 BEGIN
   SELECT id INTO v_admin FROM roles
-   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND legacy_key = 'admin';
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Admin';
   PERFORM set_channel_role_access('aaaa1111-0000-4000-8000-00000000ffff',
                                   v_admin, true);
 END $$;
@@ -1740,7 +1793,7 @@ BEGIN
                 ->>'id')::UUID;
   SELECT id INTO v_role FROM roles
    WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
-     AND legacy_key = 'moderator';
+     AND name = 'Moderator';
   PERFORM set_channel_role_access(v_channel, v_role, true);
 
   PERFORM set_config('request.jwt.claims',
