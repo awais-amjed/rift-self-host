@@ -1190,11 +1190,12 @@ BEGIN
     RAISE EXCEPTION 'FAIL: an admin could not create a role below her';
   END IF;
 
-  -- Alice's own rank is 3 (Admin). Strictly-below applies to her too: nobody
-  -- edits the role they are standing on, or promotes one up to it.
+  -- Alice's own rank is Admin's, which 024 moved to 300 to leave room on the
+  -- ladder. Strictly-below applies to her too: nobody edits the role they are
+  -- standing on, or promotes one up to it.
   BEGIN
     INSERT INTO roles (server_id, name, position, permissions)
-    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Peer', 3, 0);
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Peer', 300, 0);
     RAISE EXCEPTION 'FAIL: an admin created a role at her own rank';
   EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
     IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
