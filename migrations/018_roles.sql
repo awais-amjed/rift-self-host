@@ -606,6 +606,13 @@ GRANT UPDATE (name, color, position, permissions) ON roles TO authenticated;
 
 GRANT SELECT, INSERT, DELETE ON member_roles TO authenticated;
 
+-- `register_user` is the service role's, and it is not SECURITY DEFINER — it
+-- runs as whoever called it. It now reaches `app.apply_legacy_role`, and 002
+-- granted this schema to `authenticated` only, so registration failed with
+-- `permission denied for schema app` the moment 018 landed. The dependency is
+-- new here, so the grant belongs here.
+GRANT USAGE ON SCHEMA app TO service_role;
+
 REVOKE ALL ON FUNCTION refuse_everyone_assignment()      FROM PUBLIC;
 REVOKE ALL ON FUNCTION protect_everyone_role()           FROM PUBLIC;
 REVOKE ALL ON FUNCTION sync_member_permission_cache()    FROM PUBLIC;

@@ -38,6 +38,20 @@ Deno.serve(async (req) => {
     const channel = await checkChannel(supabase, channel_id, auth.serverId);
     if (channel instanceof Response) return channel;
 
+    // 020: a private channel is not the caller's unless they are in it. Answered
+    // as "not found" rather than "forbidden" — a room you cannot see should not
+    // confirm that it exists.
+    const { data: visible, error: visibleError } = await supabase.rpc(
+      "channel_visible_to",
+      { p_channel: channel_id, p_user: auth.userId },
+    );
+    if (visibleError) {
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, visibleError);
+    }
+    if (visible !== true) {
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    }
+
     // All keyring rows for this channel (id + version + user for the roster
     // math; sealed fields only kept for the caller's own rows).
     const { data: ringData, error: ringError } = await supabase
@@ -71,37 +85,16 @@ Deno.serve(async (req) => {
       }))
       .sort((a, b) => a.key_version - b.key_version);
 
-    // Members with a published chat key but no entry at the current version.
-    // When currentVersion is 0 this is every keyed member — the bootstrap set.
-    const { data: membersData, error: membersError } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(
-        `${DBSchema.users.id}, ${DBSchema.users.chatPublicKey},` +
-        ` ${DBSchema.users.isBot}`,
-      )
-      .eq(DBSchema.users.serverId, auth.serverId)
-      .eq(DBSchema.users.isBanned, false)
-      .not(DBSchema.users.chatPublicKey, "is", null);
-
-    // Bots are not members awaiting a key: `channel_keyring` refuses them
-    // (migration 014), so offering one as "missing" would hand every client an
-    // insert the database is going to reject. The exception is a bot somebody
-    // explicitly granted this channel (017) — and even then only from the
-    // version the grant begins at, which is what keeps it out of the history it
-    // was not in the room for.
-    const { data: grantData } = await supabase
-      .from("bot_channel_keys")
-      .select("bot_id, from_key_version")
+    // Who may hold this channel's key, and from which version. One view rather
+    // than a members query plus a bot-grant query plus the rule that joins
+    // them: 020 added a third input (private-channel membership), and three
+    // filters spread across two edge functions is three places to forget one.
+    const { data: eligibleData, error: eligibleError } = await supabase
+      .from("channel_eligible_members")
+      .select("user_id, chat_public_key, from_key_version")
       .eq("channel_id", channel_id);
-    const grants = (grantData ?? []) as Record<string, any>[];
-    const mayHoldKey = (row: Record<string, any>, version: number) => {
-      if (row[DBSchema.users.isBot] !== true) return true;
-      const grant = grants.find((g) => g.bot_id === row[DBSchema.users.id]);
-      return grant !== undefined && version >= (grant.from_key_version as number);
-    };
-
-    if (membersError) {
-      return CustomResponse.error("Error reading members", EC.DB_ERROR, membersError);
+    if (eligibleError) {
+      return CustomResponse.error("Error reading eligibility", EC.DB_ERROR, eligibleError);
     }
 
     const covered = new Set(
@@ -110,12 +103,15 @@ Deno.serve(async (req) => {
         .map((row) => row[DBSchema.channelKeyring.userId] as string),
     );
 
-    const membersMissing = ((membersData ?? []) as Record<string, any>[])
-      .filter((m) => !covered.has(m[DBSchema.users.id] as string))
-      .filter((m) => mayHoldKey(m, Math.max(currentVersion, 1)))
+    // When currentVersion is 0 this is every eligible member — the bootstrap
+    // set — which is why the floor is compared against at least 1.
+    const sealingVersion = Math.max(currentVersion, 1);
+    const membersMissing = ((eligibleData ?? []) as Record<string, any>[])
+      .filter((m) => !covered.has(m.user_id as string))
+      .filter((m) => sealingVersion >= (m.from_key_version as number))
       .map((m) => ({
-        user_id: m[DBSchema.users.id],
-        chat_public_key: m[DBSchema.users.chatPublicKey],
+        user_id: m.user_id,
+        chat_public_key: m.chat_public_key,
       }));
 
     return CustomResponse.success({

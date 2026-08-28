@@ -1,6 +1,5 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
@@ -43,14 +42,24 @@ Deno.serve(async (req) => {
       );
     }
 
-    const { data: channels } = await supabase
-      .from(DBSchema.channels.tableName)
-      .select(DBSchema.channels.id)
-      .eq(DBSchema.channels.serverId, auth.serverId);
-
-    const channelIds = (channels ?? []).map(
-      (c) => (c as Record<string, any>)[DBSchema.channels.id] as string,
+    // Only the channels this member can see. The roster is `{userId: channelId}`
+    // for the whole server, so a private voice channel would otherwise tell
+    // everybody who is in a call they cannot join — the membership of the room
+    // and, over a day, who talks to whom.
+    const { data: channels, error: channelsError } = await supabase.rpc(
+      "visible_channels",
+      { p_user: auth.userId },
     );
+    if (channelsError) {
+      return CustomResponse.error("Error reading channels", EC.DB_ERROR, channelsError);
+    }
+
+    const channelIds = ((channels ?? []) as Record<string, any>[]).map(
+      (c) => c.channel_id as string,
+    );
+    if (channelIds.length === 0) {
+      return CustomResponse.success({ roster: {} });
+    }
 
     // Rooms are named by channel id, and only rooms that exist come back — so
     // an idle server costs one call, not one per channel.

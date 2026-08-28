@@ -32,15 +32,44 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Missing required field: channel_id", EC.MISSING_FIELDS);
     }
 
-    const { data: channelData, error: channelError } = await supabase
-      .from(DBSchema.channels.tableName)
-      .select(`${DBSchema.channels.id}`)
-      .eq(DBSchema.channels.id, channel_id)
-      .eq(DBSchema.channels.serverId, auth.serverId)
-      .single();
+    // Membership, not just "is it on my server". This checked the server and
+    // nothing else, which was harmless while every channel was everybody's and
+    // is a hole the moment one is not — for people before bots, since a private
+    // voice channel is a call you could walk into by knowing an id.
+    //
+    // `visible_channels` is the same answer 020's policies give; asking the
+    // database rather than reimplementing the rule here is the whole point of
+    // 021.
+    const { data: visible, error: visibleError } = await supabase.rpc(
+      "channel_visible_to",
+      { p_channel: channel_id, p_user: auth.userId },
+    );
+    if (visibleError) {
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, visibleError);
+    }
+    if (visible !== true) {
+      // Not "forbidden": a room you cannot see should not confirm it exists.
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    }
 
-    if (channelError || !channelData) {
-      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND, channelError);
+    // `CONNECT`, and `SCREEN_SHARE` for the second connection. The moderation
+    // flags below decide what a token may carry once you are in the room; these
+    // decide whether there is a token at all.
+    const { data: mayConnect } = await supabase.rpc("user_has_permission", {
+      p_user: auth.userId,
+      p_name: "CONNECT",
+    });
+    if (mayConnect !== true) {
+      return CustomResponse.error("You cannot join voice channels", EC.PERMISSION_DENIED);
+    }
+    if (screen_share === true) {
+      const { data: mayShare } = await supabase.rpc("user_has_permission", {
+        p_user: auth.userId,
+        p_name: "SCREEN_SHARE",
+      });
+      if (mayShare !== true) {
+        return CustomResponse.error("You cannot share your screen here", EC.PERMISSION_DENIED);
+      }
     }
 
     const room = channel_id;

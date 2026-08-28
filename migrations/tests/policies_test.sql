@@ -1357,6 +1357,40 @@ BEGIN
   RAISE NOTICE 'ok  the old permissions RPC writes roles and reads back the same';
 END $$;
 
+-- Registration is the service role's, and `register_user` is not SECURITY
+-- DEFINER — it runs as whoever called it. Every other test in this file speaks
+-- as `authenticated`, so the one path that does not was the one 018 broke: it
+-- gave the function a dependency on the `app` schema, which 002 had granted to
+-- `authenticated` alone. Nobody could join a server.
+RESET ROLE;
+
+INSERT INTO invites (server_id, code, max_uses)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', 'TESTINV0001', 5);
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-00000000000a');
+
+SET LOCAL ROLE service_role;
+
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := register_user('TESTINV0001',
+                            '11111111-aaaa-4aaa-8aaa-00000000000a',
+                            'pk-dave', 'sid-dave', 'dave', 'Dave');
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: registration returned %', v_result;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM member_roles mr
+      JOIN roles r ON r.id = mr.role_id
+     WHERE mr.user_id = '11111111-aaaa-4aaa-8aaa-00000000000a'
+       AND r.legacy_key = 'members') THEN
+    RAISE EXCEPTION 'FAIL: a new member did not receive their roles';
+  END IF;
+  RAISE NOTICE 'ok  somebody can still join a server';
+END $$;
+
+SET LOCAL ROLE authenticated;
+
 -- ============================================================
 -- 13. Private channels (020)
 -- ============================================================

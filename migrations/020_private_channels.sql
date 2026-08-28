@@ -177,7 +177,14 @@ $$;
 -- 4. One more bit
 -- ============================================================
 -- Bit 21. Numbers are assigned once and never reused, so this is an addition to
--- the list rather than an edit of it.
+-- the list — but it is delivered by redefining the function, which means the
+-- migrations have to be applied in order. Re-running 018 on its own puts the
+-- 21-bit version back and everything here stops resolving.
+--
+-- A lookup table would make each migration independent. It would also stop the
+-- function being inlined into every policy that calls it, and these are read on
+-- every row of every message query, so the ordering constraint is the cheaper
+-- of the two costs.
 --
 -- On `@everyone` by default, which is the decision worth stating out loud: a
 -- private channel is how a handful of people talk without asking permission, so

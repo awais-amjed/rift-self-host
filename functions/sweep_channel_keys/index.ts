@@ -14,16 +14,20 @@ const supabase = createClient(
 /**
  * Key-distribution sweep (Phase 2, ARCHITECTURE.md §4): one call that lists
  * every text channel where the caller can do healing work —
- * - channels whose current key version the caller holds while other keyed
+ * - channels whose current key version the caller holds while other eligible
  *   members lack an entry (returns the caller's sealed key + the missing
  *   members' chat public keys),
  * - channels with no key at all (`key_version: 0`) so the caller can
  *   bootstrap v1, and
- * - channels whose current key was sealed to somebody since banned
- *   (`rotate: true`), so the caller can mint the next version for the people
- *   still here.
+ * - channels that owe a rotation, so the caller can mint the next version for
+ *   the people still entitled to one.
  * Clients run this on launch/server-select and when the key-sweep doorbell
  * rings, so a new member gets access as soon as any member is online.
+ *
+ * This runs as the service role, so 020's policies are not protecting it.
+ * Everything it is allowed to say comes from `channel_eligible_members`, which
+ * is the same answer the policies give — see 021, which exists because four
+ * hand-written filters is four places for that answer to drift.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -38,53 +42,55 @@ Deno.serve(async (req) => {
     // Text channels of this server.
     const { data: channelsData, error: channelsError } = await supabase
       .from(DBSchema.channels.tableName)
-      .select(DBSchema.channels.id)
+      .select(`${DBSchema.channels.id}, rotate_from_key_version`)
       .eq(DBSchema.channels.serverId, auth.serverId)
       .eq(DBSchema.channels.channelType, "text");
     if (channelsError) {
       return CustomResponse.error("Error reading channels", EC.DB_ERROR, channelsError);
     }
-    const channelIds = ((channelsData ?? []) as Record<string, any>[])
-      .map((c) => c[DBSchema.channels.id] as string);
+    const allChannels = (channelsData ?? []) as Record<string, any>[];
+    const channelIds = allChannels.map((c) => c[DBSchema.channels.id] as string);
     if (channelIds.length === 0) {
       return CustomResponse.success({ work: [] });
     }
+    const rotateMarkOf = (channelId: string) =>
+      (allChannels.find((c) => c[DBSchema.channels.id] === channelId)
+        ?.rotate_from_key_version ?? null) as number | null;
 
-    // Everyone on the server, banned included: the banned are not people to
-    // seal a key to, but they are exactly who makes a rotation due, so they
-    // have to be visible here rather than filtered away by the query.
-    const { data: usersData, error: membersError } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(
-        `${DBSchema.users.id}, ${DBSchema.users.chatPublicKey},` +
-        ` ${DBSchema.users.isBanned}, ${DBSchema.users.isBot}`,
-      )
-      .eq(DBSchema.users.serverId, auth.serverId)
-      // See get_channel_key: a bot is not a member awaiting a key, and a sweep
-      // that offered one as work would hand every client an insert the
-      // database is going to refuse.
-      .eq(DBSchema.users.isBot, false)
-      .not(DBSchema.users.chatPublicKey, "is", null);
-    if (membersError) {
-      return CustomResponse.error("Error reading members", EC.DB_ERROR, membersError);
+    // Who may hold a key in each channel, and from which version. One row per
+    // (channel, person): a member from v1, a granted bot from its grant.
+    const { data: eligibleData, error: eligibleError } = await supabase
+      .from("channel_eligible_members")
+      .select("channel_id, user_id, chat_public_key, from_key_version")
+      .in("channel_id", channelIds);
+    if (eligibleError) {
+      return CustomResponse.error("Error reading eligibility", EC.DB_ERROR, eligibleError);
     }
-    const allUsers = (usersData ?? []) as Record<string, any>[];
-    const members = allUsers
-      .filter((m) => m[DBSchema.users.isBanned] !== true)
-      .map((m) => ({
-        user_id: m[DBSchema.users.id] as string,
-        chat_public_key: m[DBSchema.users.chatPublicKey] as string,
-      }));
-    const bannedIds = new Set(
-      allUsers
-        .filter((m) => m[DBSchema.users.isBanned] === true)
-        .map((m) => m[DBSchema.users.id] as string),
+    const eligible = (eligibleData ?? []) as Record<string, any>[];
+
+    /// Who a key for [channelId] at [version] may be sealed to.
+    ///
+    /// The floor has to be applied per channel *and* per version: a grant is
+    /// not a property of the bot, it is a property of the pair, and it starts
+    /// somewhere.
+    const eligibleFor = (channelId: string, version: number) =>
+      eligible
+        .filter((e) =>
+          e.channel_id === channelId && version >= (e.from_key_version as number)
+        )
+        .map((e) => ({
+          user_id: e.user_id as string,
+          chat_public_key: e.chat_public_key as string,
+        }));
+
+    // A private channel the caller is not in is not the caller's work, and
+    // listing it here would tell them it exists.
+    const myChannels = channelIds.filter((id) =>
+      eligible.some((e) => e.channel_id === id && e.user_id === auth.userId)
     );
-    const botIds = new Set(
-      allUsers
-        .filter((m) => m[DBSchema.users.isBot] === true)
-        .map((m) => m[DBSchema.users.id] as string),
-    );
+    if (myChannels.length === 0) {
+      return CustomResponse.success({ work: [] });
+    }
 
     // Whole keyring for those channels in one query.
     const { data: ringData, error: ringError } = await supabase
@@ -97,52 +103,14 @@ Deno.serve(async (req) => {
         ` ${DBSchema.channelKeyring.ciphertext},` +
         ` ${DBSchema.channelKeyring.nonce}`,
       )
-      .in(DBSchema.channelKeyring.channelId, channelIds);
+      .in(DBSchema.channelKeyring.channelId, myChannels);
     if (ringError) {
       return CustomResponse.error("Error reading keyring", EC.DB_ERROR, ringError);
     }
     const ring = (ringData ?? []) as Record<string, any>[];
 
-    // Who may hold a key in each channel, and from which version (migration
-    // 017). A bot is keyed only where somebody granted it, and only forward of
-    // that grant — which is also what makes the two rotation signals below
-    // computable without a flag anybody has to remember to clear.
-    const { data: grantData, error: grantError } = await supabase
-      .from("bot_channel_keys")
-      .select("channel_id, bot_id, from_key_version")
-      .in("channel_id", channelIds);
-    if (grantError) {
-      return CustomResponse.error("Error reading bot grants", EC.DB_ERROR, grantError);
-    }
-    const grants = (grantData ?? []) as Record<string, any>[];
-    const grantFor = (channelId: string, botId: string) =>
-      grants.find(
-        (g) => g.channel_id === channelId && g.bot_id === botId,
-      ) as { from_key_version: number } | undefined;
-
-    /// Who a key for [channelId] at [version] may be sealed to: every member,
-    /// plus the bots granted this channel from at or below that version.
-    ///
-    /// The bots have to be added *per channel and per version*, which is why
-    /// this cannot just widen the `members` query — a grant is not a property
-    /// of the bot, it is a property of the pair, and it starts somewhere.
-    const eligibleFor = (channelId: string, version: number) => [
-      ...members,
-      ...allUsers
-        .filter((m) => {
-          if (m[DBSchema.users.isBot] !== true) return false;
-          if (m[DBSchema.users.isBanned] === true) return false;
-          const grant = grantFor(channelId, m[DBSchema.users.id] as string);
-          return grant !== undefined && version >= grant.from_key_version;
-        })
-        .map((m) => ({
-          user_id: m[DBSchema.users.id] as string,
-          chat_public_key: m[DBSchema.users.chatPublicKey] as string,
-        })),
-    ];
-
     const work: Record<string, any>[] = [];
-    for (const channelId of channelIds) {
+    for (const channelId of myChannels) {
       const channelRing = ring.filter(
         (r) => r[DBSchema.channelKeyring.channelId] === channelId,
       );
@@ -152,14 +120,16 @@ Deno.serve(async (req) => {
       );
 
       if (currentVersion === 0) {
-        // No key yet — offer a bootstrap (only meaningful if members exist).
-        if (members.length > 0) {
+        // No key yet — offer a bootstrap (only meaningful if somebody can hold
+        // the result).
+        const first = eligibleFor(channelId, 1);
+        if (first.length > 0) {
           work.push({
             channel_id: channelId,
             key_version: 0,
             rotate: false,
             my_key: null,
-            members_missing: eligibleFor(channelId, 1),
+            members_missing: first,
           });
         }
         continue;
@@ -174,53 +144,48 @@ Deno.serve(async (req) => {
       const mine = current.find(
         (r) => r[DBSchema.channelKeyring.userId] === auth.userId,
       );
-      const missing = eligibleFor(channelId, currentVersion).filter(
-        (m) => !covered.has(m.user_id),
-      );
-
       if (!mine) continue;
 
-      // Rotation takes precedence over healing. A ban leaves the banned member
-      // holding the current key — the server can stop serving them, but it
-      // cannot take back what they already unwrapped — so everything sent
-      // under that key from now on has to move to a new one.
+      const nowEligible = eligibleFor(channelId, currentVersion);
+      const nowEligibleIds = new Set(nowEligible.map((m) => m.user_id));
+      const missing = nowEligible.filter((m) => !covered.has(m.user_id));
+
+      // Rotation takes precedence over healing, and supersedes it: it seals to
+      // everybody eligible, so anyone who was merely missing an entry gets one
+      // out of the same pass.
       //
-      // Being sealed into the current version is itself the signal, and it
-      // clears itself: the next version is sealed only to people still here,
-      // so the same check comes back false once the rotation lands. No flag to
-      // set, and nothing to reset if an unban follows.
+      // Three signals, and all three clear themselves for the same reason — the
+      // next version is sealed only to whoever is eligible *then*, so each check
+      // comes back false once the rotation lands. Nothing to set, nothing to
+      // reset, and an admin who grants and revokes twice in a minute leaves
+      // nothing behind to reconcile.
       //
-      // The rotation supersedes healing rather than following it: it seals to
-      // every eligible member, so anyone who was missing an entry gets one out
-      // of the same pass.
-      // Three signals, all self-clearing for the same reason: the next version
-      // is sealed only to whoever is eligible *then*, so each check comes back
-      // false once the rotation lands.
+      //   * somebody sealed into the current version who is no longer entitled
+      //     to it — a banned member, a member removed from a private channel, a
+      //     bot whose grant was revoked. One check, because they are one fact:
+      //     the server can stop serving them, but it cannot take back what they
+      //     already unwrapped, so everything from now on has to move.
       //
-      //   * a banned member still sealed into the current version (the
-      //     original);
-      //   * a bot still sealed into it whose grant has been revoked — the same
-      //     shape, for the same reason;
-      //   * a bot whose grant begins *above* the current version. That is a
-      //     grant just made, and the rotation is precisely what makes it
+      //   * somebody whose entitlement *begins* above the current version. That
+      //     is a grant just made, and the rotation is precisely what makes it
       //     forward-only: without it the bot would be handed a key that opens
       //     everything already said under it.
-      const revokedBotSealed = current.some((r) => {
-        const id = r[DBSchema.channelKeyring.userId] as string;
-        return botIds.has(id) && !grantFor(channelId, id);
-      });
-      const grantAwaitingRotation = grants.some(
-        (g) =>
-          g.channel_id === channelId &&
-          (g.from_key_version as number) > currentVersion,
+      //
+      //   * a channel that has just been opened up. `rotate_from_key_version`
+      //     is set when a private channel goes public (020), because healing
+      //     seals the *current* version — and the current version is the one
+      //     the private conversation was written under. Nobody new is sealed
+      //     until the sweep is past the mark.
+      const sealedButNotEntitled = current.some(
+        (r) => !nowEligibleIds.has(r[DBSchema.channelKeyring.userId] as string),
       );
-      const rotationDue =
-        current.some(
-          (r) => bannedIds.has(r[DBSchema.channelKeyring.userId] as string),
-        ) ||
-        revokedBotSealed ||
-        grantAwaitingRotation;
-      if (rotationDue) {
+      const entitlementAhead = eligibleFor(channelId, currentVersion + 1).some(
+        (m) => !nowEligibleIds.has(m.user_id),
+      );
+      const mark = rotateMarkOf(channelId);
+      const openedUp = mark !== null && currentVersion <= mark;
+
+      if (sealedButNotEntitled || entitlementAhead || openedUp) {
         work.push({
           channel_id: channelId,
           key_version: currentVersion,
