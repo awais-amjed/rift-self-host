@@ -1357,5 +1357,270 @@ BEGIN
   RAISE NOTICE 'ok  the old permissions RPC writes roles and reads back the same';
 END $$;
 
+-- ============================================================
+-- 13. Private channels (020)
+-- ============================================================
+-- The tests that matter here are the denials, and one of them is unusual: an
+-- administrator is denied. That is the design — an admin holds no key either
+-- way, so an override would be a promise the crypto cannot keep — and it is
+-- exactly the rule a later "just for moderation" patch would quietly undo.
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  INSERT INTO channels (id, server_id, name, channel_type, is_private)
+  VALUES ('aaaa1111-0000-4000-8000-00000000ffff',
+          'aaaa0000-0000-4000-8000-000000000001', 'secret', 'text', true);
+
+  -- Born with somebody able to run it. Without this it is orphaned from the
+  -- first statement, and section 8's tidy-up would delete it on the first
+  -- membership change.
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff'
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000002'
+                    AND can_manage) THEN
+    RAISE EXCEPTION 'FAIL: creating a private channel did not seat its creator';
+  END IF;
+  RAISE NOTICE 'ok  whoever makes a private channel can run it';
+END $$;
+
+-- A key, so there is something for the rotation marker to point past later.
+DO $$
+BEGIN
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 1,
+          '11111111-aaaa-4aaa-8aaa-000000000002',
+          '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 'secret-from-bob', 'n', 's', 1);
+END $$;
+
+-- ---------- the administrator ----------
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM channels
+              WHERE id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: an admin can see a private channel she is not in';
+  END IF;
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'secret-from-bob') THEN
+    RAISE EXCEPTION 'FAIL: an admin can read a private channel''s messages';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_keyring
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: an admin can read a private channel''s keyring';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_members
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: an admin can see who is in a private channel';
+  END IF;
+  RAISE NOTICE 'ok  an administrator is outside a room she was not invited to';
+END $$;
+
+-- The one that is arithmetic rather than a rule. Everything above is a policy
+-- somebody could widen; this is the row refusing to exist, because a wrapped
+-- key *is* read access and no later policy edit can take one back.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO channel_keyring
+      (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 1,
+            '11111111-aaaa-4aaa-8aaa-000000000001',
+            '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
+    RAISE EXCEPTION 'FAIL: a key was wrapped for somebody outside the room';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a key cannot be wrapped for a non-member';
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+    VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 'intruder', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a non-member posted into a private channel';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM set_channel_members('aaaa1111-0000-4000-8000-00000000ffff',
+                                ARRAY['11111111-aaaa-4aaa-8aaa-000000000001']::UUID[]);
+    RAISE EXCEPTION 'FAIL: a non-member added herself to a private channel';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  nobody talks their way in from outside';
+END $$;
+
+-- ---------- being let in ----------
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  PERFORM set_channel_members('aaaa1111-0000-4000-8000-00000000ffff',
+    ARRAY['11111111-aaaa-4aaa-8aaa-000000000002',
+          '11111111-aaaa-4aaa-8aaa-000000000003']::UUID[]);
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM channels
+                  WHERE id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: a member cannot see the channel she was added to';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'secret-from-bob') THEN
+    RAISE EXCEPTION 'FAIL: a member cannot read the channel she was added to';
+  END IF;
+  RAISE NOTICE 'ok  being added is being able to see it';
+END $$;
+
+-- Access by role, resolved through to the people: adding a role means whoever
+-- holds it, including whoever is given it tomorrow.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_admin UUID;
+BEGIN
+  SELECT id INTO v_admin FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND legacy_key = 'admin';
+  PERFORM set_channel_role_access('aaaa1111-0000-4000-8000-00000000ffff',
+                                  v_admin, true);
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM channels
+                  WHERE id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: a role grant did not reach the people holding it';
+  END IF;
+  -- ...and now the keyring will take her, which is the whole difference
+  -- between being allowed in and being able to read.
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 1,
+          '11111111-aaaa-4aaa-8aaa-000000000001',
+          '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
+  RAISE NOTICE 'ok  access by role reaches the keyring, not just the policy';
+END $$;
+
+-- ---------- opening it back up ----------
+-- The marker is the whole of private → public. Without it, flipping the flag
+-- hands the next person to join the server the key the private conversation is
+-- still being written under.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_mark INTEGER;
+BEGIN
+  PERFORM set_channel_private('aaaa1111-0000-4000-8000-00000000ffff', false);
+  SELECT rotate_from_key_version INTO v_mark FROM channels
+   WHERE id = 'aaaa1111-0000-4000-8000-00000000ffff';
+  IF v_mark IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'FAIL: opening a channel left no rotation mark, got %', v_mark;
+  END IF;
+  RAISE NOTICE 'ok  opening a channel leaves a rotation to do first';
+END $$;
+
+-- And it cannot be done the quiet way. A plain UPDATE would skip the mark, and
+-- the channel would hand its private history to the next arrival.
+DO $$
+BEGIN
+  BEGIN
+    UPDATE channels SET is_private = true
+     WHERE id = 'aaaa1111-0000-4000-8000-00000000ffff';
+    RAISE EXCEPTION 'FAIL: is_private was writable by hand';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  privacy changes only through the function that knows why';
+END $$;
+
+-- ---------- the last person out ----------
+DO $$
+BEGIN
+  PERFORM set_channel_private('aaaa1111-0000-4000-8000-00000000ffff', true);
+  -- Closing seats everybody who was there, and the closer can run it.
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff'
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: closing a channel dropped somebody who was in it';
+  END IF;
+
+  -- Bob hands it to carol by leaving. Longest-serving wins, and carol was
+  -- added before alice.
+  PERFORM set_channel_members('aaaa1111-0000-4000-8000-00000000ffff',
+    ARRAY['11111111-aaaa-4aaa-8aaa-000000000003',
+          '11111111-aaaa-4aaa-8aaa-000000000001']::UUID[]);
+END $$;
+
+-- Asked from inside, deliberately. Bob has just removed himself, and to him the
+-- room no longer exists — so a check made as bob would have passed whether the
+-- manage bit moved or not, and would have passed if the channel had been
+-- deleted outright.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff'
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000003'
+                    AND can_manage) THEN
+    RAISE EXCEPTION 'FAIL: the manage bit did not move to the longest-serving member';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_members
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff'
+                AND user_id = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: bob is still in a room he left';
+  END IF;
+  RAISE NOTICE 'ok  a room without a manager promotes whoever has been there longest';
+END $$;
+
+DO $$
+BEGIN
+  PERFORM set_channel_members('aaaa1111-0000-4000-8000-00000000ffff',
+                              ARRAY[]::UUID[]);
+END $$;
+
+-- And this one has to be asked from outside the policies altogether. To every
+-- member left alive, a deleted private channel and a hidden one look exactly
+-- the same — and they are not the same at all, so the assertion is made as the
+-- superuser, where RLS is not answering.
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM channels
+              WHERE id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: an empty private channel survived';
+  END IF;
+  -- Nobody could have seen it and nobody could have read it, so there is
+  -- nothing to keep and nobody left who could ask for it back.
+  IF EXISTS (SELECT 1 FROM messages
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff') THEN
+    RAISE EXCEPTION 'FAIL: the messages outlived the channel';
+  END IF;
+  RAISE NOTICE 'ok  the last person out takes the room with them';
+END $$;
+
+SET LOCAL ROLE authenticated;
+
 RESET ROLE;
 ROLLBACK;
