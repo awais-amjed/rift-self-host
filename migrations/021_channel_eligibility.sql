@@ -115,3 +115,28 @@ $$;
 
 REVOKE ALL ON FUNCTION user_has_permission(UUID, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION user_has_permission(UUID, TEXT) TO service_role;
+
+-- ============================================================
+-- 4. What a client is allowed to draw
+-- ============================================================
+-- A client has read three booleans off its own `users` row since 002 and drawn
+-- its buttons from them. With 018 those columns are a cache of three bits out
+-- of twenty-two, so a client that only reads them can only offer three of the
+-- twenty-two things a member might be allowed to do — and `CREATE_PRIVATE_CHANNEL`
+-- is on `@everyone`, which none of the three would ever say.
+--
+-- The bits themselves, then. `app.permissions()` is in the `app` schema, which
+-- PostgREST does not expose; this is the same answer through the front door.
+--
+-- It only ever describes the caller. There is no argument to point somewhere
+-- else, which is what keeps it safe to hand to `authenticated` — and a client
+-- drawing a button it is not allowed to press is a cosmetic bug, because the
+-- policy is still the thing that decides.
+
+CREATE OR REPLACE FUNCTION my_permissions() RETURNS BIGINT
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT app.permissions()
+$$;
+
+REVOKE ALL ON FUNCTION my_permissions() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION my_permissions() TO authenticated;

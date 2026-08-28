@@ -1433,6 +1433,40 @@ BEGIN
   VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 'secret-from-bob', 'n', 's', 1);
 END $$;
 
+-- Making one is a single statement, and it has to be. `INSERT ... RETURNING`
+-- applies the *select* policy to the row it hands back, and a private channel's
+-- select policy asks whether the caller is in it — which they are not until the
+-- after-insert trigger seats them, which has not run yet. The insert worked and
+-- reading its own row did not, and Postgres reported it as a WITH CHECK
+-- violation naming the wrong policy. Found by clicking the button (022).
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := create_channel('rls-returning', 'text', true,
+                             ARRAY['11111111-aaaa-4aaa-8aaa-000000000003']::UUID[]);
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: creating a private channel returned %', v_result;
+  END IF;
+  IF (v_result->>'is_private')::BOOLEAN IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: the row it handed back was not the row it made';
+  END IF;
+
+  -- The creator is seated by the function, so a caller who forgot to name
+  -- themselves does not create a channel and destroy it in one statement.
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = (v_result->>'id')::UUID
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000002'
+                    AND can_manage) THEN
+    RAISE EXCEPTION 'FAIL: the creator was not seated';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = (v_result->>'id')::UUID
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
+    RAISE EXCEPTION 'FAIL: the people it was made for were not seated';
+  END IF;
+  RAISE NOTICE 'ok  a private channel can be made and read back in one go';
+END $$;
+
 -- ---------- the administrator ----------
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
