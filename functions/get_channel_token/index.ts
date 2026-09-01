@@ -78,7 +78,8 @@ Deno.serve(async (req) => {
     const { data: userData, error: userError } = await supabase
       .from(DBSchema.users.tableName)
       .select(
-        `${DBSchema.users.displayName}, ${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}`,
+        `${DBSchema.users.displayName}, ${DBSchema.users.isMuted}, ` +
+          `${DBSchema.users.isDeafened}, ${DBSchema.users.isBot}`,
       )
       .eq(DBSchema.users.id, auth.userId)
       .single();
@@ -108,6 +109,58 @@ Deno.serve(async (req) => {
     const displayName = userRecord[DBSchema.users.displayName];
     const isMuted: boolean = userRecord[DBSchema.users.isMuted] === true;
     const isDeafened: boolean = userRecord[DBSchema.users.isDeafened] === true;
+    const isBot: boolean = userRecord[DBSchema.users.isBot] === true;
+
+    // A bot publishes; it does not hear (BOTS.md §6b, migration 031).
+    //
+    // This function never asked what the caller was, and `@everyone` carries
+    // CONNECT and SPEAK — so a bot invited to a server could sit in a call and
+    // receive everybody's audio, with nothing shown in the room. Voice was the
+    // one place "a bot hears what you tell it, not what you say" was false.
+    //
+    // A music bot only publishes, so the strict default costs it nothing. A bot
+    // that genuinely needs to listen gets an explicit per-channel grant, and
+    // unlike §6's key grant this one is honestly reversible: subscription is a
+    // permission rather than arithmetic, so revoking stops the audio mid-call.
+    // Calls are end-to-end encrypted (migrations 031-032), and a bot publishing
+    // with `encryptionType: kNone` would be one every member's client skips the
+    // frame cryptor for — its audio in the clear, inside the room built so that
+    // could not happen. So a bot needs a media key before it needs a token, and
+    // a member's client is the only thing that can produce one.
+    //
+    // Refusing until it has one is the honest failure: the bot is told to wait
+    // rather than joining and being inaudible for reasons nothing reports.
+    if (isBot) {
+      const { data: botKey } = await supabase
+        .from("bot_voice_keys")
+        .select("bot_id")
+        .eq("channel_id", channel_id)
+        .eq("bot_id", auth.userId)
+        .limit(1)
+        .maybeSingle();
+      if (!botKey) {
+        return CustomResponse.error(
+          "No media key for this channel yet — a member has to be here first",
+          EC.KEY_NOT_READY,
+        );
+      }
+    }
+
+    let mayListen = true;
+    if (isBot) {
+      const { data: grant, error: grantError } = await supabase
+        .from("bot_voice_grants")
+        .select("bot_id")
+        .eq("channel_id", channel_id)
+        .eq("bot_id", auth.userId)
+        .maybeSingle();
+      if (grantError) {
+        return CustomResponse.error("Error reading bot voice access", EC.DB_ERROR, grantError);
+      }
+      // Fail closed. An unreadable grant is a bot that cannot hear, never one
+      // that can — the failure people notice is the safe one.
+      mayListen = grant !== null;
+    }
 
     // Fetch LiveKit credentials. The API secret lives in `server_secrets`,
     // which no client can read — minting this token is the only reason anything
@@ -147,8 +200,12 @@ Deno.serve(async (req) => {
       canPublish: true,
       // undefined = all sources. Deafened denies the mic as well as the ears.
       canPublishSources: grantSources(isMuted, isDeafened),
-      canSubscribe: !isDeafened,
-      roomAdmin: auth.isChannelManager,
+      canSubscribe: !isDeafened && mayListen,
+      // A bot is never a room admin. `isChannelManager` is a cached boolean a
+      // bot could hold if somebody handed it a moderator role, and roomAdmin is
+      // the power to mute and remove people in a call — a thing a bot should be
+      // given deliberately if ever, not as a side effect of a text permission.
+      roomAdmin: auth.isChannelManager && !isBot,
     });
 
     const livekitToken = await at.toJwt();

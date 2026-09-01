@@ -13,7 +13,7 @@ const supabase = createClient(
 
 /**
  * Key-distribution sweep (Phase 2, ARCHITECTURE.md §4): one call that lists
- * every text channel where the caller can do healing work —
+ * every channel where the caller can do healing work —
  * - channels whose current key version the caller holds while other eligible
  *   members lack an entry (returns the caller's sealed key + the missing
  *   members' chat public keys),
@@ -23,6 +23,13 @@ const supabase = createClient(
  *   the people still entitled to one.
  * Clients run this on launch/server-select and when the key-sweep doorbell
  * rings, so a new member gets access as soon as any member is online.
+ *
+ * **Voice channels are included**, and used not to be — they held no messages,
+ * so they held no keys and there was nothing to sweep. Calls are now encrypted
+ * with the channel's own key (ARCHITECTURE.md §5), which makes the omission a
+ * hole rather than an optimisation: without it a banned member's voice key is
+ * never rotated away from them, and a new member is only ever keyed by whoever
+ * happens to join a call next.
  *
  * This runs as the service role, so 020's policies are not protecting it.
  * Everything it is allowed to say comes from `channel_eligible_members`, which
@@ -39,12 +46,13 @@ Deno.serve(async (req) => {
     const auth = await authenticateToken(supabase, token);
     if (isAuthError(auth)) return auth;
 
-    // Text channels of this server.
+    // Every channel of this server, of either kind. A voice channel's key is
+    // what its calls are encrypted with, and it rotates for the same reasons a
+    // text channel's does.
     const { data: channelsData, error: channelsError } = await supabase
       .from(DBSchema.channels.tableName)
       .select(`${DBSchema.channels.id}, rotate_from_key_version`)
-      .eq(DBSchema.channels.serverId, auth.serverId)
-      .eq(DBSchema.channels.channelType, "text");
+      .eq(DBSchema.channels.serverId, auth.serverId);
     if (channelsError) {
       return CustomResponse.error("Error reading channels", EC.DB_ERROR, channelsError);
     }

@@ -2041,5 +2041,229 @@ BEGIN
   RAISE NOTICE 'ok  granting the server needs MANAGE_BOTS too';
 END $$;
 
+-- ============================================================
+-- 16. What a bot may hear (031)
+-- ============================================================
+-- Voice was the one place BOTS.md's rule was simply false: `get_channel_token`
+-- never asked what the caller was, `@everyone` carries CONNECT and SPEAK, and
+-- the token said `canSubscribe`. A bot could sit in a call and receive
+-- everybody's audio with nothing shown in the room.
+--
+-- The table below is what the edge function reads to decide. These tests are
+-- about who may write it — the mint itself is TypeScript and out of reach from
+-- here, which is exactly why the row has to be the thing that is hard to get.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000d1',
+   'aaaa0000-0000-4000-8000-000000000001', 'stage', 'voice');
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF grant_bot_voice_listen('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                            'aaaa1111-0000-4000-8000-0000000000d1')->>'reason'
+     <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin could not let a bot listen';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM bot_voice_grants
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d1'
+                    AND bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: the grant was not recorded';
+  END IF;
+  RAISE NOTICE 'ok  an admin can let a bot hear a voice channel';
+END $$;
+
+-- The marker every member reads. A grant nobody in the room can see is the one
+-- thing this design does not allow (BOTS.md §6, rule 4).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM voice_listeners
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d1'
+                    AND bot_name = 'ModBot') THEN
+    RAISE EXCEPTION 'FAIL: the channel does not say who is listening';
+  END IF;
+  RAISE NOTICE 'ok  the channel says which bot can hear it, by name';
+END $$;
+
+-- A text channel has no call to hear, and a grant on one would be a row the
+-- token mint never reads — a switch that looks like it does something.
+DO $$
+BEGIN
+  IF grant_bot_voice_listen('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                            'aaaa1111-0000-4000-8000-000000000001')->>'reason'
+     <> 'not_a_voice_channel' THEN
+    RAISE EXCEPTION 'FAIL: a text channel accepted a voice grant';
+  END IF;
+  RAISE NOTICE 'ok  only a voice channel can be listened to';
+END $$;
+
+-- Closing a channel re-asks the question. Whoever allowed this was looking at a
+-- room the whole server could walk into.
+DO $$
+BEGIN
+  PERFORM set_channel_private('aaaa1111-0000-4000-8000-0000000000d1', true);
+  IF EXISTS (SELECT 1 FROM bot_voice_grants
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d1') THEN
+    RAISE EXCEPTION 'FAIL: a channel made private kept its listener';
+  END IF;
+  RAISE NOTICE 'ok  making a channel private takes the listener out of it';
+END $$;
+
+-- And a plain member cannot put one back, in a channel they are now in.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF grant_bot_voice_listen('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                            'aaaa1111-0000-4000-8000-0000000000d1')->>'reason'
+     = 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a plain member let a bot into a call';
+  END IF;
+  RAISE NOTICE 'ok  letting a bot listen needs MANAGE_BOTS';
+END $$;
+
+-- Nobody writes the table directly. Every rule above is in the function, and a
+-- client that could insert its own row would have none of them applied.
+--
+-- `SET LOCAL ROLE` and not merely a claim: the checks above run as the owner
+-- with a JWT claim set, which is enough for `app.has_perm` and not for a column
+-- grant. A test for a grant has to actually be the role. New public tables
+-- arrive writable by `authenticated` on Supabase, so this is the assertion that
+-- 031's REVOKE was not forgotten.
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO bot_voice_grants (channel_id, bot_id)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000d1',
+            '11111111-aaaa-4aaa-8aaa-0000000000b0');
+    RAISE EXCEPTION 'FAIL: a member inserted a voice grant directly';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  the grant table takes no writes from anybody';
+END $$;
+
+-- ============================================================
+-- 17. The key a bot speaks with (032)
+-- ============================================================
+-- End-to-end encrypted calls took away the mechanism 031 had just built: a bot
+-- has to encrypt to be audible, and with one key per room the key that encrypts
+-- also decrypts. The fix is two keys — members use the channel key, a bot uses
+-- HMAC(channelKey, 'voicebot:v1:<botId>') — and this table is where the second
+-- one is put, sealed by a member.
+--
+-- The bytes are opaque here. What the database decides is *who may write one*
+-- and *which of the two kinds it claims to be*.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000e1',
+   'aaaa0000-0000-4000-8000-000000000001', 'booth', 'voice');
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+-- A plain member seals the publish key. No grant needed and none consulted:
+-- speaking was never the half that had to be allowed.
+DO $$
+BEGIN
+  INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                              wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
+          '11111111-aaaa-4aaa-8aaa-0000000000b0', 1, false,
+          '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+  RAISE NOTICE 'ok  any member can seal a bot the key it speaks with';
+END $$;
+
+-- But not the channel key. Claiming to hand over the real thing is the one
+-- claim the server can check, and it checks it against the grant.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                                wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 2, true,
+            '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+    RAISE EXCEPTION 'FAIL: a member handed a bot the channel key with no grant';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  the channel key needs a listening grant to be sealed';
+END $$;
+
+RESET ROLE;
+
+-- Granting drops what was sealed before it. Otherwise the bot keeps encrypting
+-- with a key nobody looks for and stays inaudible after being promoted.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  PERFORM grant_bot_voice_listen('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                 'aaaa1111-0000-4000-8000-0000000000e1');
+  IF EXISTS (SELECT 1 FROM bot_voice_keys
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000e1') THEN
+    RAISE EXCEPTION 'FAIL: granting left the old publish key in place';
+  END IF;
+  RAISE NOTICE 'ok  changing a grant clears the key sealed under the old one';
+END $$;
+
+-- And now the channel key is allowed, because the grant says so.
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                              wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
+          '11111111-aaaa-4aaa-8aaa-0000000000b0', 1, true,
+          '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
+  RAISE NOTICE 'ok  a granted bot may be sealed the channel key itself';
+END $$;
+
+RESET ROLE;
+
+-- A bot writes nothing here. It has no channel key to derive from, so a row
+-- from a bot is either nonsense or one bot handing another something it was
+-- never given.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000b0","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                                wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 3, false,
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 'eph', 'ct', 'n');
+    RAISE EXCEPTION 'FAIL: a bot sealed itself a voice key';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a bot cannot write its own key material';
+END $$;
+
+-- It can read the one sealed for it, which is the whole point of the table.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM bot_voice_keys
+                  WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a bot cannot read the key sealed to it';
+  END IF;
+  RAISE NOTICE 'ok  and can read the one a member sealed for it';
+END $$;
+
 RESET ROLE;
 ROLLBACK;

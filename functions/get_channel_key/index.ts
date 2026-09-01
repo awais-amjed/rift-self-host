@@ -22,6 +22,13 @@ const supabase = createClient(
  *   `current_version`, with their X25519 public keys — any member's client
  *   can heal them by wrapping and posting entries (this is the
  *   pending-key-request sweep primitive).
+ * - `bots_missing` (voice channels only): bots that may speak here and have no
+ *   key for `current_version`, and whether each may also hear. A member's
+ *   client seals them the same way it heals a member — a bot's media key is
+ *   derived from the channel key, so only somebody holding that can produce
+ *   one (migration 032).
+ * - `my_voice_key`: for a bot caller, its own sealed media key. Bots have no
+ *   `channel_keyring` rows and never will; this is the one thing they get.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -114,10 +121,65 @@ Deno.serve(async (req) => {
         chat_public_key: m.chat_public_key,
       }));
 
+    // Voice: who still needs a media key, and — for a bot asking — its own.
+    // Text channels skip all of it; nothing publishes media into one.
+    let botsMissing: Record<string, unknown>[] = [];
+    let myVoiceKey: Record<string, unknown> | null = null;
+
+    const { data: channelRow } = await supabase
+      .from(DBSchema.channels.tableName)
+      .select(DBSchema.channels.channelType)
+      .eq(DBSchema.channels.id, channel_id)
+      .single();
+    const isVoice =
+      (channelRow as Record<string, any> | null)?.[DBSchema.channels.channelType] ===
+        "voice";
+
+    if (isVoice && currentVersion > 0) {
+      const { data: sealed } = await supabase
+        .from("bot_voice_keys")
+        .select("bot_id, is_channel_key, ephemeral_public_key, ciphertext, nonce")
+        .eq("channel_id", channel_id)
+        .eq("key_version", currentVersion);
+      const sealedRows = (sealed ?? []) as Record<string, any>[];
+
+      const mine = sealedRows.find((r) => r.bot_id === auth.userId);
+      if (mine) {
+        myVoiceKey = {
+          key_version: currentVersion,
+          is_channel_key: mine.is_channel_key,
+          ephemeral_public_key: mine.ephemeral_public_key,
+          ciphertext: mine.ciphertext,
+          nonce: mine.nonce,
+        };
+      }
+
+      const { data: candidates } = await supabase
+        .from("bot_voice_key_candidates")
+        .select("bot_id, chat_public_key, may_listen")
+        .eq("channel_id", channel_id);
+
+      // A row whose `is_channel_key` disagrees with the grant is as good as
+      // missing: the bot would be encrypting with a key nobody is listening
+      // for. The grant trigger drops those, and this is the belt to its braces.
+      const held = new Map(
+        sealedRows.map((r) => [r.bot_id as string, r.is_channel_key === true]),
+      );
+      botsMissing = ((candidates ?? []) as Record<string, any>[])
+        .filter((b) => held.get(b.bot_id as string) !== (b.may_listen === true))
+        .map((b) => ({
+          bot_id: b.bot_id,
+          chat_public_key: b.chat_public_key,
+          may_listen: b.may_listen === true,
+        }));
+    }
+
     return CustomResponse.success({
       current_version: currentVersion,
       my_keys: myKeys,
       members_missing: membersMissing,
+      bots_missing: botsMissing,
+      my_voice_key: myVoiceKey,
     });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);

@@ -38,6 +38,9 @@ export const CHANNEL_WRONG_SERVER  = "channel_wrong_server"; // channel belongs 
 
 // ── Key rotation ──────────────────────────────────────────────────────────────
 export const KEY_SAME   = "key_same";   // new key identical to old key
+// A bot asked for a voice token before any member sealed it a media key.
+// Retryable, and it clears as soon as a member is in the channel.
+export const KEY_NOT_READY = "key_not_ready";
 export const KEY_IN_USE = "key_in_use"; // new key already registered to another user
 
 // ── Registration ──────────────────────────────────────────────────────────────
