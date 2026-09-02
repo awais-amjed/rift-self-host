@@ -2265,5 +2265,111 @@ BEGIN
   RAISE NOTICE 'ok  and can read the one a member sealed for it';
 END $$;
 
+-- ============================================================
+-- 18. Who a message can reach (034)
+-- ============================================================
+-- `channel_audience` is what the composer asks so its `@` menu stops offering
+-- names the trigger will strip. Three things have to hold or it is worse than
+-- the roster it replaced: it resolves roles, it excludes outsiders, and an
+-- outsider asking gets nothing rather than a membership list.
+
+RESET ROLE;
+
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-0000000000a1');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key)
+VALUES ('11111111-aaaa-4aaa-8aaa-0000000000a1',
+        'aaaa0000-0000-4000-8000-000000000001',
+        'dana', 'Dana', 'pk-dana', 'sid-dana', 'chat-dana');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+-- Bob's room. Carol is in it by name; alice will get in by role; dana never
+-- does; the bot is eligible, because it can hold a key.
+DO $$
+DECLARE v_role UUID;
+BEGIN
+  INSERT INTO channels (id, server_id, name, channel_type, is_private)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000a0',
+          'aaaa0000-0000-4000-8000-000000000001', 'audience', 'text', true);
+  PERFORM set_channel_members('aaaa1111-0000-4000-8000-0000000000a0',
+    ARRAY['11111111-aaaa-4aaa-8aaa-000000000002',
+          '11111111-aaaa-4aaa-8aaa-000000000003',
+          '11111111-aaaa-4aaa-8aaa-0000000000b0']::UUID[]);
+
+  SELECT id INTO v_role FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Admin';
+  PERFORM set_channel_role_access('aaaa1111-0000-4000-8000-0000000000a0',
+                                  v_role, true);
+END $$;
+
+DO $$
+DECLARE v_seen UUID[];
+BEGIN
+  SELECT array_agg(user_id ORDER BY user_id) INTO v_seen
+    FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0');
+
+  IF NOT ('11111111-aaaa-4aaa-8aaa-000000000003' = ANY(v_seen)) THEN
+    RAISE EXCEPTION 'FAIL: somebody seated by name is not in the audience';
+  END IF;
+  -- The one a client could not work out for itself without re-implementing
+  -- `in_channel`: alice is nowhere in `channel_members`.
+  IF NOT ('11111111-aaaa-4aaa-8aaa-000000000001' = ANY(v_seen)) THEN
+    RAISE EXCEPTION 'FAIL: a role grant did not resolve into the audience';
+  END IF;
+  IF '11111111-aaaa-4aaa-8aaa-0000000000a1' = ANY(v_seen) THEN
+    RAISE EXCEPTION 'FAIL: somebody outside the room is in its audience';
+  END IF;
+  -- Not the bot, and not because it is a bot: `set_channel_members` refuses
+  -- one, so it was never seated. A bot reaches a private channel through
+  -- `grant_bot_channel_key` and nothing else, which is a key rather than a
+  -- membership — and `/` addresses it either way, from its own menu.
+  IF '11111111-aaaa-4aaa-8aaa-0000000000b0' = ANY(v_seen) THEN
+    RAISE EXCEPTION 'FAIL: a bot was seated in a private channel';
+  END IF;
+  RAISE NOTICE 'ok  the audience is everybody in the room, by name or by role';
+END $$;
+
+-- The same question a banned member's presence answers differently. A ban is
+-- exactly where "still in the list" and "may still read" come apart, and the
+-- menu must not offer somebody whose mention the trigger will drop. Carol
+-- stays seated throughout — that is the point.
+RESET ROLE;
+UPDATE users SET is_banned = true WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003';
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000a0'
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
+    RAISE EXCEPTION 'FAIL: the ban removed her seat, so this proves nothing';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0')
+              WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
+    RAISE EXCEPTION 'FAIL: a banned member is still in the audience';
+  END IF;
+  RAISE NOTICE 'ok  a ban takes somebody out of it without taking their seat';
+END $$;
+
+RESET ROLE;
+UPDATE users SET is_banned = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003';
+SET LOCAL ROLE authenticated;
+
+-- And the denial that makes the rest safe to expose: asking about a room you
+-- are not in tells you nothing, rather than telling you who is in it.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000a1","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0')) THEN
+    RAISE EXCEPTION 'FAIL: an outsider read a private channel''s audience';
+  END IF;
+  RAISE NOTICE 'ok  an outsider asking gets an empty answer, not a roster';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
