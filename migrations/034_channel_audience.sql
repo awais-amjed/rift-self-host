@@ -40,9 +40,11 @@ $$;
 COMMENT ON FUNCTION channel_audience(UUID) IS
   'Server members a message in this channel can actually reach — the same set '
   '`validate_message_mentions` keeps. Empty for a channel the caller cannot '
-  'see. A bot is in a public channel''s audience and never a private one''s: '
-  '`set_channel_members` refuses to seat one, because `grant_bot_channel_key` '
-  'is its only door. Declining to @mention either is the composer''s job '
+  'see. Bots are in it on the same terms as anybody: always in a public '
+  'channel, and in a private one only through a role with `channel_role_access`'
+  ', since `set_channel_members` refuses to seat a bot by name. That is exactly '
+  'who a `/` command can reach — `messages_select` asks `can_see_channel` '
+  'before it asks `to_bot`. Declining to @mention them is the composer''s job '
   '(BOTS.md §4).';
 
 REVOKE ALL ON FUNCTION channel_audience(UUID) FROM PUBLIC;

@@ -2322,15 +2322,50 @@ BEGIN
   IF '11111111-aaaa-4aaa-8aaa-0000000000a1' = ANY(v_seen) THEN
     RAISE EXCEPTION 'FAIL: somebody outside the room is in its audience';
   END IF;
-  -- Not the bot, and not because it is a bot: `set_channel_members` refuses
-  -- one, so it was never seated. A bot reaches a private channel through
-  -- `grant_bot_channel_key` and nothing else, which is a key rather than a
-  -- membership — and `/` addresses it either way, from its own menu.
+  -- Not the bot: `set_channel_members` refuses to seat one by name, so it was
+  -- never in. This is also the answer to who a `/` command reaches here —
+  -- `messages_select` asks `can_see_channel` before it asks `to_bot`, so a
+  -- command to a bot outside the room is a plaintext row nobody collects.
   IF '11111111-aaaa-4aaa-8aaa-0000000000b0' = ANY(v_seen) THEN
     RAISE EXCEPTION 'FAIL: a bot was seated in a private channel';
   END IF;
   RAISE NOTICE 'ok  the audience is everybody in the room, by name or by role';
 END $$;
+
+-- A role is the bot's one door, and it is a real one: the composer's `/` menu
+-- reads this list, so a bot let in this way is offered and a bot outside is
+-- not. Without it the command goes out in the clear addressed to somebody
+-- `messages_select` will never hand it to.
+RESET ROLE;
+INSERT INTO member_roles (user_id, role_id)
+SELECT '11111111-aaaa-4aaa-8aaa-0000000000b0', id FROM roles
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Admin'
+ON CONFLICT DO NOTHING;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0')
+                  WHERE user_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a role did not let a bot into a private channel';
+  END IF;
+  -- And that is not a formality: it is exactly what `messages_select` asks
+  -- before it asks `to_bot`, so this bot can now be sent a `/` command here.
+  IF NOT EXISTS (SELECT 1 FROM channel_members
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000a0'
+                    AND user_id = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: the room emptied out from under this test';
+  END IF;
+  RAISE NOTICE 'ok  and a role is the one way a bot gets into one';
+END $$;
+
+RESET ROLE;
+DELETE FROM member_roles
+ WHERE user_id = '11111111-aaaa-4aaa-8aaa-0000000000b0'
+   AND role_id = (SELECT id FROM roles
+                   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                     AND name = 'Admin');
+SET LOCAL ROLE authenticated;
 
 -- The same question a banned member's presence answers differently. A ban is
 -- exactly where "still in the list" and "may still read" come apart, and the
