@@ -40,8 +40,14 @@ Deno.serve(async (req) => {
     // `visible_channels` is the same answer 020's policies give; asking the
     // database rather than reimplementing the rule here is the whole point of
     // 021.
+    //
+    // `channel_joinable_by` rather than `channel_visible_to` (037): a summoned
+    // bot is in the room without being of it. It may take a token for this one
+    // voice channel and nothing else — it still cannot list the channel, read
+    // its roster or post in it, because every other caller asks
+    // `app.sees_channel` and still gets no.
     const { data: visible, error: visibleError } = await supabase.rpc(
-      "channel_visible_to",
+      "channel_joinable_by",
       { p_channel: channel_id, p_user: auth.userId },
     );
     if (visibleError) {

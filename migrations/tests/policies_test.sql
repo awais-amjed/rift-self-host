@@ -2664,5 +2664,159 @@ BEGIN
   RAISE NOTICE 'ok  an administrator needs no backfill to hold a new bit';
 END $$;
 
+-- ============================================================
+-- 21. Summoning a bot into a call (037)
+-- ============================================================
+-- The thing people most want a bot for, and it did not work in a private voice
+-- channel at all: `channel_visible_to` said no, so there was no token, and
+-- `bot_voice_key_candidates` said no, so there was nothing to speak with.
+--
+-- What makes a default permission safe here is what a summon *is not*. It is
+-- not membership and it is not listening.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000d7',
+   'aaaa0000-0000-4000-8000-000000000001', 'green-room', 'voice', true);
+INSERT INTO channel_members (channel_id, user_id)
+VALUES ('aaaa1111-0000-4000-8000-0000000000d7',
+        '11111111-aaaa-4aaa-8aaa-000000000002');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  -- Before: the bot cannot get a token for a room it is not in.
+  IF channel_joinable_by('aaaa1111-0000-4000-8000-0000000000d7',
+                         '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a bot could join a private call unasked';
+  END IF;
+
+  v_result := summon_bot_to_voice('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                  'aaaa1111-0000-4000-8000-0000000000d7');
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a member in the room could not summon: %', v_result;
+  END IF;
+
+  IF NOT channel_joinable_by('aaaa1111-0000-4000-8000-0000000000d7',
+                             '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: the summon did not open the token gate';
+  END IF;
+  RAISE NOTICE 'ok  a member can call a bot into a private call';
+END $$;
+
+-- The half that makes `SUMMON_BOTS` safe on `@everyone`: in the room, not of
+-- it. Every other caller asks `sees_channel` and still gets no.
+DO $$
+BEGIN
+  IF channel_visible_to('aaaa1111-0000-4000-8000-0000000000d7',
+                        '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a summon made the bot a member of the channel';
+  END IF;
+  IF app.channel_eligible('aaaa1111-0000-4000-8000-0000000000d7',
+                          '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a summon made the bot eligible for the channel key';
+  END IF;
+  RAISE NOTICE 'ok  and that is all it does — no membership, no channel key';
+END $$;
+
+-- A summon is what puts a bot on the sealing list now, in a public channel as
+-- well as a private one. Members' clients stop sealing for bots that never join.
+-- Read as the owner: the view is service-role only, like the other four
+-- answers 021 computes for the edge functions.
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM bot_voice_key_candidates
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d7'
+                    AND bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a summoned bot is not on the sealing list';
+  END IF;
+  -- It publishes; it does not hear. `may_listen` is the separate admin grant.
+  IF (SELECT may_listen FROM bot_voice_key_candidates
+       WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d7'
+         AND bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: summoning granted listening';
+  END IF;
+  RAISE NOTICE 'ok  it gets a key to speak with, and no permission to hear';
+END $$;
+
+SET LOCAL ROLE authenticated;
+
+-- The bot learns where it has been asked to go by reading its own row. It
+-- cannot see the channel, so this is the only way it could.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000b0","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM bot_voice_summons
+                  WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a bot cannot see that it was summoned';
+  END IF;
+  RAISE NOTICE 'ok  and the bot can read the summons addressed to it';
+END $$;
+
+-- Dismissing takes the media key with it. Without that a dismissed bot keeps
+-- something usable and only the token stands between it and the room.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                              wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000d7',
+          '11111111-aaaa-4aaa-8aaa-0000000000b0', 1, false,
+          '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+
+  PERFORM dismiss_bot_from_voice('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                 'aaaa1111-0000-4000-8000-0000000000d7');
+
+  IF channel_joinable_by('aaaa1111-0000-4000-8000-0000000000d7',
+                         '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a dismissed bot can still take a token';
+  END IF;
+  IF EXISTS (SELECT 1 FROM bot_voice_keys
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d7'
+                AND bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: dismissing left the media key behind';
+  END IF;
+  RAISE NOTICE 'ok  dismissing takes the key with it, not just the welcome';
+END $$;
+
+-- The permission, and the one shape of channel this is not for.
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := summon_bot_to_voice('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                  'aaaa1111-0000-4000-8000-000000000001');
+  IF v_result->>'reason' <> 'not_a_voice_channel' THEN
+    RAISE EXCEPTION 'FAIL: a bot was summoned into a text channel: %', v_result;
+  END IF;
+  RAISE NOTICE 'ok  there is nothing to summon a bot into but a call';
+END $$;
+
+RESET ROLE;
+UPDATE roles SET permissions = permissions & ~app.perm('SUMMON_BOTS')
+ WHERE is_everyone AND server_id = 'aaaa0000-0000-4000-8000-000000000001';
+SET LOCAL ROLE authenticated;
+
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := summon_bot_to_voice('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                                  'aaaa1111-0000-4000-8000-0000000000d7');
+  IF v_result->>'reason' <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: summoning ignored the permission: %', v_result;
+  END IF;
+  RAISE NOTICE 'ok  and an admin who takes the bit away is obeyed';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
