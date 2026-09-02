@@ -2818,5 +2818,113 @@ BEGIN
   RAISE NOTICE 'ok  and an admin who takes the bit away is obeyed';
 END $$;
 
+-- ============================================================
+-- 22. A summon outliving its reason (038)
+-- ============================================================
+-- 037 gave a summon two ways to end and both were somebody deciding. Nothing
+-- ended one because the reason for it had gone.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000e8',
+   'aaaa0000-0000-4000-8000-000000000001', 'open-booth', 'voice');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  PERFORM summon_bot_to_voice('11111111-aaaa-4aaa-8aaa-0000000000b0',
+                              'aaaa1111-0000-4000-8000-0000000000e8');
+  IF NOT channel_joinable_by('aaaa1111-0000-4000-8000-0000000000e8',
+                             '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: the summon did not take, so this proves nothing';
+  END IF;
+END $$;
+
+-- Closing the channel. 031 already drops a listening grant here; a summon is
+-- the same shape and was left out, so a bot called into a public call could
+-- still take a token for it afterwards — `channel_joinable_by` reads the summon
+-- and never asks about privacy.
+DO $$
+BEGIN
+  PERFORM set_channel_private('aaaa1111-0000-4000-8000-0000000000e8', true);
+
+  IF EXISTS (SELECT 1 FROM bot_voice_summons
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000e8') THEN
+    RAISE EXCEPTION 'FAIL: closing a channel left its summons behind';
+  END IF;
+  IF channel_joinable_by('aaaa1111-0000-4000-8000-0000000000e8',
+                         '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a bot can still walk into a channel that closed';
+  END IF;
+  RAISE NOTICE 'ok  closing a channel takes its summons with it';
+END $$;
+
+-- And an hour of nobody using one. A summon is a request to come and play
+-- *now*; one that has sat unanswered has been answered by events.
+RESET ROLE;
+
+INSERT INTO bot_voice_summons (channel_id, bot_id, summoned_by, summoned_at)
+VALUES ('aaaa1111-0000-4000-8000-0000000000d7',
+        '11111111-aaaa-4aaa-8aaa-0000000000b0',
+        '11111111-aaaa-4aaa-8aaa-000000000002', now() - interval '2 hours'),
+       ('aaaa1111-0000-4000-8000-0000000000d7',
+        '11111111-aaaa-4aaa-8aaa-0000000000a1',
+        '11111111-aaaa-4aaa-8aaa-000000000002', now())
+ON CONFLICT DO NOTHING;
+
+DO $$
+BEGIN
+  PERFORM app.expire_bot_voice_summons();
+
+  IF EXISTS (SELECT 1 FROM bot_voice_summons
+              WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0'
+                AND channel_id = 'aaaa1111-0000-4000-8000-0000000000d7') THEN
+    RAISE EXCEPTION 'FAIL: a two-hour-old summon survived the sweep';
+  END IF;
+  -- And the fresh one is untouched, or the sweep is just a delete.
+  IF NOT EXISTS (SELECT 1 FROM bot_voice_summons
+                  WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000a1'
+                    AND channel_id = 'aaaa1111-0000-4000-8000-0000000000d7') THEN
+    RAISE EXCEPTION 'FAIL: the sweep took a summon somebody had just made';
+  END IF;
+  RAISE NOTICE 'ok  and so does an hour of nobody answering one';
+END $$;
+
+-- The view a client draws them from, so a summon whose bot never turned up is
+-- visible and therefore dismissable. `security_invoker`, so the row policy is
+-- what decides — the room, or the bot itself.
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM voice_summons
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d7'
+                    AND bot_name IS NOT NULL) THEN
+    RAISE EXCEPTION 'FAIL: a member in the room cannot see what was summoned';
+  END IF;
+  RAISE NOTICE 'ok  and the room can see what has been called in, by name';
+END $$;
+
+-- Somebody outside the room sees nothing, which is the same answer
+-- `bot_voice_summons_select` gives about the table.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000a1","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM voice_summons
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000d7'
+                AND bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: an outsider read a private channel''s summons';
+  END IF;
+  RAISE NOTICE 'ok  and somebody outside it sees nothing, view or table';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
