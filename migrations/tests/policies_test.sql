@@ -2406,5 +2406,156 @@ BEGIN
   RAISE NOTICE 'ok  an outsider asking gets an empty answer, not a roster';
 END $$;
 
+-- ============================================================
+-- 19. What a granted bot actually reads (035)
+-- ============================================================
+-- 017 built the key half of the moderation grant and it was correct. It never
+-- let the bot read a message: `messages_select` restricted every bot to what it
+-- was addressed and what it wrote, and no later migration touched that. The
+-- grant machinery was complete and the feature did nothing.
+--
+-- These are the tests that would have caught it, and the ones that keep the
+-- boundary a number rather than a promise.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000c5',
+   'aaaa0000-0000-4000-8000-000000000001', 'watched', 'text');
+
+-- Three versions of history and a plaintext row, then a grant that starts at 3.
+INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+VALUES ('aaaa1111-0000-4000-8000-0000000000c5',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'said-before', 'n', 's', 1),
+       ('aaaa1111-0000-4000-8000-0000000000c5',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'said-after',  'n', 's', 3),
+       ('aaaa1111-0000-4000-8000-0000000000c5',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'in-the-clear', 'n', 's', 0);
+
+-- Somebody else's ephemeral, sent after the grant starts. A grant is permission
+-- to read the channel's conversation, not a reply one person was shown.
+INSERT INTO messages (channel_id, sender_id, ephemeral_for, ciphertext, nonce, signature, key_version)
+VALUES ('aaaa1111-0000-4000-8000-0000000000c5',
+        '11111111-aaaa-4aaa-8aaa-000000000003',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'for-bob-alone', 'n', 's', 3);
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000b0","role":"authenticated"}', true); END $$;
+
+-- Before the grant: the state 017 shipped and 035 fixes.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'said-after') THEN
+    RAISE EXCEPTION 'FAIL: an ungranted bot read a member''s message';
+  END IF;
+  RAISE NOTICE 'ok  a bot with no grant reads nothing but its own post';
+END $$;
+
+RESET ROLE;
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+VALUES ('aaaa1111-0000-4000-8000-0000000000c5',
+        '11111111-aaaa-4aaa-8aaa-0000000000b0',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 3);
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'said-after') THEN
+    RAISE EXCEPTION 'FAIL: a granted bot still cannot read the channel';
+  END IF;
+  RAISE NOTICE 'ok  a granted bot reads what was said after the grant';
+END $$;
+
+DO $$
+BEGIN
+  -- The whole point of `from_key_version`, now read on the way out with the
+  -- same number `refuse_ineligible_keyring` enforces on the way in.
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'said-before') THEN
+    RAISE EXCEPTION 'FAIL: the grant reached back before it was made';
+  END IF;
+  -- A plaintext row was never sealed under any version, so no grant covers it.
+  -- Being strict here is what keeps another bot''s `/ask` out of this one.
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'in-the-clear') THEN
+    RAISE EXCEPTION 'FAIL: a granted bot read a key_version 0 row';
+  END IF;
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'for-bob-alone') THEN
+    RAISE EXCEPTION 'FAIL: a granted bot read somebody else''s ephemeral';
+  END IF;
+  RAISE NOTICE 'ok  and nothing before it, in the clear, or meant for one person';
+END $$;
+
+-- Revoking stops it in the same statement. "It keeps what it already saw" is
+-- about what has been unwrapped, not about a database it still gets to query.
+RESET ROLE;
+DELETE FROM bot_channel_keys
+ WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000c5'
+   AND bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b0';
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'said-after') THEN
+    RAISE EXCEPTION 'FAIL: a revoked bot is still reading';
+  END IF;
+  RAISE NOTICE 'ok  revoking stops the reading, not just the sealing';
+END $$;
+
+-- ---------- a private channel ----------
+-- Allowed per-channel (BOTS.md §6: it is the *bulk* grant that never covers
+-- one), and inert before this: `can_see_channel` asks about membership and
+-- `set_channel_members` will not seat a bot, so the grant bought neither the
+-- messages nor the bot's own wrapped key.
+
+RESET ROLE;
+INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+VALUES ('aaaa1111-0000-4000-8000-0000000000a0',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'behind-a-door', 'n', 's', 4);
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+VALUES ('aaaa1111-0000-4000-8000-0000000000a0',
+        '11111111-aaaa-4aaa-8aaa-0000000000b0',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 4);
+INSERT INTO channel_keyring
+  (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+VALUES ('aaaa1111-0000-4000-8000-0000000000a0', 4,
+        '11111111-aaaa-4aaa-8aaa-0000000000b0',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'behind-a-door') THEN
+    RAISE EXCEPTION 'FAIL: a private-channel grant reads nothing';
+  END IF;
+  -- Reading a sealed message is no use without the thing that opens it.
+  IF NOT EXISTS (SELECT 1 FROM channel_keyring
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000a0'
+                    AND user_id = auth.uid()) THEN
+    RAISE EXCEPTION 'FAIL: the bot cannot reach its own wrapped key';
+  END IF;
+  RAISE NOTICE 'ok  a private channel can be granted, key and all';
+END $$;
+
+-- And it is a reader, not a member. Reading was the exception being made; the
+-- rest of what membership means is not part of it.
+DO $$
+BEGIN
+  IF app.can_see_channel('aaaa1111-0000-4000-8000-0000000000a0') THEN
+    RAISE EXCEPTION 'FAIL: a grant made the bot a member of a private channel';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channels
+              WHERE id = 'aaaa1111-0000-4000-8000-0000000000a0') THEN
+    RAISE EXCEPTION 'FAIL: a granted bot can see the private channel itself';
+  END IF;
+  -- The keyring is other people's wrapped keys as well as its own, and that is
+  -- a list of who holds a key to this room.
+  IF EXISTS (SELECT 1 FROM channel_keyring
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000a0'
+                AND user_id <> auth.uid()) THEN
+    RAISE EXCEPTION 'FAIL: a granted bot read somebody else''s keyring row';
+  END IF;
+  RAISE NOTICE 'ok  and a reader is all it is — not the room, not the roster';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
