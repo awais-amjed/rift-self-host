@@ -2557,5 +2557,112 @@ BEGIN
   RAISE NOTICE 'ok  and a reader is all it is — not the room, not the roster';
 END $$;
 
+-- ============================================================
+-- 20. Bots are three permissions, not one (036)
+-- ============================================================
+-- `MANAGE_BOTS` was carrying jobs of very different weight: handing over a
+-- channel key, bringing a program into the server, and asking the music bot to
+-- play something. The last of those has to be a thing every member can do, and
+-- it was sitting behind the first.
+
+DO $$
+BEGIN
+  IF app.perm('ADD_BOTS') = 0 OR app.perm('SUMMON_BOTS') = 0 THEN
+    RAISE EXCEPTION 'FAIL: the new bits are not in perm_bit';
+  END IF;
+  -- A bit outside `perm_all` is one no role can ever be given: the role editor
+  -- masks against it. Forgetting to widen it is the quiet way to ship a
+  -- permission that cannot be granted.
+  IF (app.perm_all() & app.perm('SUMMON_BOTS')) = 0 THEN
+    RAISE EXCEPTION 'FAIL: SUMMON_BOTS is outside perm_all';
+  END IF;
+  RAISE NOTICE 'ok  the two new bits exist and are grantable';
+END $$;
+
+-- Every server gets summoning, including the ones that already existed. A
+-- permission nobody holds looks exactly like a feature that is broken.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM roles
+              WHERE is_everyone
+                AND (permissions & app.perm('SUMMON_BOTS')) = 0) THEN
+    RAISE EXCEPTION 'FAIL: an @everyone role did not get SUMMON_BOTS';
+  END IF;
+  RAISE NOTICE 'ok  summoning is on by default, on old servers too';
+END $$;
+
+-- ...and adding one is not. This is the half that is a real change: creating a
+-- bot invite used to need nothing but CREATE_INVITE, the same bit as inviting
+-- a friend.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM roles
+              WHERE is_everyone
+                AND (permissions & app.perm('ADD_BOTS')) <> 0) THEN
+    RAISE EXCEPTION 'FAIL: ADD_BOTS was handed to everybody';
+  END IF;
+  RAISE NOTICE 'ok  and adding a bot is not';
+END $$;
+
+-- Somebody who may invite and holds nothing else, which is exactly the member
+-- this bit was split out for. Carol will not do: she is a Moderator by now, and
+-- Moderator is one of the roles the migration hands `ADD_BOTS` to.
+RESET ROLE;
+INSERT INTO member_roles (user_id, role_id)
+SELECT '11111111-aaaa-4aaa-8aaa-0000000000a1', id FROM roles
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Members'
+ON CONFLICT DO NOTHING;
+SET LOCAL ROLE authenticated;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000a1","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  -- Or the denial below proves nothing: a member who cannot invite at all is
+  -- refused one clause earlier.
+  IF NOT app.has_perm('CREATE_INVITE') THEN
+    RAISE EXCEPTION 'FAIL: this subject cannot invite anybody, so the test is empty';
+  END IF;
+  IF app.has_perm('ADD_BOTS') THEN
+    RAISE EXCEPTION 'FAIL: a plain inviter already holds ADD_BOTS';
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO invites (server_id, created_by, code, is_bot)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001',
+            '11111111-aaaa-4aaa-8aaa-0000000000a1', 'bot-invite-1', true);
+    RAISE EXCEPTION 'FAIL: a plain inviter made a bot invite';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+
+  -- The same person, the same permission, inviting a person: unchanged.
+  INSERT INTO invites (server_id, created_by, code, is_bot)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001',
+          '11111111-aaaa-4aaa-8aaa-0000000000a1', 'person-invite-1', false);
+  RAISE NOTICE 'ok  inviting a person is untouched, inviting a bot is not';
+END $$;
+
+-- An admin is covered without a backfill, because `has_perm` reads
+-- ADMINISTRATOR as every bit. Worth asserting: the alternative is a migration
+-- that has to remember every role it should have widened.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT app.has_perm('ADD_BOTS') THEN
+    RAISE EXCEPTION 'FAIL: an administrator cannot add a bot';
+  END IF;
+  INSERT INTO invites (server_id, created_by, code, is_bot)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001',
+          '11111111-aaaa-4aaa-8aaa-000000000001', 'bot-invite-2', true);
+  RAISE NOTICE 'ok  an administrator needs no backfill to hold a new bit';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
