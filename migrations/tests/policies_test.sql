@@ -2926,5 +2926,236 @@ BEGIN
   RAISE NOTICE 'ok  and somebody outside it sees nothing, view or table';
 END $$;
 
+-- ============================================================
+-- 23. The roster, a page at a time (039)
+-- ============================================================
+-- Every client read of `users` was unbounded, and PostgREST is capped at 1000
+-- rows. So the failure was not an error — it was a member who quietly did not
+-- exist, in the sidebar, in the `@` menu and in mention resolution alike. What
+-- replaces it has to be bounded by construction, or the ceiling comes back the
+-- first time somebody adds a caller.
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+-- No caller can ask for the whole table, however it asks.
+DO $$
+BEGIN
+  IF app.member_limit(100000) <> app.member_page_max() THEN
+    RAISE EXCEPTION 'FAIL: a caller asking for everything got it';
+  END IF;
+  IF app.member_limit(NULL) <> 50 OR app.member_limit(0) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: the limit clamp has a hole at the bottom';
+  END IF;
+  -- Clamped, not refused: an over-eager client has a bug, and answering it with
+  -- an error turns that bug into an empty sidebar.
+  IF (SELECT count(*) FROM list_members(p_limit => 100000)) = 0 THEN
+    RAISE EXCEPTION 'FAIL: an over-large page was refused rather than clamped';
+  END IF;
+  RAISE NOTICE 'ok  no query can ask for more than a page';
+END $$;
+
+-- Keyset paging: hand back the last row you were given and you get the next
+-- ones. OFFSET would have been simpler and wrong — the sidebar pages while
+-- people are joining and renaming themselves, and a shifting sort under an
+-- OFFSET skips and repeats rows at every page boundary.
+DO $$
+DECLARE
+  v_whole TEXT[];
+  v_paged TEXT[] := ARRAY[]::TEXT[];
+  v_name  TEXT;
+  v_id    UUID;
+BEGIN
+  SELECT array_agg(display_name ORDER BY lower(display_name), id)
+    INTO v_whole FROM list_members(p_bots => false);
+
+  -- Walked one row at a time, which is the worst case for a seam: every page
+  -- boundary is a chance to skip somebody or hand them over twice.
+  LOOP
+    SELECT display_name, id INTO v_name, v_id
+      FROM list_members(p_bots => false, p_after_name => v_name,
+                        p_after_id => v_id, p_limit => 1);
+    EXIT WHEN v_name IS NULL;
+    v_paged := v_paged || v_name;
+  END LOOP;
+
+  IF v_paged <> v_whole THEN
+    RAISE EXCEPTION 'FAIL: paging lost or repeated a row: % vs %', v_paged, v_whole;
+  END IF;
+  IF v_whole[1] <> 'Alice' THEN
+    RAISE EXCEPTION 'FAIL: the roster is not alphabetical: %', v_whole;
+  END IF;
+  RAISE NOTICE 'ok  the roster pages alphabetically without skipping a row';
+END $$;
+
+-- Bots are listed apart from people everywhere in the UI (BOTS.md §9), so the
+-- split is in the query rather than in each caller that has to remember it.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM list_members(p_bots => false) WHERE is_bot) THEN
+    RAISE EXCEPTION 'FAIL: a bot came back among the people';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM list_members(p_bots => true)
+                  WHERE username = 'modbot') THEN
+    RAISE EXCEPTION 'FAIL: asking for bots did not return one';
+  END IF;
+  RAISE NOTICE 'ok  and bots and people are asked for separately';
+END $$;
+
+-- A banned member is not in the room. Excluded by default rather than by each
+-- caller remembering to filter, because the one surface that wants them — the
+-- moderation modal, to lift the ban — is the exception and says so.
+RESET ROLE;
+UPDATE users SET is_banned = true
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003';
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM list_members() WHERE username = 'carol') THEN
+    RAISE EXCEPTION 'FAIL: a banned member is still on the roster';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM list_members(p_banned => NULL)
+                  WHERE username = 'carol') THEN
+    RAISE EXCEPTION 'FAIL: moderation cannot reach a banned member to unban them';
+  END IF;
+  -- And the count agrees with the list, or a header says "Offline — 4" over
+  -- three rows and never stops saying it.
+  IF (member_counts()->>'people')::INT
+       <> (SELECT count(*) FROM list_members(p_bots => false)) THEN
+    RAISE EXCEPTION 'FAIL: the count and the list disagree about who is here';
+  END IF;
+  RAISE NOTICE 'ok  a banned member is off the roster, and the count agrees';
+END $$;
+
+RESET ROLE;
+UPDATE users SET is_banned = false
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003';
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+-- Search ranks a prefix above a substring, and squashes spaces out of the
+-- display name so `animb` finds "Anim Bot" — a mention token cannot contain a
+-- space, so somebody typing a two-word name has no other way to reach them.
+-- The client keeps the same rule for rows it already holds; if the two orders
+-- disagreed the list would reshuffle as the server's answer landed.
+DO $$
+DECLARE v_names TEXT[];
+BEGIN
+  SELECT array_agg(display_name) INTO v_names FROM search_members('a');
+  IF v_names[1] <> 'Alice' THEN
+    RAISE EXCEPTION 'FAIL: a prefix match did not come first: %', v_names;
+  END IF;
+  IF NOT 'Dana' = ANY(v_names) THEN
+    RAISE EXCEPTION 'FAIL: a substring match was dropped: %', v_names;
+  END IF;
+  -- An empty query is a browse, which is what lets a field open on focus
+  -- without a second round trip.
+  IF (SELECT count(*) FROM search_members(NULL)) = 0 THEN
+    RAISE EXCEPTION 'FAIL: an empty query answered with nothing to browse';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM search_members('modb') WHERE username = 'modbot') THEN
+    RAISE EXCEPTION 'FAIL: search cannot find a bot by the start of its name';
+  END IF;
+  RAISE NOTICE 'ok  search puts a prefix match first and still finds the rest';
+END $$;
+
+-- Resolving what the caller already holds — ids from presence and from message
+-- senders, names from the `@`s somebody just typed. These are the reads that
+-- used to be answered out of the in-memory roster, which is the thing being
+-- removed; without them, dropping the whole-table read would just move the bug.
+DO $$
+DECLARE v_count INT;
+BEGIN
+  SELECT count(*) INTO v_count FROM members_by_ids(ARRAY[
+    '11111111-aaaa-4aaa-8aaa-000000000001'::UUID,
+    '11111111-aaaa-4aaa-8aaa-000000000002'::UUID]);
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'FAIL: two ids resolved to % members', v_count;
+  END IF;
+  -- Another server's member is not mine to resolve, whatever id I present.
+  IF EXISTS (SELECT 1 FROM members_by_ids(ARRAY[
+       '22222222-bbbb-4bbb-8bbb-000000000001'::UUID])) THEN
+    RAISE EXCEPTION 'FAIL: an id from another server resolved';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM members_by_usernames(ARRAY['ALICE'])) THEN
+    RAISE EXCEPTION 'FAIL: username resolution is case-sensitive';
+  END IF;
+  IF EXISTS (SELECT 1 FROM members_by_usernames(ARRAY['mallory'])) THEN
+    RAISE EXCEPTION 'FAIL: a name on another server resolved';
+  END IF;
+  RAISE NOTICE 'ok  ids and @names resolve without holding the roster';
+END $$;
+
+-- Scoped to a channel, this answers what `channel_audience` answered as a whole
+-- set: who a message here can actually reach. Asked per query it costs one
+-- predicate instead of downloading a private channel's membership.
+--
+-- `green-room` is private and bob is the only member seated in it.
+DO $$
+DECLARE v_names TEXT[];
+BEGIN
+  SELECT array_agg(username) INTO v_names
+    FROM list_members(p_channel => 'aaaa1111-0000-4000-8000-0000000000d7',
+                      p_bots => false);
+  IF NOT 'bob' = ANY(v_names) THEN
+    RAISE EXCEPTION 'FAIL: a member of the room is not in its audience: %', v_names;
+  END IF;
+  IF 'dana' = ANY(v_names) THEN
+    RAISE EXCEPTION 'FAIL: an outsider is offered as mentionable: %', v_names;
+  END IF;
+  -- And the same gate on the resolver, or the composer would light up a
+  -- mention `validate_message_mentions` is about to strip.
+  IF EXISTS (SELECT 1 FROM members_by_usernames(ARRAY['dana'],
+               'aaaa1111-0000-4000-8000-0000000000d7')) THEN
+    RAISE EXCEPTION 'FAIL: an outsider resolved as a reachable mention';
+  END IF;
+  RAISE NOTICE 'ok  a channel scope offers only who the message can reach';
+END $$;
+
+-- And somebody outside the room is told nothing at all — not a filtered list,
+-- which would still leak its size. Same answer `channel_audience` gives.
+-- Dana is a real member of this server, which is what makes this a test: an id
+-- that resolved to nobody would return nothing for reasons of its own.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000a1","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM list_members()) THEN
+    RAISE EXCEPTION 'FAIL: the outsider cannot see the server at all, so this proves nothing';
+  END IF;
+  IF EXISTS (SELECT 1 FROM list_members(
+               p_channel => 'aaaa1111-0000-4000-8000-0000000000d7')) THEN
+    RAISE EXCEPTION 'FAIL: an outsider read a private channel''s membership';
+  END IF;
+  IF (member_counts('aaaa1111-0000-4000-8000-0000000000d7')->>'people')::INT <> 0 THEN
+    RAISE EXCEPTION 'FAIL: an outsider learned how many people are in a private room';
+  END IF;
+  RAISE NOTICE 'ok  and an outsider learns neither who nor how many';
+END $$;
+
+-- Role chips for the rows on screen. `member_role_list` is one row per
+-- (member, role) and was read whole for the same reason the roster was, so it
+-- hits the ceiling sooner than the roster does.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM member_roles_for(
+                   ARRAY['11111111-aaaa-4aaa-8aaa-000000000001'::UUID])) THEN
+    RAISE EXCEPTION 'FAIL: an admin came back wearing no roles at all';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles_for(
+               ARRAY['11111111-aaaa-4aaa-8aaa-000000000001'::UUID])
+              WHERE user_id <> '11111111-aaaa-4aaa-8aaa-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: asking about one member answered about others';
+  END IF;
+  RAISE NOTICE 'ok  role chips are fetched for the rows on screen only';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
