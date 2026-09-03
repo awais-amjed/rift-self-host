@@ -3271,5 +3271,182 @@ BEGIN
   RAISE NOTICE 'ok  and shrink by the crowd rather than growing with it';
 END $$;
 
+
+-- ============================================================
+-- 25. The DM conversation list, a page at a time (041)
+-- ============================================================
+-- This one never truncated — it returns a JSONB scalar, so the 1000-row cap
+-- does not apply to it — and that is exactly why it outlived every other
+-- unbounded read. It grew instead: one row per person you have ever messaged,
+-- refetched on every server switch and every incoming DM, each row carrying an
+-- envelope the client decrypts to draw a preview nobody has scrolled to.
+
+RESET ROLE;
+-- Cleared so the attest trigger leaves the sender ids below alone: it rewrites
+-- them to auth.uid() whenever there is one, and the previous section left a
+-- claim set for the transaction.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+INSERT INTO auth.users (id) VALUES
+  ('33333333-cccc-4ccc-8ccc-000000000000'),   -- the reader
+  ('33333333-cccc-4ccc-8ccc-000000000001'),
+  ('33333333-cccc-4ccc-8ccc-000000000002'),
+  ('33333333-cccc-4ccc-8ccc-000000000003'),
+  ('33333333-cccc-4ccc-8ccc-000000000004');
+
+-- A reader of their own, rather than alice: earlier sections have been sending
+-- her DMs, and a paging test is only honest when it knows the whole list.
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key)
+VALUES
+  ('33333333-cccc-4ccc-8ccc-000000000000', 'aaaa0000-0000-4000-8000-000000000001',
+   'pager', 'Pager', 'pk-pager', 'sid-pager', 'chat-pager'),
+  ('33333333-cccc-4ccc-8ccc-000000000001', 'aaaa0000-0000-4000-8000-000000000001',
+   'pal1', 'Pal One', 'pk-pal1', 'sid-pal1', 'chat-pal1'),
+  ('33333333-cccc-4ccc-8ccc-000000000002', 'aaaa0000-0000-4000-8000-000000000001',
+   'pal2', 'Pal Two', 'pk-pal2', 'sid-pal2', 'chat-pal2'),
+  ('33333333-cccc-4ccc-8ccc-000000000003', 'aaaa0000-0000-4000-8000-000000000001',
+   'pal3', 'Pal Three', 'pk-pal3', 'sid-pal3', 'chat-pal3'),
+  ('33333333-cccc-4ccc-8ccc-000000000004', 'aaaa0000-0000-4000-8000-000000000001',
+   'pal4', 'Pal Four', 'pk-pal4', 'sid-pal4', 'chat-pal4');
+
+-- Five messages, four conversations, in both directions. Pal One is spoken to
+-- twice so that a list which forgot its `DISTINCT ON` would show five rows
+-- where there are four people.
+INSERT INTO dm_messages (id, sender_id, recipient_id, ciphertext, nonce,
+                         signature, key_version) VALUES
+  (9501, '33333333-cccc-4ccc-8ccc-000000000001',
+         '33333333-cccc-4ccc-8ccc-000000000000', 'c', 'n', 's', 1),
+  (9502, '33333333-cccc-4ccc-8ccc-000000000000',
+         '33333333-cccc-4ccc-8ccc-000000000002', 'c', 'n', 's', 1),
+  (9503, '33333333-cccc-4ccc-8ccc-000000000003',
+         '33333333-cccc-4ccc-8ccc-000000000000', 'c', 'n', 's', 1),
+  (9504, '33333333-cccc-4ccc-8ccc-000000000000',
+         '33333333-cccc-4ccc-8ccc-000000000001', 'c', 'n', 's', 1),
+  (9505, '33333333-cccc-4ccc-8ccc-000000000004',
+         '33333333-cccc-4ccc-8ccc-000000000000', 'c', 'n', 's', 1);
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"33333333-cccc-4ccc-8ccc-000000000000","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE
+  v     JSONB;
+  v_all TEXT[];
+BEGIN
+  v := dm_conversations();
+  SELECT array_agg(e->>'peer_username')
+    INTO v_all FROM jsonb_array_elements(v->'conversations') e;
+
+  -- Newest activity first, one row per person. Pal One is at the top on the
+  -- strength of 9504 rather than of the older 9501 that started it.
+  IF v_all <> ARRAY['pal4', 'pal1', 'pal3', 'pal2'] THEN
+    RAISE EXCEPTION 'FAIL: the conversation list is % ', v_all;
+  END IF;
+  IF (v->>'has_more')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: a list that fits in one page claims another';
+  END IF;
+  -- The row is unchanged from 003 — the paging is around the answer, not in
+  -- it, and a caller that reads a conversation out of it needs no edit.
+  IF v->'conversations'->0->'last_message'->>'id' <> '9505'
+     OR v->'conversations'->0->>'peer_chat_public_key' <> 'chat-pal4' THEN
+    RAISE EXCEPTION 'FAIL: the row lost a key it used to carry: %',
+      v->'conversations'->0;
+  END IF;
+  RAISE NOTICE 'ok  the newest message per peer, newest conversation first';
+END $$;
+
+-- Keyset paging on the newest message id. An OFFSET would have been simpler
+-- and wrong for the same reason it is wrong for the roster, only more so: this
+-- list reorders itself every time anybody says anything.
+DO $$
+DECLARE
+  v      JSONB;
+  v_page TEXT[];
+BEGIN
+  v := dm_conversations(p_limit => 2);
+  SELECT array_agg(e->>'peer_username')
+    INTO v_page FROM jsonb_array_elements(v->'conversations') e;
+  IF v_page <> ARRAY['pal4', 'pal1'] THEN
+    RAISE EXCEPTION 'FAIL: the first page is %', v_page;
+  END IF;
+  -- Proved by the spare row the query over-fetched, not guessed from the page
+  -- being full — the guess is what offers a "load more" that fetches nothing.
+  IF NOT (v->>'has_more')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: a page with more behind it says it is the last';
+  END IF;
+
+  v := dm_conversations(p_limit => 2, p_before => 9504);
+  SELECT array_agg(e->>'peer_username')
+    INTO v_page FROM jsonb_array_elements(v->'conversations') e;
+  IF v_page <> ARRAY['pal3', 'pal2'] THEN
+    RAISE EXCEPTION 'FAIL: the second page is %', v_page;
+  END IF;
+  IF (v->>'has_more')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: the last page claims another behind it';
+  END IF;
+  RAISE NOTICE 'ok  and it pages backwards through them without a gap';
+END $$;
+
+-- Walked one row at a time, which is the worst case for a seam.
+DO $$
+DECLARE
+  v_whole TEXT[];
+  v_paged TEXT[] := ARRAY[]::TEXT[];
+  v      JSONB;
+  v_cursor BIGINT := NULL;
+BEGIN
+  SELECT array_agg(e->>'peer_username')
+    INTO v_whole FROM jsonb_array_elements(dm_conversations()->'conversations') e;
+
+  LOOP
+    v := dm_conversations(p_limit => 1, p_before => v_cursor);
+    EXIT WHEN jsonb_array_length(v->'conversations') = 0;
+    v_paged := v_paged || (v->'conversations'->0->>'peer_username');
+    v_cursor := (v->'conversations'->0->'last_message'->>'id')::BIGINT;
+  END LOOP;
+
+  IF v_paged <> v_whole THEN
+    RAISE EXCEPTION 'FAIL: paging lost or repeated a conversation: % vs %',
+      v_paged, v_whole;
+  END IF;
+  RAISE NOTICE 'ok  one row at a time reaches every conversation exactly once';
+END $$;
+
+DO $$
+DECLARE
+  v JSONB;
+BEGIN
+  -- Clamped rather than refused, like the roster: an over-eager client has a
+  -- bug, and answering it with an error turns that bug into an empty list.
+  IF jsonb_array_length(dm_conversations(p_limit => 100000)->'conversations') = 0 THEN
+    RAISE EXCEPTION 'FAIL: an over-large page was refused rather than clamped';
+  END IF;
+  IF jsonb_array_length(dm_conversations(p_limit => 0)->'conversations') <> 1 THEN
+    RAISE EXCEPTION 'FAIL: the limit clamp has a hole at the bottom';
+  END IF;
+
+  -- Scoped by `dm_messages_select` rather than by anything written here, which
+  -- is why this stays SECURITY INVOKER. Pal Two was spoken to once, by the
+  -- reader, and sees that one conversation and none of the reader's others.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"33333333-cccc-4ccc-8ccc-000000000002","role":"authenticated"}', true);
+  v := dm_conversations();
+  IF jsonb_array_length(v->'conversations') <> 1
+     OR v->'conversations'->0->>'peer_username' <> 'pager' THEN
+    RAISE EXCEPTION 'FAIL: a peer sees somebody else''s conversations: %', v;
+  END IF;
+
+  -- And somebody who has never sent or received one gets an empty list, not a
+  -- null the client has to guard.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true);
+  IF dm_conversations()->'conversations' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: an empty list is not an empty array';
+  END IF;
+  RAISE NOTICE 'ok  a page is a page, and it is only ever your own';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
