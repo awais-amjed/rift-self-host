@@ -3171,5 +3171,105 @@ BEGIN
   RAISE NOTICE 'ok  role chips are fetched for the rows on screen only';
 END $$;
 
+-- ============================================================
+-- 24. Reactions counted where they are stored (040)
+-- ============================================================
+-- The standalone reaction read asked for one row per person per emoji across a
+-- page of messages, and PostgREST caps a response at 1000 rows. Fifty messages
+-- with twenty reactors each is a lively channel, not an extreme one — and past
+-- that point the answer was trimmed and the counts read low, with nothing to
+-- say so.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000f1',
+   'aaaa0000-0000-4000-8000-000000000001', 'reacting', 'text');
+
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature,
+                      key_version)
+VALUES (9401, 'aaaa1111-0000-4000-8000-0000000000f1',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'c', 'n', 's', 1),
+       (9402, 'aaaa1111-0000-4000-8000-0000000000f1',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'c', 'n', 's', 1);
+
+-- Two people on one emoji, one person on another, and a reaction on a second
+-- message — enough that a tally that lost the grouping would show it.
+INSERT INTO message_reactions (message_id, user_id, emoji) VALUES
+  (9401, '11111111-aaaa-4aaa-8aaa-000000000001', '👍'),
+  (9401, '11111111-aaaa-4aaa-8aaa-000000000002', '👍'),
+  (9401, '11111111-aaaa-4aaa-8aaa-000000000001', '🎉'),
+  (9402, '11111111-aaaa-4aaa-8aaa-000000000001', '😂');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE
+  v      JSONB;
+  v_up   JSONB;
+  v_pop  JSONB;
+  v_emoji TEXT[];
+BEGIN
+  v := message_reaction_tallies('channel', ARRAY[9401, 9402]::BIGINT[]);
+
+  SELECT e INTO v_up   FROM jsonb_array_elements(v->'9401') e
+   WHERE e->>'emoji' = '👍';
+  SELECT e INTO v_pop  FROM jsonb_array_elements(v->'9401') e
+   WHERE e->>'emoji' = '🎉';
+
+  IF jsonb_array_length(v->'9401') <> 2 THEN
+    RAISE EXCEPTION 'FAIL: two emoji on one message came back as %',
+      jsonb_array_length(v->'9401');
+  END IF;
+  IF (v_up->>'count')::INT <> 2 THEN
+    RAISE EXCEPTION 'FAIL: two reactors on one emoji counted as %',
+      v_up->>'count';
+  END IF;
+
+  -- Bob is in the 👍 and in neither of the others — "mine" is the database's
+  -- answer now rather than a client comparing user ids it was handed.
+  IF NOT (v_up->>'mine')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: the caller''s own reaction is not marked as theirs';
+  END IF;
+  IF (v_pop->>'mine')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: somebody else''s reaction is marked as the caller''s';
+  END IF;
+  IF (v->'9402'->0->>'mine')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: another message''s reaction is marked as the caller''s';
+  END IF;
+
+  -- Stably ordered, so two clients drawing the same message draw it the same
+  -- way rather than in whatever order the aggregate happened to produce.
+  SELECT array_agg(e->>'emoji') INTO v_emoji
+    FROM jsonb_array_elements(v->'9401') e;
+  IF v_emoji <> (SELECT array_agg(x ORDER BY x) FROM unnest(v_emoji) x) THEN
+    RAISE EXCEPTION 'FAIL: the tally is not in a stable order: %', v_emoji;
+  END IF;
+  RAISE NOTICE 'ok  reactions are tallied per emoji, with mine decided here';
+END $$;
+
+DO $$
+BEGIN
+  -- One row per (message, emoji) rather than per person is the whole point:
+  -- four reaction rows become three entries, and the factor grows with the
+  -- crowd rather than with the page.
+  IF (SELECT sum(jsonb_array_length(value))
+        FROM jsonb_each(message_reaction_tallies('channel',
+                          ARRAY[9401, 9402]::BIGINT[]))) <> 3 THEN
+    RAISE EXCEPTION 'FAIL: the tally is still one entry per person';
+  END IF;
+  -- And asking about nothing is an empty object, not a null the client has to
+  -- guard.
+  IF message_reaction_tallies('channel', ARRAY[]::BIGINT[]) <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: an empty question got a non-empty answer';
+  END IF;
+  IF message_reaction_tallies('channel', NULL) <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a null id list is not an empty answer';
+  END IF;
+  RAISE NOTICE 'ok  and shrink by the crowd rather than growing with it';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
