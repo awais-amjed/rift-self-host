@@ -397,3 +397,20 @@ GRANT EXECUTE ON FUNCTION members_by_ids(UUID[]) TO authenticated;
 GRANT EXECUTE ON FUNCTION members_by_usernames(TEXT[], UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION member_counts(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION member_roles_for(UUID[]) TO authenticated;
+
+-- ============================================================
+-- 9. What this replaces
+-- ============================================================
+-- `channel_audience` (034) asked the same question and answered it as a whole
+-- set: every member who can open a channel, in one response. That was the right
+-- shape for a composer holding the roster in memory and the wrong shape the
+-- moment the roster stopped fitting — it is unbounded by exactly the number
+-- this migration exists to stop assuming, and on a large private channel it
+-- would have been cut off by the very same 1000-row ceiling.
+--
+-- `list_members(p_channel => …)` is that predicate asked a page at a time, and
+-- `members_by_usernames(p_names, p_channel)` is it asked about the handful of
+-- names in one message. Nothing calls the old function any more, and leaving a
+-- granted SECURITY DEFINER function that resolves private channel membership
+-- lying around unused is how a door nobody remembers stays unlocked.
+DROP FUNCTION IF EXISTS channel_audience(UUID);

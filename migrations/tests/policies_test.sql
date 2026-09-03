@@ -2266,12 +2266,17 @@ BEGIN
 END $$;
 
 -- ============================================================
--- 18. Who a message can reach (034)
+-- 18. Who a message can reach (034, asked through 039)
 -- ============================================================
--- `channel_audience` is what the composer asks so its `@` menu stops offering
--- names the trigger will strip. Three things have to hold or it is worse than
--- the roster it replaced: it resolves roles, it excludes outsiders, and an
--- outsider asking gets nothing rather than a membership list.
+-- The question the composer asks so its `@` and `/` menus stop offering names
+-- the trigger will strip. Three things have to hold or it is worse than the
+-- roster it replaced: it resolves roles, it excludes outsiders, and an outsider
+-- asking gets nothing rather than a membership list.
+--
+-- 034 answered it as a whole set (`channel_audience`); 039 answers it as a
+-- filter on `list_members`, which is the same predicate asked a page at a time.
+-- The cases below are 034's, moved onto the call that replaced it — the
+-- coverage is about the rule, not about which function carries it.
 
 RESET ROLE;
 
@@ -2308,8 +2313,9 @@ END $$;
 DO $$
 DECLARE v_seen UUID[];
 BEGIN
-  SELECT array_agg(user_id ORDER BY user_id) INTO v_seen
-    FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0');
+  SELECT array_agg(id ORDER BY id) INTO v_seen
+    FROM list_members(p_channel => 'aaaa1111-0000-4000-8000-0000000000a0',
+                      p_limit => 100);
 
   IF NOT ('11111111-aaaa-4aaa-8aaa-000000000003' = ANY(v_seen)) THEN
     RAISE EXCEPTION 'FAIL: somebody seated by name is not in the audience';
@@ -2345,8 +2351,11 @@ SET LOCAL ROLE authenticated;
 
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0')
-                  WHERE user_id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+  IF NOT EXISTS (
+       SELECT 1 FROM list_members(
+                       p_channel => 'aaaa1111-0000-4000-8000-0000000000a0',
+                       p_bots => true, p_limit => 100)
+        WHERE id = '11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
     RAISE EXCEPTION 'FAIL: a role did not let a bot into a private channel';
   END IF;
   -- And that is not a formality: it is exactly what `messages_select` asks
@@ -2382,8 +2391,11 @@ BEGIN
                     AND user_id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
     RAISE EXCEPTION 'FAIL: the ban removed her seat, so this proves nothing';
   END IF;
-  IF EXISTS (SELECT 1 FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0')
-              WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
+  IF EXISTS (
+       SELECT 1 FROM list_members(
+                       p_channel => 'aaaa1111-0000-4000-8000-0000000000a0',
+                       p_limit => 100)
+        WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003') THEN
     RAISE EXCEPTION 'FAIL: a banned member is still in the audience';
   END IF;
   RAISE NOTICE 'ok  a ban takes somebody out of it without taking their seat';
@@ -2400,7 +2412,9 @@ DO $$ BEGIN PERFORM set_config('request.jwt.claims',
 
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM channel_audience('aaaa1111-0000-4000-8000-0000000000a0')) THEN
+  IF EXISTS (SELECT 1 FROM list_members(
+                      p_channel => 'aaaa1111-0000-4000-8000-0000000000a0',
+                      p_limit => 100)) THEN
     RAISE EXCEPTION 'FAIL: an outsider read a private channel''s audience';
   END IF;
   RAISE NOTICE 'ok  an outsider asking gets an empty answer, not a roster';
