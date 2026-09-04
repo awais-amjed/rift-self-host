@@ -19,15 +19,6 @@
 
 name: rift
 
-# ── Shared bits ──────────────────────────────────────────────────────────────
-
-x-db-env: &db-env
-  POSTGRES_HOST: db
-  POSTGRES_PORT: 5432
-  POSTGRES_DB: postgres
-  POSTGRES_USER: postgres
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-
 services:
   # ── The console ────────────────────────────────────────────────────────────
   #
@@ -57,11 +48,19 @@ services:
       - functions:/srv/functions
     working_dir: ${PWD}
     environment:
-      <<: *db-env
-      # Which compose project to act on, so the console does not have to guess.
+      # Deliberately minimal. Anything else the console needs it reads from
+      # .env at the moment it needs it — see console/src/env_file.ts. Passing
+      # POSTGRES_PASSWORD here looked obvious and was a bug: the console starts
+      # before .env exists, so the value baked in is empty, and an empty
+      # environment variable beats the .env file in compose's precedence when
+      # the console shells out. Postgres came up with no superuser password.
       COMPOSE_PROJECT_NAME: rift
-      COMPOSE_FILE: ${PWD}/docker-compose.yml
       RIFT_PROJECT_DIR: ${PWD}
+      # COMPOSE_FILE is deliberately unset. Compose discovers both
+      # docker-compose.yml and docker-compose.override.yml from the working
+      # directory; naming the first explicitly would hide the second, so an
+      # operator's own overrides would apply to the commands they run by hand
+      # and silently not to the ones the console runs for them.
 
   # ── Edge: TLS for everything ───────────────────────────────────────────────
   #
@@ -234,14 +233,21 @@ services:
       RUN_JANITOR: "true"
       DISABLE_HEALTHCHECK_LOGGING: "true"
 
-      # Off, and this one is load-bearing. The self-host seed does DELETE +
-      # INSERT of the tenant row on every boot with no max_* fields, so it
-      # resets the rate limits to free-tier defaults — 100 events/second, which
-      # counts *deliveries*, so one message to 20 members is 21 events. The
-      # console raises the limits once; with the seed on, every restart would
-      # quietly put them back, and the server would start dropping channels at
+      # On for exactly one boot, then off forever. Both halves matter.
+      #
+      # The seed does DELETE + INSERT of the tenant row on every boot with no
+      # max_* fields, so leaving it on resets the rate limits to free-tier
+      # defaults — 100 events/second, counted as *deliveries*, so one message to
+      # 20 members is 21 events. The server then starts dropping channels at
       # around 25 chatty members with no sign of why.
-      SEED_SELF_HOST: "false"
+      #
+      # But the seed is also the only thing that creates that row, and its
+      # `extensions` settings hold database credentials encrypted with
+      # DB_ENC_KEY — writing it by hand would mean reimplementing Realtime's
+      # encryption. So setup lets the seed run once and then rewrites
+      # REALTIME_SEED to false. False is the default here too, so a stack
+      # brought up without a .env is never left in the unsafe state.
+      SEED_SELF_HOST: ${REALTIME_SEED:-false}
 
   storage:
     container_name: rift-storage
@@ -346,7 +352,13 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: postgres
       POSTGRES_DB: postgres
-      POSTGRES_USER: postgres # _supabase.sql and realtime.sql read this
+      # POSTGRES_USER is deliberately NOT set. The image defaults it to
+      # `supabase_admin`, and that default is what initdb creates the cluster's
+      # superuser as. Overriding it to `postgres` — which looks harmless and
+      # which _supabase.sql and realtime.sql appear to want — makes the image's
+      # own migrate.sh fail on `role "supabase_admin" does not exist`, so none
+      # of the role passwords are ever set and GoTrue and PostgREST then fail
+      # authentication against a database that came up healthy.
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXP: ${JWT_EXPIRY:-3600}
     command:

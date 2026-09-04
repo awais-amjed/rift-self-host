@@ -25,14 +25,32 @@ export interface LedgerEntry {
   checksum: string;
 }
 
+/**
+ * The ledger lives in its own schema, not in `public`.
+ *
+ * PostgREST is published with `PGRST_DB_SCHEMAS: public,storage`, and Supabase
+ * grants new tables in `public` to `authenticated` by default — so a ledger
+ * there would be readable, and probably writable, by every member of the
+ * server holding nothing but its anon key. Out of the published schemas it is
+ * not reachable over the API at all, whatever its grants say. The REVOKE is
+ * the second line of defence rather than the first.
+ */
+const LEDGER_SCHEMA = "rift_console";
+
 const CREATE_LEDGER = `
-CREATE TABLE IF NOT EXISTS rift_migrations (
+CREATE SCHEMA IF NOT EXISTS ${LEDGER_SCHEMA};
+
+REVOKE ALL ON SCHEMA ${LEDGER_SCHEMA} FROM PUBLIC, anon, authenticated;
+
+CREATE TABLE IF NOT EXISTS ${LEDGER_SCHEMA}.migrations (
   name       text PRIMARY KEY,
   checksum   text NOT NULL,
   applied_at timestamptz NOT NULL DEFAULT now()
 );
 
-COMMENT ON TABLE rift_migrations IS
+REVOKE ALL ON ${LEDGER_SCHEMA}.migrations FROM PUBLIC, anon, authenticated;
+
+COMMENT ON TABLE ${LEDGER_SCHEMA}.migrations IS
   'Which files in migrations/ have run here. Managed by the Rift console; do not edit by hand.';
 `;
 
@@ -48,7 +66,7 @@ export async function ensureLedger(target: PostgresTarget): Promise<void> {
 export async function readLedger(target: PostgresTarget): Promise<LedgerEntry[]> {
   const rows = await queryRows(
     target,
-    "SELECT name, checksum FROM rift_migrations ORDER BY name",
+    `SELECT name, checksum FROM ${LEDGER_SCHEMA}.migrations ORDER BY name`,
   );
   return rows.map((row) => {
     const [name, checksum] = row.split(FIELD_SEPARATOR);
@@ -66,7 +84,7 @@ export async function readLedger(target: PostgresTarget): Promise<LedgerEntry[]>
  */
 export function recordStatement(name: string, checksum: string): string {
   return `
-INSERT INTO rift_migrations (name, checksum)
+INSERT INTO ${LEDGER_SCHEMA}.migrations (name, checksum)
 VALUES (${literal(name)}, ${literal(checksum)});
 `;
 }
@@ -79,9 +97,8 @@ export async function acceptDrift(
   if (entries.length === 0) return;
   const statements = entries
     .map((e) =>
-      `UPDATE rift_migrations SET checksum = ${literal(e.checksum)} WHERE name = ${
-        literal(e.name)
-      };`
+      `UPDATE ${LEDGER_SCHEMA}.migrations SET checksum = ${literal(e.checksum)} ` +
+      `WHERE name = ${literal(e.name)};`
     )
     .join("\n");
   const result = await runSql(target, statements, { singleTransaction: true });

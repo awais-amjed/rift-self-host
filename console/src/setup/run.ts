@@ -16,6 +16,7 @@
  * blank screen for that long reads as a hang.
  */
 import { join } from "jsr:@std/path@1";
+import { updateSetting } from "../env_file.ts";
 import { isReachable, type PostgresTarget } from "../postgres.ts";
 import { restartService, startStack } from "../docker.ts";
 import { applyPlan, planMigrations } from "../migrations/runner.ts";
@@ -147,15 +148,23 @@ export async function runSetup(
   });
 
   await step("Provisioning realtime", async () => {
+    // By now the seed has created the tenant row on first boot. Turning the
+    // seed off *before* raising the limits is what makes the raise stick: with
+    // it on, the next restart deletes and reinserts the row at free-tier
+    // defaults.
+    await updateSetting("REALTIME_SEED", "false", paths.projectDir);
+
     const applied = await applyLimits(database);
     if (!applied) {
       throw new Error(
         "Realtime has not created its tenant yet. Its container may still be starting.",
       );
     }
-    // Recreated rather than restarted: a restart keeps the environment the
-    // container was made with, and the tenant config is cached in the running
-    // process regardless, so the UPDATE alone changes nothing.
+
+    // Recreated rather than restarted, for two reasons that both bite: a
+    // restart keeps the environment the container was made with, so it would
+    // not see REALTIME_SEED change; and the tenant config is cached in the
+    // running process, so the UPDATE alone changes nothing either way.
     await restartService("realtime");
   });
 

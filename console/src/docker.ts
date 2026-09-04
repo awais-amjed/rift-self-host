@@ -11,6 +11,7 @@
  * directory at the path it has on the host — see the console service in
  * docker-compose.yml for why that path has to match.
  */
+import { run } from "./subprocess.ts";
 
 /** One service, as compose sees it. */
 export interface ServiceStatus {
@@ -36,33 +37,11 @@ export function projectDir(): string {
 }
 
 async function compose(args: string[], timeoutMs = 600_000): Promise<CommandResult> {
-  const command = new Deno.Command("docker", {
-    args: ["compose", ...args],
+  const result = await run("docker", ["compose", ...args], {
     cwd: projectDir(),
-    stdout: "piped",
-    stderr: "piped",
+    timeoutMs,
   });
-
-  const process = command.spawn();
-  const timer = setTimeout(() => {
-    try {
-      process.kill("SIGTERM");
-    } catch {
-      // Already finished between the check and the kill.
-    }
-  }, timeoutMs);
-
-  try {
-    const { code, stdout, stderr } = await process.output();
-    const decoder = new TextDecoder();
-    return {
-      ok: code === 0,
-      stdout: decoder.decode(stdout).trim(),
-      stderr: decoder.decode(stderr).trim(),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
 }
 
 /**
@@ -94,10 +73,46 @@ export async function serviceStatuses(): Promise<ServiceStatus[]> {
   }));
 }
 
-/** Bring up every service in [profiles], waiting for healthchecks to pass. */
-export function startStack(profiles: string[] = ["full"]): Promise<CommandResult> {
+/** The service the console runs as, which it must never bring up. */
+const SELF = "console";
+
+/** Every service in [profiles], as the compose file defines them. */
+export async function servicesIn(profiles: string[]): Promise<string[]> {
   const flags = profiles.flatMap((profile) => ["--profile", profile]);
-  return compose([...flags, "up", "-d", "--wait", "--remove-orphans"]);
+  const result = await compose([...flags, "config", "--services"], 30_000);
+  if (!result.ok) return [];
+  return result.stdout.split("\n").map((line) => line.trim()).filter((line) =>
+    line.length > 0
+  );
+}
+
+/**
+ * Bring up every service in [profiles] except this one, waiting for
+ * healthchecks to pass.
+ *
+ * The exclusion is not tidiness. A plain `up` covers every service in the
+ * project, and the console *is* one of them — so it recreates the container it
+ * is running in, SIGTERMs itself mid-setup, and the operator watches the
+ * progress stream die at "Starting containers" with no error, because the
+ * process that would have reported one is gone.
+ *
+ * The list is read back from the compose file rather than written down here,
+ * so a service added later is started without anyone remembering to add it.
+ */
+export async function startStack(profiles: string[] = ["full"]): Promise<CommandResult> {
+  const services = (await servicesIn(profiles)).filter((service) => service !== SELF);
+  if (services.length === 0) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "Could not read the service list from the compose file.",
+    };
+  }
+
+  const flags = profiles.flatMap((profile) => ["--profile", profile]);
+  // No --remove-orphans: it is scoped to services the compose file no longer
+  // defines, but the blast radius if that ever changed is this container.
+  return compose([...flags, "up", "-d", "--wait", ...services]);
 }
 
 /** Recreate one service, picking up any config file that changed under it. */
@@ -109,8 +124,12 @@ export function restartService(service: string): Promise<CommandResult> {
 }
 
 /** Stop everything except the console. */
-export function stopStack(): Promise<CommandResult> {
-  return compose(["--profile", "full", "--profile", "studio", "stop"], 120_000);
+export async function stopStack(): Promise<CommandResult> {
+  const services = (await servicesIn(["full", "studio"])).filter((s) => s !== SELF);
+  return compose(
+    ["--profile", "full", "--profile", "studio", "stop", ...services],
+    120_000,
+  );
 }
 
 /** The last [lines] of one service's log. */
@@ -135,13 +154,10 @@ export async function serviceLogs(service: string, lines = 200): Promise<string>
 /** True if the Docker socket is reachable at all. */
 export async function isDockerReachable(): Promise<boolean> {
   try {
-    const command = new Deno.Command("docker", {
-      args: ["version", "--format", "{{.Server.Version}}"],
-      stdout: "piped",
-      stderr: "piped",
+    const result = await run("docker", ["version", "--format", "{{.Server.Version}}"], {
+      timeoutMs: 15_000,
     });
-    const { code } = await command.output();
-    return code === 0;
+    return result.code === 0;
   } catch {
     return false;
   }

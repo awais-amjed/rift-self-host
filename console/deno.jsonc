@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "migrate": "deno run --allow-env --allow-read --allow-run=psql src/migrations/cli.ts",
+    "migrate": "deno run --allow-env --allow-read --allow-run=psql /app/src/migrations/cli.ts",
     "test": "deno test --allow-env --allow-read --allow-write --allow-run=psql",
     "check": "deno check src/**/*.ts && deno lint && deno fmt --check"
   },

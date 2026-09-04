@@ -9,6 +9,8 @@
  * gets `$$ ... $$` wrong corrupts a migration silently instead of failing.
  * `psql` already knows how to read SQL.
  */
+import { setting } from "./env_file.ts";
+import { run } from "./subprocess.ts";
 
 /**
  * The character separating columns in [queryRows] output.
@@ -39,16 +41,19 @@ export interface SqlResult {
 /**
  * Connection details for the `db` service on the compose network.
  *
+ * Read from the stack's `.env` rather than this process's environment — see
+ * env_file.ts for why that distinction is load-bearing.
+ *
  * `POSTGRES_HOST` defaults to the service name rather than `localhost`,
  * because inside a container `localhost` is the container.
  */
 export function targetFromEnv(): PostgresTarget {
   return {
-    host: Deno.env.get("POSTGRES_HOST") ?? "db",
-    port: Number(Deno.env.get("POSTGRES_PORT") ?? "5432"),
-    user: Deno.env.get("POSTGRES_USER") ?? "postgres",
-    password: Deno.env.get("POSTGRES_PASSWORD") ?? "",
-    database: Deno.env.get("POSTGRES_DB") ?? "postgres",
+    host: setting("POSTGRES_HOST") ?? "db",
+    port: Number(setting("POSTGRES_PORT") ?? "5432"),
+    user: setting("POSTGRES_USER") ?? "postgres",
+    password: setting("POSTGRES_PASSWORD") ?? "",
+    database: setting("POSTGRES_DB") ?? "postgres",
   };
 }
 
@@ -92,26 +97,8 @@ export async function runSql(
   const extra = options.singleTransaction ? ["--single-transaction"] : [];
   const { args, env } = invocation(target, [...extra, "--file", "-"]);
 
-  const command = new Deno.Command("psql", {
-    args,
-    env,
-    stdin: "piped",
-    stdout: "piped",
-    stderr: "piped",
-  });
-
-  const process = command.spawn();
-  const writer = process.stdin.getWriter();
-  await writer.write(new TextEncoder().encode(sql));
-  await writer.close();
-
-  const { code, stdout, stderr } = await process.output();
-  const decoder = new TextDecoder();
-  return {
-    ok: code === 0,
-    output: decoder.decode(stdout).trim(),
-    error: decoder.decode(stderr).trim(),
-  };
+  const result = await run("psql", args, { env, stdin: sql });
+  return { ok: result.code === 0, output: result.stdout, error: result.stderr };
 }
 
 /**
@@ -133,19 +120,9 @@ export async function queryRows(
     sql,
   ]);
 
-  const command = new Deno.Command("psql", {
-    args,
-    env,
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const { code, stdout, stderr } = await command.output();
-  if (code !== 0) {
-    throw new Error(`psql: ${new TextDecoder().decode(stderr).trim()}`);
-  }
-
-  const text = new TextDecoder().decode(stdout).trim();
-  return text.length === 0 ? [] : text.split("\n");
+  const result = await run("psql", args, { env });
+  if (result.code !== 0) throw new Error(`psql: ${result.stderr}`);
+  return result.stdout.length === 0 ? [] : result.stdout.split("\n");
 }
 
 /** True once Postgres is accepting connections. */
