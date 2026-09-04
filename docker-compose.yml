@@ -1,0 +1,428 @@
+# Rift, self-hosted.
+#
+#   docker compose up -d      → starts the console, on http://localhost:8080
+#
+# That is the whole first step. The console asks for a domain, generates every
+# secret, writes .env and the config files under volumes/, and then brings up
+# the rest of this file itself. Nothing here needs to be edited by hand.
+#
+# Two profiles keep that possible:
+#
+#   (none)   the console. Runs before there is a .env to run anything else.
+#   full     the server. Started by the console once setup is done.
+#   studio   Supabase's database dashboard. Off unless asked for, because it
+#            is two more containers and a large surface for something most
+#            operators will never open.
+#
+# Every image below is upstream and unmodified. The one image built from this
+# repo is the console.
+
+name: rift
+
+# ── Shared bits ──────────────────────────────────────────────────────────────
+
+x-db-env: &db-env
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: postgres
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+
+services:
+  # ── The console ────────────────────────────────────────────────────────────
+  #
+  # Deliberately has no profile, so `docker compose up -d` on a machine with no
+  # .env starts this and nothing else. It is also the only service holding the
+  # Docker socket.
+  console:
+    container_name: rift-console
+    image: ${RIFT_CONSOLE_IMAGE:-riftapp/rift-console:latest}
+    restart: unless-stopped
+    ports:
+      # Bound to the loopback on purpose. This container can start, stop and
+      # replace every other container on the host, which makes it the most
+      # valuable thing in the stack to reach. Administer it over an SSH tunnel:
+      #   ssh -L 8080:localhost:8080 you@server
+      - "${CONSOLE_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      # How it reports container status and restarts services.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The project directory, at the same path it has on the host. Compose
+      # running *inside* a container still resolves relative paths against the
+      # host's filesystem, so the two have to agree or every bind mount in this
+      # file would point somewhere that does not exist.
+      - ${PWD}:${PWD}
+      # The edge runtime reads its functions from here; the console writes
+      # them, including deleting ones a release removed.
+      - functions:/srv/functions
+    working_dir: ${PWD}
+    environment:
+      <<: *db-env
+      # Which compose project to act on, so the console does not have to guess.
+      COMPOSE_PROJECT_NAME: rift
+      COMPOSE_FILE: ${PWD}/docker-compose.yml
+      RIFT_PROJECT_DIR: ${PWD}
+
+  # ── Edge: TLS for everything ───────────────────────────────────────────────
+  #
+  # The only service with published ports on a public interface. Gets its
+  # certificate from Let's Encrypt automatically; nothing to configure beyond
+  # the domain, which the console writes into Caddyfile.
+  #
+  # TLS is not a nicety here. Android has blocked cleartext HTTP by default
+  # since API 28, so a server reachable only over http:// works from a desktop
+  # and is invisible to every phone.
+  caddy:
+    container_name: rift-caddy
+    image: caddy:2.10-alpine
+    profiles: [full]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./volumes/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      kong:
+        condition: service_healthy
+
+  # ── Supabase ───────────────────────────────────────────────────────────────
+
+  kong:
+    container_name: rift-kong
+    image: kong/kong:3.9.1
+    profiles: [full]
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - api-gw
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_healthy
+    volumes:
+      - ./volumes/api/kong.yml:/home/kong/temp.yml:ro
+      - ./volumes/api/kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      KONG_ROUTER_FLAVOR: expressions
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_DNS_NOT_FOUND_TTL: 1
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+    entrypoint: ["/bin/sh", "/home/kong/kong-entrypoint.sh"]
+
+  auth:
+    container_name: rift-auth
+    image: supabase/gotrue:v2.189.0
+    profiles: [full]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+
+      GOTRUE_SITE_URL: ${API_EXTERNAL_URL}
+      GOTRUE_DISABLE_SIGNUP: "false"
+
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}
+
+      # How members log in. Rift authenticates with a signature over a
+      # per-server keypair (Sign-In With Solana), never a password — see the
+      # app's auth.md. Without this flag GoTrue rejects every login with an
+      # error that says nothing about SIWS, and the server looks simply broken.
+      GOTRUE_EXTERNAL_WEB3_SOLANA_ENABLED: "true"
+
+      # No email or phone anywhere in the flow, so nothing to send and nothing
+      # to confirm. A self-hosted server never needs an SMTP provider.
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+
+  rest:
+    container_name: rift-rest
+    image: postgrest/postgrest:v14.12
+    profiles: [full]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_MAX_ROWS: 1000
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_ADMIN_SERVER_HOST: localhost
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
+    command: ["postgrest"]
+
+  realtime:
+    # The name is parsed for the tenant id, so the subdomain part matters.
+    container_name: realtime-dev.rift-realtime
+    image: supabase/realtime:v2.102.3
+    profiles: [full]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sSfL --head -o /dev/null
+          -H "Authorization: Bearer ${ANON_KEY}"
+          http://localhost:4000/api/tenants/realtime-dev/health
+      timeout: 5s
+      interval: 30s
+      retries: 3
+      start_period: 10s
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"
+
+      # Off, and this one is load-bearing. The self-host seed does DELETE +
+      # INSERT of the tenant row on every boot with no max_* fields, so it
+      # resets the rate limits to free-tier defaults — 100 events/second, which
+      # counts *deliveries*, so one message to 20 members is 21 events. The
+      # console raises the limits once; with the seed on, every restart would
+      # quietly put them back, and the server would start dropping channels at
+      # around 25 chatty members with no sign of why.
+      SEED_SELF_HOST: "false"
+
+  storage:
+    container_name: rift-storage
+    image: supabase/storage-api:v1.60.4
+    profiles: [full]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://storage:5000/status"]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      STORAGE_PUBLIC_URL: ${API_EXTERNAL_URL}
+      REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+
+      # Off, so imgproxy is not needed at all. Rift stores attachments as
+      # AES-GCM blobs — the server holds ciphertext and could not resize an
+      # image if it wanted to.
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+    volumes:
+      # A named volume, not a bind mount, and not by accident. The file backend
+      # writes per-object metadata as extended attributes, and a bind mount
+      # surfaced through a filesystem without xattr support (Docker Desktop's
+      # FUSE share, some network mounts) fails every upload with a 500 and
+      # `ENOTSUP` somewhere in the storage logs.
+      - storage-data:/var/lib/storage
+
+  functions:
+    container_name: rift-functions
+    image: supabase/edge-runtime:v1.74.0
+    profiles: [full]
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/127.0.0.1/9000'"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    volumes:
+      # Written by the console from the copies baked into its image, so that
+      # removing an endpoint in a release actually removes it here.
+      - functions:/home/deno/functions
+      - deno-cache:/root/.cache/deno
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+
+      # Must stay off. The functions verify JWTs themselves, locally against
+      # the JWKS, and three of them (login, resolve_invite, is_username_available)
+      # run *before* the caller has any token at all — that is the bootstrap
+      # window in which somebody joins a server. `webhook` has no caller
+      # identity by definition. A runtime-level gate would refuse all of them.
+      VERIFY_JWT: "false"
+    command: ["start", "--main-service", "/home/deno/functions/main"]
+
+  db:
+    container_name: rift-db
+    image: supabase/postgres:17.6.1.136
+    profiles: [full]
+    restart: unless-stopped
+    volumes:
+      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./volumes/db/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:Z
+      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+      - ./volumes/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - ./volumes/db/_supabase.sql:/docker-entrypoint-initdb.d/migrations/97-_supabase.sql:Z
+      - db-data:/var/lib/postgresql/data
+      - db-config:/etc/postgresql-custom
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: 5432
+      POSTGRES_PORT: 5432
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXPIRY:-3600}
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_min_messages=fatal # or Realtime's polling fills the log
+
+  # ── Voice and video ────────────────────────────────────────────────────────
+  #
+  # Signalling arrives through Caddy over TLS; media does not. WebRTC goes
+  # straight to the UDP port below, which is why that one has to be reachable
+  # from the internet and cannot be proxied.
+  livekit:
+    container_name: rift-livekit
+    image: livekit/livekit-server:v1.8
+    profiles: [full]
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    ports:
+      # One multiplexed UDP port rather than a range: a range means 100+
+      # published ports, which is slow to start and awkward to forward on a
+      # home router. TCP 7881 is the fallback for networks that block UDP.
+      - "7882:7882/udp"
+      - "7881:7881"
+    volumes:
+      - ./volumes/livekit/livekit.yaml:/etc/livekit.yaml:ro
+
+  # ── Optional: Supabase Studio ──────────────────────────────────────────────
+  #
+  #   docker compose --profile full --profile studio up -d
+  #
+  # For looking at the database directly. Not needed to run a server, and
+  # loopback-bound like the console.
+  studio:
+    container_name: rift-studio
+    image: supabase/studio:2026.07.07-sha-a6a04f2
+    profiles: [studio]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      meta:
+        condition: service_started
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: Rift
+      DEFAULT_PROJECT_NAME: ${RIFT_DOMAIN:-rift}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+
+  meta:
+    container_name: rift-meta
+    image: supabase/postgres-meta:v0.96.6
+    profiles: [studio]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+volumes:
+  db-data:
+  db-config:
+  storage-data:
+  functions:
+  deno-cache:
+  caddy-data:
+  caddy-config:
