@@ -1,0 +1,159 @@
+/**
+ * Turning the operator's two answers and a set of generated secrets into the
+ * files the stack reads.
+ *
+ * Four destinations, all under the project directory so an operator can read
+ * what was written and a backup can capture it:
+ *
+ *   .env                      what docker compose substitutes
+ *   volumes/api/kong.yml      routes, with the API keys baked in
+ *   volumes/caddy/Caddyfile   the domain to get a certificate for
+ *   volumes/livekit/livekit.yaml
+ *   volumes/db/*.sql          Postgres' first-boot scripts, copied as-is
+ *
+ * Templates are rendered by replacing `{{NAME}}`. Deliberately not a template
+ * engine: two of these files contain `$(...)` and `${...}` that belong to Kong
+ * and to Docker, and anything cleverer would try to interpret them.
+ */
+import { join } from "jsr:@std/path@1";
+import type { StackSecrets } from "./secrets.ts";
+
+/** What the operator chose. */
+export interface StackConfig {
+  /** The domain the server answers on, without a scheme. */
+  domain: string;
+  /** Where Let's Encrypt sends expiry warnings. */
+  acmeEmail: string;
+}
+
+/** Everything needed to render. */
+export interface RenderContext extends StackConfig {
+  secrets: StackSecrets;
+}
+
+/** Substitute every `{{NAME}}` in [template] from [values]. */
+export function render(template: string, values: Record<string, string>): string {
+  return template.replace(/\{\{([A-Z0-9_]+)\}\}/g, (whole, name: string) => {
+    const value = values[name];
+    if (value === undefined) {
+      throw new Error(`Template refers to {{${name}}}, which was not provided`);
+    }
+    return value;
+  });
+}
+
+/** The placeholder values every template is rendered against. */
+export function placeholders(context: RenderContext): Record<string, string> {
+  const { secrets } = context;
+  return {
+    DOMAIN: context.domain,
+    ACME_EMAIL: context.acmeEmail,
+    ANON_KEY: secrets.anonKey,
+    SERVICE_ROLE_KEY: secrets.serviceRoleKey,
+    LIVEKIT_API_KEY: secrets.livekitApiKey,
+    LIVEKIT_API_SECRET: secrets.livekitApiSecret,
+  };
+}
+
+/**
+ * The `.env` docker compose reads.
+ *
+ * Written with restrictive permissions: it holds the service-role key, which
+ * is unrestricted access to every message and member on the server.
+ */
+export function renderEnv(context: RenderContext): string {
+  const { secrets } = context;
+  const lines = [
+    "# Written by the Rift console. Every value here was generated; none of it",
+    "# needs to be edited by hand, and changing JWT_SECRET invalidates both API",
+    "# keys below and every session already issued.",
+    "",
+    `RIFT_DOMAIN=${context.domain}`,
+    `API_EXTERNAL_URL=https://${context.domain}`,
+    `ACME_EMAIL=${context.acmeEmail}`,
+    "",
+    "# Postgres",
+    `POSTGRES_PASSWORD=${secrets.postgresPassword}`,
+    "",
+    "# Signing key for the two API keys and for every session GoTrue issues.",
+    `JWT_SECRET=${secrets.jwtSecret}`,
+    "JWT_EXPIRY=3600",
+    `ANON_KEY=${secrets.anonKey}`,
+    `SERVICE_ROLE_KEY=${secrets.serviceRoleKey}`,
+    "",
+    "# Realtime",
+    `SECRET_KEY_BASE=${secrets.secretKeyBase}`,
+    `REALTIME_DB_ENC_KEY=${secrets.realtimeEncryptionKey}`,
+    "",
+    "# LiveKit. Also stored in server_secrets, which is where the edge",
+    "# functions read them from to mint join tokens.",
+    `LIVEKIT_API_KEY=${secrets.livekitApiKey}`,
+    `LIVEKIT_API_SECRET=${secrets.livekitApiSecret}`,
+    "",
+    "# The console's own password, and the interface it listens on. Moving it",
+    "# off the loopback exposes an interface that can replace any container on",
+    "# this host; put it behind a tunnel instead.",
+    `CONSOLE_PASSWORD=${secrets.consolePassword}`,
+    "CONSOLE_BIND=127.0.0.1",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+/** Where a rendered file goes, relative to the project directory. */
+const RENDERED = [
+  { template: "api/kong.yml", destination: "volumes/api/kong.yml" },
+  { template: "caddy/Caddyfile", destination: "volumes/caddy/Caddyfile" },
+  { template: "livekit/livekit.yaml", destination: "volumes/livekit/livekit.yaml" },
+] as const;
+
+/** Postgres' first-boot scripts, copied rather than rendered. */
+const DB_SCRIPTS = [
+  "roles.sql",
+  "jwt.sql",
+  "realtime.sql",
+  "webhooks.sql",
+  "_supabase.sql",
+] as const;
+
+/**
+ * Write every configuration file for [context].
+ *
+ * [templateRoot] is where the console image keeps its copies; [projectDir] is
+ * the directory holding docker-compose.yml, which is the same path inside this
+ * container and on the host.
+ */
+export async function writeConfigFiles(
+  context: RenderContext,
+  options: { templateRoot: string; projectDir: string },
+): Promise<string[]> {
+  const { templateRoot, projectDir } = options;
+  const values = placeholders(context);
+  const written: string[] = [];
+
+  for (const { template, destination } of RENDERED) {
+    const source = await Deno.readTextFile(join(templateRoot, template));
+    const path = join(projectDir, destination);
+    await Deno.mkdir(join(path, ".."), { recursive: true });
+    await Deno.writeTextFile(path, render(source, values));
+    written.push(destination);
+  }
+
+  const dbDirectory = join(projectDir, "volumes/db");
+  await Deno.mkdir(dbDirectory, { recursive: true });
+  for (const script of DB_SCRIPTS) {
+    await Deno.copyFile(
+      join(templateRoot, "db", script),
+      join(dbDirectory, script),
+    );
+    written.push(`volumes/db/${script}`);
+  }
+
+  // Last, and with a mode of its own: until this exists, `docker compose` has
+  // no values for the `full` profile, so a half-written stack cannot start.
+  const envPath = join(projectDir, ".env");
+  await Deno.writeTextFile(envPath, renderEnv(context), { mode: 0o600 });
+  written.push(".env");
+
+  return written;
+}

@@ -1,0 +1,219 @@
+# Kong's declarative config, rendered by the console with the stack's keys
+# already substituted. Doubled-brace placeholders belong to the console and are
+# filled in at setup; the `$(...)` expressions below are Kong's own and must
+# survive rendering untouched.
+#
+# Trimmed to the routes Rift uses. Upstream's file also publishes GraphQL, the
+# OpenAPI roots, SAML/SSO, pg-meta, MCP and the Studio dashboard — every one of
+# them a way in that no Rift client ever calls, on a server that is meant to be
+# exposed to the internet.
+_format_version: "2.1"
+_transform: true
+
+###
+### Who may call, and as what
+###
+consumers:
+  - username: anon
+    keyauth_credentials:
+      - key: { { ANON_KEY } }
+  - username: service_role
+    keyauth_credentials:
+      - key: { { SERVICE_ROLE_KEY } }
+
+acls:
+  - consumer: anon
+    group: anon
+  - consumer: service_role
+    group: admin
+
+###
+### Routes
+###
+services:
+  ## Open: confirmation links land here with no key of their own.
+  - name: auth-v1-open
+    _comment: "Auth: /auth/v1/verify* -> http://auth:9999/verify*"
+    url: http://auth:9999/verify
+    routes:
+      - name: auth-v1-open
+        strip_path: true
+        paths:
+          - /auth/v1/verify
+    plugins:
+      - name: cors
+
+  ## Open, and load-bearing: every edge function verifies JWTs against this
+  ## rather than round-tripping to GoTrue. Blocking it stops all of them.
+  - name: auth-v1-open-jwks
+    _comment: "Auth: /auth/v1/.well-known/jwks.json -> http://auth:9999/.well-known/jwks.json"
+    url: http://auth:9999/.well-known/jwks.json
+    routes:
+      - name: auth-v1-open-jwks
+        strip_path: true
+        paths:
+          - /auth/v1/.well-known/jwks.json
+    plugins:
+      - name: cors
+
+  - name: auth-v1
+    _comment: "Auth: /auth/v1/* -> http://auth:9999/*"
+    url: http://auth:9999/
+    routes:
+      - name: auth-v1-all
+        strip_path: true
+        paths:
+          - /auth/v1/
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+          replace:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  ## Almost everything a client does: messages, members, channels, invites,
+  ## reactions, read cursors — all of it under the policies in 002_security.sql.
+  - name: rest-v1
+    _comment: "PostgREST: /rest/v1/* -> http://rest:3000/*"
+    url: http://rest:3000/
+    routes:
+      - name: rest-v1-all
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+          replace:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  - name: realtime-v1-ws
+    _comment: "Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*"
+    url: http://realtime-dev.rift-realtime:4000/socket
+    protocol: ws
+    routes:
+      - name: realtime-v1-ws
+        strip_path: true
+        paths:
+          - /realtime/v1/
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "x-api-key:$(query_params.apikey)"
+          replace:
+            querystring:
+              - "apikey:$(query_params.apikey)"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  - name: realtime-v1-rest
+    _comment: "Realtime: /realtime/v1/api/* -> http://realtime:4000/api/*"
+    url: http://realtime-dev.rift-realtime:4000/api
+    protocol: http
+    routes:
+      - name: realtime-v1-rest
+        strip_path: true
+        paths:
+          - /realtime/v1/api
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+          replace:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  ## Attachment blobs. No key-auth: a presigned URL carries its signature in the
+  ## query string and no apikey header at all, and the post-function below drops
+  ## the empty Authorization the transformer would otherwise leave behind.
+  - name: storage-v1
+    _comment: "Storage: /storage/v1/* -> http://storage:5000/*"
+    url: http://storage:5000/
+    routes:
+      - name: storage-v1-all
+        strip_path: true
+        paths:
+          - /storage/v1/
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+          replace:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+      - name: post-function
+        config:
+          access:
+            - |
+                local auth = kong.request.get_header("authorization")
+                if auth == nil or auth == "" or auth:find("^%s*$") then
+                  kong.service.request.clear_header("authorization")
+                end
+
+  ## The twenty endpoints that hold a secret or run before the caller is a
+  ## member. No key-auth on purpose: `login`, `resolve_invite` and
+  ## `is_username_available` are called with no key at all, and `webhook` is
+  ## called by things that cannot log in. Each verifies its own caller.
+  - name: functions-v1
+    _comment: "Edge Functions: /functions/v1/* -> http://functions:9000/*"
+    url: http://functions:9000/
+    read_timeout: 150000
+    routes:
+      - name: functions-v1-all
+        strip_path: true
+        paths:
+          - /functions/v1/
+    plugins:
+      - name: cors

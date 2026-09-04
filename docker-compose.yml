@@ -111,20 +111,20 @@ services:
       rest:
         condition: service_healthy
     volumes:
-      - ./volumes/api/kong.yml:/home/kong/temp.yml:ro
-      - ./volumes/api/kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro
+      # Rendered by the console with the keys already substituted, so Kong
+      # reads a finished file and needs no entrypoint of its own.
+      - ./volumes/api/kong.yml:/home/kong/kong.yml:ro
     environment:
       KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
       KONG_ROUTER_FLAVOR: expressions
       KONG_DNS_ORDER: LAST,A,CNAME
       KONG_DNS_NOT_FOUND_TTL: 1
-      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth,request-termination
+      # post-function is what clears the empty Authorization header on a
+      # presigned storage URL; without it every such download is a 400.
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,post-function
       KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
       KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
-    entrypoint: ["/bin/sh", "/home/kong/kong-entrypoint.sh"]
 
   auth:
     container_name: rift-auth
@@ -346,6 +346,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: postgres
       POSTGRES_DB: postgres
+      POSTGRES_USER: postgres # _supabase.sql and realtime.sql read this
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXP: ${JWT_EXPIRY:-3600}
     command:

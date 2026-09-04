@@ -1,0 +1,46 @@
+# TLS and routing for the whole server, on one domain and one DNS record.
+#
+# Rendered by the console. `{{DOMAIN}}` is what the operator typed;
+# `{{ACME_EMAIL}}` is where Let's Encrypt sends expiry warnings.
+
+{
+	email {{ACME_EMAIL}}
+}
+
+{{DOMAIN}} {
+	encode zstd gzip
+
+	# LiveKit's signalling, on the same host as everything else.
+	#
+	# The alternative is a second subdomain, which works but costs the operator
+	# a second DNS record and a second thing to get wrong. These four prefixes
+	# are LiveKit's entire HTTP surface and none of them collides with
+	# Supabase's (/auth, /rest, /realtime, /storage, /functions), so one host
+	# can carry both.
+	#
+	# Only signalling passes through here. Media is UDP straight to port 7882
+	# and never touches Caddy — which is why that port has to be open even
+	# though this file does not mention it.
+	@livekit path /rtc /rtc/* /twirp/* /validate
+	handle @livekit {
+		reverse_proxy livekit:7880
+	}
+
+	# Everything else is the Supabase API gateway.
+	handle {
+		reverse_proxy kong:8000 {
+			# Realtime and LiveKit both hold connections open for as long as
+			# somebody is in a channel. The default would cut them.
+			transport http {
+				read_timeout 0
+				write_timeout 0
+			}
+		}
+	}
+
+	# Attachments are already capped per server in the database; this is the
+	# outer bound so a malformed upload cannot buffer without limit.
+	request_body {
+		max_size 100MB
+	}
+}

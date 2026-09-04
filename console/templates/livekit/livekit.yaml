@@ -1,0 +1,39 @@
+# LiveKit, rendered by the console.
+#
+# Voice and video only. The keys here are also written into `server_secrets` in
+# Postgres when the console creates the server, because `get_channel_token` has
+# to mint join tokens with them.
+
+port: 7880
+
+rtc:
+  # One multiplexed UDP port instead of a range.
+  #
+  # A range means publishing 100+ ports, which is slow to start, awkward to
+  # forward on a home router, and the single most common reason a self-hosted
+  # call connects and then has no audio. One port is the difference between a
+  # firewall rule somebody will actually write and one they will not.
+  udp_port: 7882
+
+  # For clients on networks that block UDP outright. Slower, but connected.
+  tcp_port: 7881
+
+  # The server has to advertise the address clients can actually reach, which
+  # behind Docker's NAT is never the one it sees on its own interface.
+  use_external_ip: true
+
+keys:
+  { { LIVEKIT_API_KEY } }: { { LIVEKIT_API_SECRET } }
+
+# Rift's rooms are named by channel id and created on demand when the first
+# person joins. Nothing pre-registers them.
+room:
+  auto_create: true
+  empty_timeout: 300
+  # Calls are end-to-end encrypted: the SFU forwards frames it cannot decode.
+  # Anything that would need to read the media (recording, transcription,
+  # server-side mixing) cannot work here and is not enabled.
+
+logging:
+  level: info
+  json: false
