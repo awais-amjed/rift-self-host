@@ -1,0 +1,9 @@
+# Written by the console during setup; holds every secret the stack has.
+.env
+
+# Bind-mounted state. Postgres and object storage live in named volumes, but
+# Caddy's certificates and the console's own config land here.
+/volumes/
+
+.DS_Store
+*.swp
