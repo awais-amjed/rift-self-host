@@ -81,4 +81,50 @@ write there — edit the originals in the app repo.
 - A domain name pointing at the machine, and ports 80/443 reachable.
   **TLS is not optional**: Android blocks cleartext HTTP, so a server on plain
   `http://` works from a desktop and is invisible to every phone.
+- UDP 7882 and TCP 7881 open, for voice. Media goes straight to those ports and
+  cannot be proxied — only LiveKit's signalling passes through Caddy.
 - Roughly 4 GB of RAM and 2 CPUs to be comfortable
+
+## Building it
+
+```bash
+scripts/sync.sh                     # refresh migrations/ and functions/
+docker build -f console/Dockerfile -t riftapp/rift-console:latest .
+```
+
+The build context is the repository root, not `console/` — the migrations and
+endpoints are vendored beside it and go into the image.
+
+The console's own checks:
+
+```bash
+cd console
+deno test --allow-read --allow-write --allow-env --allow-run=psql
+deno lint && deno fmt --check
+```
+
+`templates/` is excluded from `fmt` and `lint`, and that exclusion is
+load-bearing rather than cosmetic — `deno fmt` reads the YAML there and rewrites
+`{{PLACEHOLDER}}` into `{ { PLACEHOLDER } }`, which survives rendering and hands
+LiveKit an API key named after the placeholder.
+
+## What works, and what has not been proved
+
+Verified by running the whole thing end to end against a real Docker daemon:
+ten containers healthy, all 41 migrations applied and recorded, Realtime's
+limits surviving a container recreate, `messages` refusing the anon key, and the
+invite the console minted resolving back through `resolve_invite` to the server
+it names.
+
+Not yet proved, and worth doing before anyone else runs one:
+
+- **A real certificate.** The end-to-end run used a domain that does not exist,
+  so Caddy never completed an ACME challenge. Everything downstream of it was
+  reached container-to-container.
+- **A real call.** LiveKit starts and is routed, but no client has joined a
+  channel through it, so the single-UDP-port choice is reasoned rather than
+  measured.
+- **An upgrade.** The ledger is what makes one possible and it is tested, but
+  there has never been a second version to apply.
+- **The `studio` profile**, which has not been started once.
+- **Backups.** Nothing here dumps the database or the attachment volume.
