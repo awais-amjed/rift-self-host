@@ -23,7 +23,7 @@ rtc:
   use_external_ip: true
 
 keys:
-  { { LIVEKIT_API_KEY } }: { { LIVEKIT_API_SECRET } }
+  {{LIVEKIT_API_KEY}}: {{LIVEKIT_API_SECRET}}
 
 # Rift's rooms are named by channel id and created on demand when the first
 # person joins. Nothing pre-registers them.

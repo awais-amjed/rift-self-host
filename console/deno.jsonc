@@ -1,7 +1,4 @@
 {
-  "name": "@rift/console",
-  "version": "0.1.0",
-  "exports": "./src/main.ts",
   "tasks": {
     "migrate": "deno run --allow-env --allow-read --allow-run=psql src/migrations/cli.ts",
     "test": "deno test --allow-env --allow-read --allow-write --allow-run=psql",
@@ -11,13 +8,22 @@
     "@std/cli": "jsr:@std/cli@1",
     "@std/encoding": "jsr:@std/encoding@1"
   },
+  // templates/ is excluded from both, and this is not tidiness.
+  //
+  // deno fmt reads the .yaml files there as YAML and rewrites a
+  // {{PLACEHOLDER}} into { { PLACEHOLDER } }. That no longer matches what the
+  // renderer substitutes, so it survives into the output — and LiveKit then
+  // starts happily with an API key literally named "{ { LIVEKIT_API_KEY } }",
+  // refusing every token the app presents. It has already happened once.
   "fmt": {
+    "exclude": ["templates/"],
     "lineWidth": 90,
     "indentWidth": 2,
     "semiColons": true,
     "singleQuote": false
   },
   "lint": {
+    "exclude": ["templates/"],
     "rules": {
       "tags": ["recommended"]
     }

@@ -42,15 +42,37 @@ Deno.test("a placeholder nobody supplied is an error, not an empty string", () =
   );
 });
 
-Deno.test("every placeholder the templates use is supplied", async () => {
-  const values = placeholders(await context());
+Deno.test("every shipped template renders to something with the real values in it", async () => {
+  const ctx = await context();
+  const values = placeholders(ctx);
   const root = new URL("../../templates/", import.meta.url).pathname;
 
-  for (const file of ["api/kong.yml", "caddy/Caddyfile", "livekit/livekit.yaml"]) {
+  // Each file paired with a value that must survive into the output. Asserting
+  // on the *result* rather than on the absence of "{{" is deliberate: a
+  // placeholder can be broken without being removed. `deno fmt` treats these
+  // as YAML and rewrites {{NAME}} into { { NAME } }, which no longer matches
+  // the pattern, renders to itself, and hands LiveKit a config it accepts and
+  // reads as a key literally named "{ { LIVEKIT_API_KEY } }".
+  const expectations: [string, string][] = [
+    ["api/kong.yml", ctx.secrets.anonKey],
+    ["api/kong.yml", ctx.secrets.serviceRoleKey],
+    ["caddy/Caddyfile", ctx.domain],
+    ["caddy/Caddyfile", ctx.acmeEmail],
+    ["livekit/livekit.yaml", ctx.secrets.livekitApiKey],
+    ["livekit/livekit.yaml", ctx.secrets.livekitApiSecret],
+  ];
+
+  for (const [file, expected] of expectations) {
     const source = await Deno.readTextFile(root + file);
-    // Rendering is the assertion: an unsupplied placeholder throws.
+    // Rendering is half the assertion: an unsupplied placeholder throws.
     const rendered = render(source, values);
-    assert(!rendered.includes("{{"), `${file} still has a placeholder`);
+    assertStringIncludes(rendered, expected);
+    // Caddyfile blocks use braces of their own, so only doubled ones —
+    // adjacent or split by whitespace — mean an unrendered placeholder.
+    assert(
+      !/\{\s*\{/.test(rendered),
+      `${file} still holds an unrendered placeholder`,
+    );
   }
 });
 

@@ -33,7 +33,7 @@ export interface RenderContext extends StackConfig {
 
 /** Substitute every `{{NAME}}` in [template] from [values]. */
 export function render(template: string, values: Record<string, string>): string {
-  return template.replace(/\{\{([A-Z0-9_]+)\}\}/g, (whole, name: string) => {
+  return template.replace(/\{\{([A-Z0-9_]+)\}\}/g, (_match, name: string) => {
     const value = values[name];
     if (value === undefined) {
       throw new Error(`Template refers to {{${name}}}, which was not provided`);
