@@ -1,0 +1,25 @@
+{
+  "name": "@rift/console",
+  "version": "0.1.0",
+  "exports": "./src/main.ts",
+  "tasks": {
+    "migrate": "deno run --allow-env --allow-read --allow-run=psql src/migrations/cli.ts",
+    "test": "deno test --allow-env --allow-read --allow-write --allow-run=psql",
+    "check": "deno check src/**/*.ts && deno lint && deno fmt --check"
+  },
+  "imports": {
+    "@std/cli": "jsr:@std/cli@1",
+    "@std/encoding": "jsr:@std/encoding@1"
+  },
+  "fmt": {
+    "lineWidth": 90,
+    "indentWidth": 2,
+    "semiColons": true,
+    "singleQuote": false
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  }
+}
