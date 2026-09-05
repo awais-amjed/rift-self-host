@@ -78,9 +78,6 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }
 .secret .mono.masked { color: var(--faint); letter-spacing: 0.18em; user-select: none; }
 .secret button { padding: 8px 12px; font-size: 13px; font-weight: 500; }
-.toggle { display: flex; gap: 10px; align-items: center; font-size: 14px;
-  color: var(--dim); text-transform: none; letter-spacing: 0; cursor: pointer; }
-.toggle input { width: auto; margin: 0; cursor: pointer; }
 details { margin: 4px 0 20px; }
 summary { cursor: pointer; color: var(--dim); font-size: 14px; padding: 6px 0; }
 details[open] summary { margin-bottom: 10px; }
@@ -291,15 +288,6 @@ export function dashboardPage(domain: string): string {
   </div>
   <p class="error" id="upgradeError" style="display:none"></p>
 
-  <label class="toggle" style="margin-top:16px">
-    <input type="checkbox" id="autoApply">
-    <span>Apply a new release automatically on start</span>
-  </label>
-  <p class="hint">A pull brings new endpoints and migrations as well as new
-    console code, and only the console code runs by itself — so with this off,
-    an updated stack keeps serving the old ones until you press Apply. Turn it
-    off if a schema change should never happen merely because a machine
-    rebooted.</p>
 </div>
 
 <h2>Health</h2>
@@ -421,28 +409,13 @@ async function loadVersion() {
     .map(([k, val]) => '<tr><td class="name">' + k + "</td><td>" + val + "</td></tr>")
     .join("");
 
-  const toggle = document.getElementById("autoApply");
-  toggle.checked = v.autoApply !== false;
-
   const needed = !v.unknown && v.needed;
   document.getElementById("upgradeBox").style.display = needed ? "block" : "none";
   document.getElementById("upgradeHint").textContent = needed
-    ? (v.autoApply
-      ? "This normally happens by itself on start. Press it if a reload was left undone."
-      : "Automatic applying is off (RIFT_AUTO_APPLY=false), so this is the way to do it.")
+    ? "This happens by itself when the console starts. Press it if a boot-time " +
+      "apply was interrupted, or left a reload undone."
     : "";
 }
-
-document.getElementById("autoApply").addEventListener("change", async (event) => {
-  event.target.disabled = true;
-  await fetch("/api/auto-apply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled: event.target.checked }),
-  });
-  event.target.disabled = false;
-  loadVersion();
-});
 
 document.getElementById("applyUpgrade").addEventListener("click", async (event) => {
   const error = document.getElementById("upgradeError");

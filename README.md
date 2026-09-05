@@ -112,12 +112,10 @@ worked.
 release that moves GoTrue or Kong cannot reach you through the console image at
 all. This is the step that gets skipped.
 
-There is a switch for the automatic part, in the console's Release panel or as
-`RIFT_AUTO_APPLY` in `.env`. Turn it off if a schema change should never happen
-merely because a machine rebooted; the console then offers Apply as a button.
-The switch takes effect immediately either way — it is read from `.env` on use
-rather than from the environment the console started with, which is the only
-way a console can honour a setting it cannot restart itself to pick up.
+There is no switch for this. Somebody who does not want a release does not pull
+it; having pulled one, the only states worth being in are applied or failed
+loudly. The Release panel still has an Apply button, for the case where a
+boot-time apply was interrupted or left the reload undone.
 
 ### When a migration has changed under you
 

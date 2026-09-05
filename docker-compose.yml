@@ -76,16 +76,6 @@ services:
       # the console shells out. Postgres came up with no superuser password.
       COMPOSE_PROJECT_NAME: rift
       RIFT_PROJECT_DIR: ${PWD}
-
-      # Whether a new image applies itself.
-      #
-      # A pull brings new console code, new migrations and new endpoints in one
-      # image, but only the first of those runs by itself — so with this off,
-      # `docker compose pull && docker compose up -d` leaves a new console on
-      # an old schema serving old endpoints. On by default for that reason.
-      # Set false if a schema change should never happen merely because a
-      # machine rebooted; the console then offers it as a button instead.
-      RIFT_AUTO_APPLY: ${RIFT_AUTO_APPLY:-true}
       # COMPOSE_FILE is deliberately unset. Compose discovers both
       # docker-compose.yml and docker-compose.override.yml from the working
       # directory; naming the first explicitly would hide the second, so an

@@ -22,9 +22,14 @@
  * Step 3 is the only one that touches a container, and it is why [applyUpgrade]
  * waits for compose to settle: the console runs during the very `up -d` that
  * started it, and two compose runs converging one project is undefined.
+ *
+ * There is no switch for any of this, and that is deliberate. Somebody who
+ * does not want a release does not pull it; having pulled one, the only states
+ * worth being in are "applied" and "failed loudly". An opt-out only bought a
+ * third — a new console serving old endpoints against an old schema, looking
+ * for all the world like it had worked.
  */
 import { restartService, waitForSettled } from "./docker.ts";
-import { setting, updateSetting } from "./env_file.ts";
 import { applyPlan, planMigrations } from "./migrations/runner.ts";
 import { isReachable, type PostgresTarget } from "./postgres.ts";
 import { installFunctions } from "./setup/functions.ts";
@@ -152,30 +157,4 @@ export async function applyUpgrade(
     endpointsRestarted: restarted,
     version,
   };
-}
-
-/** The setting that decides whether a new image applies itself. */
-export const AUTO_APPLY = "RIFT_AUTO_APPLY";
-
-/**
- * Whether the console should apply an upgrade without being asked.
- *
- * On by default: the alternative is a stack that silently serves old endpoints
- * against a new console until somebody notices a red row on a page they may
- * never open. Turning it off suits anyone who would rather a schema change
- * never happened because a machine rebooted.
- *
- * Read from `.env` rather than this process's environment, which is what lets
- * the dashboard toggle mean something. Compose passes the variable in at
- * container start, so a value baked in there would be whatever was true when
- * the console booted — and the console cannot restart itself to pick up a new
- * one, being the container that would be replaced.
- */
-export function autoApplyEnabled(): boolean {
-  return (setting(AUTO_APPLY) ?? "true").toLowerCase() !== "false";
-}
-
-/** Turn it on or off, for the life of this stack. */
-export function setAutoApply(enabled: boolean): Promise<void> {
-  return updateSetting(AUTO_APPLY, enabled ? "true" : "false");
 }

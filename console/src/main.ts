@@ -9,7 +9,7 @@ import { announce, consolePort } from "./banner.ts";
 import { isDockerReachable, projectDir } from "./docker.ts";
 import { configuredPassword } from "./web/auth.ts";
 import { targetFromEnv } from "./postgres.ts";
-import { applyUpgrade, autoApplyEnabled, pendingWork } from "./upgrade.ts";
+import { applyUpgrade, pendingWork } from "./upgrade.ts";
 import { defaultPaths } from "./setup/run.ts";
 import { handle, isConfigured } from "./web/routes.ts";
 
@@ -33,9 +33,7 @@ async function main(): Promise<void> {
   // docker compose up -d` is the whole upgrade rather than the first half of
   // one. Not awaited: it waits for compose to finish converging the project,
   // and the console has to be answering requests long before then.
-  if (configured && autoApplyEnabled()) {
-    void applyPendingOnBoot();
-  }
+  if (configured) void applyPendingOnBoot();
 
   Deno.serve({
     port: PORT,
