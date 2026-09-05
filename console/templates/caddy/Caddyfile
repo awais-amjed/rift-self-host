@@ -1,11 +1,16 @@
 # TLS and routing for the whole server, on one domain and one DNS record.
 #
-# Rendered by the console. `{{DOMAIN}}` is what the operator typed;
-# `{{ACME_EMAIL}}` is where Let's Encrypt sends expiry warnings.
-
-{
-	email {{ACME_EMAIL}}
-}
+# Rendered by the console. The domain below is what the operator typed.
+#
+# No ACME email, deliberately. Caddy documents it as optional, and its only
+# real purpose was expiry warnings — which Let's Encrypt stopped sending on
+# 4 June 2025, because renewal automation is reliable enough not to need them.
+# Caddy renews in the background well before expiry, so nothing here has to be
+# watched. An address the stack cannot use is a setup question with no answer
+# worth giving, and one more thing to render wrong.
+#
+# If you ever want ZeroSSL as a fallback issuer, that is the one thing an
+# address is still needed for: add `{ email you@example.com }` above.
 
 {{DOMAIN}} {
 	encode zstd gzip

@@ -22,8 +22,6 @@ import type { StackSecrets } from "./secrets.ts";
 export interface StackConfig {
   /** The domain the server answers on, without a scheme. */
   domain: string;
-  /** Where Let's Encrypt sends expiry warnings. */
-  acmeEmail: string;
 }
 
 /** Everything needed to render. */
@@ -47,7 +45,6 @@ export function placeholders(context: RenderContext): Record<string, string> {
   const { secrets } = context;
   return {
     DOMAIN: context.domain,
-    ACME_EMAIL: context.acmeEmail,
     ANON_KEY: secrets.anonKey,
     SERVICE_ROLE_KEY: secrets.serviceRoleKey,
     PUBLISHABLE_KEY: secrets.publishableKey,
@@ -74,7 +71,6 @@ export function renderEnv(context: RenderContext): string {
     "",
     `RIFT_DOMAIN=${context.domain}`,
     `API_EXTERNAL_URL=https://${context.domain}`,
-    `ACME_EMAIL=${context.acmeEmail}`,
     "",
     "# Postgres",
     `POSTGRES_PASSWORD=${secrets.postgresPassword}`,

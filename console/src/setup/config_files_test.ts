@@ -9,7 +9,6 @@ import { generateSecrets } from "./secrets.ts";
 
 const context = async () => ({
   domain: "chat.example.com",
-  acmeEmail: "admin@example.com",
   secrets: await generateSecrets(),
 });
 
@@ -64,7 +63,6 @@ Deno.test("every shipped template renders to something with the real values in i
     ["api/kong.yml", ctx.secrets.anonKeyAsymmetric],
     ["api/kong.yml", ctx.secrets.serviceRoleKeyAsymmetric],
     ["caddy/Caddyfile", ctx.domain],
-    ["caddy/Caddyfile", ctx.acmeEmail],
     ["livekit/livekit.yaml", ctx.secrets.livekitApiKey],
     ["livekit/livekit.yaml", ctx.secrets.livekitApiSecret],
   ];
@@ -160,4 +158,23 @@ Deno.test("only the EC key is allowed to sign", async () => {
   const { secrets } = await context();
   const symmetric = secrets.signingKeys.signing.find((k) => k.kty === "oct");
   assertEquals(symmetric?.key_ops, undefined, "the oct key must not be signable");
+});
+
+Deno.test("the Caddyfile asks Caddy for nothing it does not need", async () => {
+  // No ACME email anywhere. It could only ever have carried expiry warnings,
+  // which Let's Encrypt stopped sending in June 2025, and an `email` directive
+  // rendered with an empty value is a syntax error that crash-loops the one
+  // container standing between the server and the internet.
+  const root = new URL("../../templates/", import.meta.url).pathname;
+  const rendered = render(
+    await Deno.readTextFile(root + "caddy/Caddyfile"),
+    placeholders(await context()),
+  );
+
+  // Only inside the comment that explains why, never as a directive.
+  for (const line of rendered.split("\n")) {
+    const code = line.trim();
+    if (code.startsWith("#")) continue;
+    assert(!code.startsWith("email"), `Caddyfile still sets an email: ${line}`);
+  }
 });

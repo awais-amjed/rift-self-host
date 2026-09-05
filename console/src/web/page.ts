@@ -122,11 +122,6 @@ export function setupPage(): string {
       Android blocks it, so the server would be invisible to every phone.</p>
   </div>
   <div class="field">
-    <label for="email">Email for certificate notices</label>
-    <input id="email" name="email" type="email" placeholder="you@example.com">
-    <p class="hint">Let's Encrypt uses this to warn you before a certificate expires.</p>
-  </div>
-  <div class="field">
     <label for="serverName">Server name</label>
     <input id="serverName" name="serverName" placeholder="My Server">
   </div>
@@ -175,7 +170,6 @@ form.addEventListener("submit", async (event) => {
 
   const body = JSON.stringify({
     domain: document.getElementById("domain").value.trim(),
-    acmeEmail: document.getElementById("email").value.trim(),
     serverName: document.getElementById("serverName").value.trim(),
   });
 

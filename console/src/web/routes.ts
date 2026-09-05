@@ -148,7 +148,6 @@ function visibleSecrets(): { name: string; value: string }[] {
  */
 function setupStream(request: {
   domain: string;
-  acmeEmail: string;
   serverName: string;
 }): Response {
   const encoder = new TextEncoder();
@@ -162,7 +161,6 @@ function setupStream(request: {
         const result = await runSetup(
           {
             domain: request.domain,
-            acmeEmail: request.acmeEmail,
             serverName: request.serverName || "Rift",
           },
           targetFromEnv(),
