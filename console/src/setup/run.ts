@@ -16,11 +16,12 @@
  * blank screen for that long reads as a hang.
  */
 import { join } from "jsr:@std/path@1";
-import { updateSetting } from "../env_file.ts";
+import { setting, updateSetting } from "../env_file.ts";
 import { isReachable, type PostgresTarget } from "../postgres.ts";
 import { restartService, startStack } from "../docker.ts";
 import { applyPlan, planMigrations } from "../migrations/runner.ts";
 import { type StackConfig, writeConfigFiles } from "./config_files.ts";
+import { envHasPassword, problemsWith } from "./options.ts";
 import { installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
 import { applyLimits } from "./realtime.ts";
@@ -33,10 +34,8 @@ export interface SetupProgress {
   done: boolean;
 }
 
-/** What setup was asked for. */
-export interface SetupRequest extends StackConfig {
-  serverName: string;
-}
+/** What setup was asked for — the operator's answers, whole. */
+export type SetupRequest = StackConfig;
 
 /** What it produced. */
 export interface SetupResult {
@@ -99,7 +98,22 @@ export async function runSetup(
     return value;
   };
 
+  const problems = problemsWith(request);
+  if (problems.length > 0) throw new Error(problems.join("\n"));
+
   const secrets = await generateSecrets();
+
+  // An operator's own choice wins over a generated one, in that order of
+  // preference: what they typed, then what a hand-written .env already said,
+  // then a fresh random string. The middle case is what lets somebody deploy
+  // from a script and still reach the console afterwards.
+  const chosen = request.consolePassword.trim();
+  if (chosen.length > 0) {
+    secrets.consolePassword = chosen;
+  } else if (envHasPassword(paths.projectDir)) {
+    secrets.consolePassword = setting("CONSOLE_PASSWORD") ?? secrets.consolePassword;
+  }
+
   const context = { ...request, secrets };
 
   await step("Writing configuration", async () => {

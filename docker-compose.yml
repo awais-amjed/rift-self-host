@@ -19,7 +19,13 @@
 
 name: rift
 
-# Every variable below carries an empty default (`${NAME:-}`), and that is
+# Published ports are variables with the standard value as their default, so a
+# host that already uses 80, 443 or 7882 — a machine running something else, or
+# a second Rift server — can move them without editing this file. Setup offers
+# them, and an operator who writes a .env by hand before ever starting the
+# console has them honoured.
+#
+# Every other variable below carries an empty default (`${NAME:-}`), and that is
 # about the first minute rather than about correctness.
 #
 # Compose resolves variables for the whole file on every invocation, whichever
@@ -48,7 +54,7 @@ services:
       # replace every other container on the host, which makes it the most
       # valuable thing in the stack to reach. Administer it over an SSH tunnel:
       #   ssh -L 8080:localhost:8080 you@server
-      - "${CONSOLE_BIND:-127.0.0.1}:8080:8080"
+      - "${CONSOLE_BIND:-127.0.0.1}:${CONSOLE_PORT:-8080}:8080"
     volumes:
       # How it reports container status and restarts services.
       - /var/run/docker.sock:/var/run/docker.sock
@@ -91,9 +97,9 @@ services:
     profiles: [full]
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp" # HTTP/3
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp" # HTTP/3
     volumes:
       - ./volumes/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -439,8 +445,8 @@ services:
       # One multiplexed UDP port rather than a range: a range means 100+
       # published ports, which is slow to start and awkward to forward on a
       # home router. TCP 7881 is the fallback for networks that block UDP.
-      - "7882:7882/udp"
-      - "7881:7881"
+      - "${LIVEKIT_UDP_PORT:-7882}:7882/udp"
+      - "${LIVEKIT_TCP_PORT:-7881}:7881"
     volumes:
       - ./volumes/livekit/livekit.yaml:/etc/livekit.yaml:ro
 
@@ -456,7 +462,7 @@ services:
     profiles: [studio]
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${STUDIO_PORT:-3000}:3000"
     depends_on:
       meta:
         condition: service_started

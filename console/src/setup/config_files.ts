@@ -16,13 +16,11 @@
  * and to Docker, and anything cleverer would try to interpret them.
  */
 import { join } from "jsr:@std/path@1";
+import type { SetupOptions } from "./options.ts";
 import type { StackSecrets } from "./secrets.ts";
 
 /** What the operator chose. */
-export interface StackConfig {
-  /** The domain the server answers on, without a scheme. */
-  domain: string;
-}
+export type StackConfig = SetupOptions;
 
 /** Everything needed to render. */
 export interface RenderContext extends StackConfig {
@@ -70,7 +68,16 @@ export function renderEnv(context: RenderContext): string {
     "# keys below and every session already issued.",
     "",
     `RIFT_DOMAIN=${context.domain}`,
+    `RIFT_SERVER_NAME=${context.serverName}`,
     `API_EXTERNAL_URL=https://${context.domain}`,
+    "",
+    "# Published ports. Every one has a standard default in the compose file;",
+    "# these are here so a host that already uses 80 or 443 can move them, and",
+    "# so re-running setup remembers what was chosen.",
+    `HTTP_PORT=${context.httpPort}`,
+    `HTTPS_PORT=${context.httpsPort}`,
+    `LIVEKIT_TCP_PORT=${context.livekitTcpPort}`,
+    `LIVEKIT_UDP_PORT=${context.livekitUdpPort}`,
     "",
     "# Postgres",
     `POSTGRES_PASSWORD=${secrets.postgresPassword}`,
@@ -110,11 +117,12 @@ export function renderEnv(context: RenderContext): string {
     `LIVEKIT_API_KEY=${secrets.livekitApiKey}`,
     `LIVEKIT_API_SECRET=${secrets.livekitApiSecret}`,
     "",
-    "# The console's own password, and the interface it listens on. Moving it",
-    "# off the loopback exposes an interface that can replace any container on",
-    "# this host; put it behind a tunnel instead.",
+    "# The console's own password, and where it listens. Moving it off the",
+    "# loopback exposes an interface that can replace any container on this",
+    "# host; put it behind a tunnel instead.",
     `CONSOLE_PASSWORD=${secrets.consolePassword}`,
-    "CONSOLE_BIND=127.0.0.1",
+    `CONSOLE_BIND=${context.consoleBind}`,
+    `CONSOLE_PORT=${context.consolePort}`,
     "",
   ];
   return lines.join("\n");

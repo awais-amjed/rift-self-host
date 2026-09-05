@@ -8,6 +8,8 @@
  * exactly then.
  */
 
+import type { OptionField, SetupOptions } from "../setup/options.ts";
+
 /** Rift's palette, matching the app's default (indigo, dark). */
 const STYLE = `
 :root {
@@ -74,6 +76,14 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
 .secret { display: flex; gap: 8px; align-items: center; }
 .secret .mono { flex: 1; background: var(--inset); border: 1px solid var(--line);
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }
+.secret .mono.masked { color: var(--faint); letter-spacing: 0.18em; user-select: none; }
+.secret button { padding: 8px 12px; font-size: 13px; font-weight: 500; }
+details { margin: 4px 0 20px; }
+summary { cursor: pointer; color: var(--dim); font-size: 14px; padding: 6px 0; }
+details[open] summary { margin-bottom: 10px; }
+.warn { display: flex; gap: 10px; font-size: 13px; color: var(--warn);
+  background: rgba(251,191,36,0.07); border: 1px solid rgba(251,191,36,0.22);
+  border-radius: 8px; padding: 10px 12px; margin: 8px 0 0; }
 `;
 
 function shell(title: string, body: string, script = ""): string {
@@ -109,25 +119,52 @@ still <code>CONSOLE_PASSWORD</code> in the <code>.env</code> beside your
   );
 }
 
-/** The setup wizard, shown while there is no .env. */
-export function setupPage(): string {
+/** One input, rendered from its [OptionField] and current value. */
+function optionInput(field: OptionField, value: unknown): string {
+  const type = field.kind === "number"
+    ? "number"
+    : field.kind === "password"
+    ? "password"
+    : "text";
+  const shown = field.kind === "password" ? "" : String(value ?? "");
+  return `<div class="field">
+    <label for="${field.key}">${field.label}</label>
+    <input id="${field.key}" name="${field.key}" type="${type}" value="${shown}"
+           data-kind="${field.kind}">
+    ${field.hint ? `<p class="hint">${field.hint}</p>` : ""}
+  </div>`;
+}
+
+/**
+ * The setup wizard, shown while there is no .env.
+ *
+ * Rendered from [fields] rather than written out, so the form, the defaults
+ * and the .env keys cannot drift apart. Values come from a hand-written .env
+ * where one exists and from the defaults where it does not — the operator sees
+ * what they will get, and changes only what they care about.
+ */
+export function setupPage(fields: OptionField[], values: SetupOptions): string {
+  const plain = fields.filter((f) => !f.advanced).map((f) =>
+    optionInput(f, values[f.key])
+  ).join("");
+  const advanced = fields.filter((f) => f.advanced).map((f) =>
+    optionInput(f, values[f.key])
+  ).join("");
+
   return shell(
     "Set up your Rift server",
     `<h1>Set up your Rift server</h1>
-<p class="sub">Two answers. Everything else is generated.</p>
+<p class="sub">Everything not filled in here is generated.</p>
 
 <form id="form" class="panel">
-  <div class="field">
-    <label for="domain">Domain</label>
-    <input id="domain" name="domain" placeholder="chat.example.com" autofocus>
-    <p class="hint">Must already point at this machine, with ports 80 and 443 open.
-      A certificate is fetched automatically. Rift will not work over plain HTTP:
-      Android blocks it, so the server would be invisible to every phone.</p>
-  </div>
-  <div class="field">
-    <label for="serverName">Server name</label>
-    <input id="serverName" name="serverName" placeholder="My Server">
-  </div>
+  ${plain}
+  <details id="advanced">
+    <summary>Ports and console access</summary>
+    <p class="hint">Defaults are right for almost every server. Change them if
+      this machine already uses one of these ports, or if you are running a
+      second Rift server beside an existing one.</p>
+    ${advanced}
+  </details>
   <button type="submit" id="go">Set up</button>
 </form>
 
@@ -176,10 +213,18 @@ form.addEventListener("submit", async (event) => {
   document.getElementById("go").disabled = true;
   document.getElementById("progress").style.display = "block";
 
-  const body = JSON.stringify({
-    domain: document.getElementById("domain").value.trim(),
-    serverName: document.getElementById("serverName").value.trim(),
-  });
+  const options = {};
+  for (const input of form.querySelectorAll("input[name]")) {
+    const raw = input.value.trim();
+    // A blank number means "leave the default alone"; sending 0 would be a
+    // port choice rather than an absence.
+    if (input.dataset.kind === "number") {
+      if (raw !== "") options[input.name] = Number(raw);
+    } else {
+      options[input.name] = raw;
+    }
+  }
+  const body = JSON.stringify(options);
 
   const response = await fetch("/api/setup", {
     method: "POST",
@@ -236,6 +281,28 @@ export function dashboardPage(domain: string): string {
 <h2>Containers</h2>
 <div class="panel"><table id="services"><tr><td class="name">Loading…</td></tr></table></div>
 
+<h2>Servers</h2>
+<div class="panel">
+  <table id="servers"><tr><td class="name">Loading…</td></tr></table>
+  <div class="field" style="margin:18px 0 0">
+    <label for="newServer">Create a server</label>
+    <div class="secret">
+      <input id="newServer" placeholder="My Server" style="flex:1">
+      <button id="createServer">Create</button>
+    </div>
+    <p class="hint">Everything else a server needs — the service key, the voice
+      URL and its credentials — is already here, so this is the whole form. The
+      app's "Create server" dialog asks for all of it because it cannot know
+      any of it.</p>
+  </div>
+  <p class="error" id="serverError" style="display:none"></p>
+  <div id="newInvite" style="display:none">
+    <h2>Invite link</h2>
+    <p>Paste this into the app's Join form.</p>
+    <div class="invite" id="newInviteLink"></div>
+  </div>
+</div>
+
 <h2>Credentials</h2>
 <div class="panel" id="secrets"></div>
 
@@ -261,11 +328,117 @@ async function load() {
       '</td><td>' + service.status + '</td></tr>';
   }).join("") || '<tr><td class="name">Nothing is running.</td></tr>';
 
-  document.getElementById("secrets").innerHTML = state.secrets.map((entry) =>
-    '<div class="field"><label>' + entry.name + '</label>' +
-    '<div class="secret"><div class="mono">' + entry.value + '</div></div></div>'
-  ).join("");
+  // Secret rows render masked and stay masked across the ten-second refresh:
+  // a value that reappears on its own is one that ends up on a shared screen
+  // because nobody noticed it come back.
+  const revealed = window._revealed || (window._revealed = new Set());
+
+  await loadServers();
+
+  document.getElementById("secrets").innerHTML = state.secrets.map((entry, i) => {
+    const shown = !entry.secret || revealed.has(entry.name);
+    const body = shown ? escapeHtml(entry.value) : "\u2022".repeat(28);
+    return '<div class="field"><label>' + escapeHtml(entry.name) + '</label>' +
+      '<div class="secret"><div class="mono' + (shown ? '' : ' masked') + '">' + body + '</div>' +
+      (entry.secret
+        ? '<button class="quiet" data-reveal="' + i + '">' + (shown ? 'Hide' : 'Reveal') + '</button>' +
+          '<button class="quiet" data-copy="' + i + '">Copy</button>'
+        : '') +
+      '</div>' +
+      (shown && entry.note ? '<p class="warn">' + escapeHtml(entry.note) + '</p>' : '') +
+      '</div>';
+  }).join("");
+
+  for (const button of document.querySelectorAll("[data-reveal]")) {
+    button.addEventListener("click", () => {
+      const entry = state.secrets[Number(button.dataset.reveal)];
+      revealed.has(entry.name) ? revealed.delete(entry.name) : revealed.add(entry.name);
+      load();
+    });
+  }
+  for (const button of document.querySelectorAll("[data-copy]")) {
+    button.addEventListener("click", async () => {
+      const entry = state.secrets[Number(button.dataset.copy)];
+      await navigator.clipboard.writeText(entry.value);
+      button.textContent = "Copied";
+      setTimeout(() => (button.textContent = "Copy"), 1500);
+    });
+  }
 }
+
+/// Values here are ours, but they are drawn with innerHTML and one of them is
+/// operator-supplied (the domain), so they are escaped rather than trusted.
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+async function loadServers() {
+  const data = await (await fetch("/api/servers")).json();
+  const linkFor = (id) => (data.invites.find((i) => i.serverId === id) || {}).link;
+
+  document.getElementById("servers").innerHTML = data.servers.map((server) => {
+    const link = linkFor(server.id);
+    return '<tr><td class="name">' + escapeHtml(server.name) + '</td><td>' +
+      server.memberCount + ' member' + (server.memberCount === 1 ? '' : 's') + ' · ' +
+      server.channelCount + ' channel' + (server.channelCount === 1 ? '' : 's') +
+      '<div class="secret" style="margin-top:8px">' +
+      (link
+        ? '<div class="mono">' + escapeHtml(link) + '</div>' +
+          '<button class="quiet" data-copy-invite="' + escapeHtml(link) + '">Copy</button>'
+        : '<button class="quiet" data-invite="' + server.id + '">Create invite link</button>') +
+      '</div></td></tr>';
+  }).join("") || '<tr><td class="name">No servers yet.</td></tr>';
+
+  for (const button of document.querySelectorAll("[data-invite]")) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const res = await fetch("/api/servers/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serverId: button.dataset.invite, maxUses: 1 }),
+      });
+      const body = await res.json();
+      if (body.link) loadServers();
+      else { button.disabled = false; alert(body.error || "Could not create an invite."); }
+    });
+  }
+  for (const button of document.querySelectorAll("[data-copy-invite]")) {
+    button.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(button.dataset.copyInvite);
+      button.textContent = "Copied";
+      setTimeout(() => (button.textContent = "Copy"), 1500);
+    });
+  }
+}
+
+document.getElementById("createServer").addEventListener("click", async (event) => {
+  const input = document.getElementById("newServer");
+  const error = document.getElementById("serverError");
+  error.style.display = "none";
+  event.target.disabled = true;
+  event.target.textContent = "Creating…";
+
+  const res = await fetch("/api/servers/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: input.value.trim() }),
+  });
+  const body = await res.json();
+
+  event.target.disabled = false;
+  event.target.textContent = "Create";
+  if (body.inviteLink) {
+    input.value = "";
+    document.getElementById("newInvite").style.display = "block";
+    document.getElementById("newInviteLink").textContent = body.inviteLink;
+    loadServers();
+  } else {
+    error.textContent = body.error || "Could not create the server.";
+    error.style.display = "block";
+  }
+});
 
 document.getElementById("restart").addEventListener("click", async (event) => {
   event.target.disabled = true;

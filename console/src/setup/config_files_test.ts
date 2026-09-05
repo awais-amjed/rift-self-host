@@ -5,9 +5,11 @@ import {
   assertThrows,
 } from "jsr:@std/assert@1";
 import { placeholders, render, renderEnv } from "./config_files.ts";
+import { defaults } from "./options.ts";
 import { generateSecrets } from "./secrets.ts";
 
 const context = async () => ({
+  ...defaults,
   domain: "chat.example.com",
   secrets: await generateSecrets(),
 });

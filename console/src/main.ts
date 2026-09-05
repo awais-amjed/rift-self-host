@@ -13,7 +13,7 @@ import { handle, isConfigured } from "./web/routes.ts";
 const PORT = consolePort();
 
 async function main(): Promise<void> {
-  const configured = await isConfigured(projectDir());
+  const configured = isConfigured(projectDir());
 
   if (!await isDockerReachable()) {
     console.error(

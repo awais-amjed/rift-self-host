@@ -8,8 +8,16 @@
 import { announce } from "../banner.ts";
 import { setting } from "../env_file.ts";
 import { runChecks } from "../health.ts";
+import {
+  createServer,
+  inviteLinkFor,
+  listInvites,
+  listServers,
+  mintInvite,
+} from "../servers.ts";
 import { restartService, serviceStatuses, startStack } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
+import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
 import { defaultPaths, runSetup, type SetupProgress } from "../setup/run.ts";
 import {
   closeSession,
@@ -22,14 +30,20 @@ import {
 } from "./auth.ts";
 import { dashboardPage, loginPage, setupPage } from "./page.ts";
 
-/** True once setup has written the environment file. */
-export async function isConfigured(projectDir: string): Promise<boolean> {
-  try {
-    await Deno.stat(`${projectDir}/.env`);
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * True once setup has run, as distinct from a `.env` merely existing.
+ *
+ * The file is not the test, because an operator may write one by hand before
+ * ever starting the console — a domain, some ports, a password — and that file
+ * describes a stack that has not been built yet. Treating its presence as
+ * "configured" showed them a login page for a server that did not exist, and
+ * no way to reach setup at all.
+ *
+ * `JWT_SECRET` is the test instead: it is generated, never something anybody
+ * writes by hand, and nothing in the stack works without it.
+ */
+export function isConfigured(_projectDir?: string): boolean {
+  return setting("JWT_SECRET") !== undefined;
 }
 
 function html(body: string, headers: HeadersInit = {}): Response {
@@ -86,9 +100,9 @@ export async function handle(request: Request): Promise<Response> {
   }
 
   if (path === "/") {
-    return await isConfigured(paths.projectDir)
+    return isConfigured(paths.projectDir)
       ? html(dashboardPage(setting("RIFT_DOMAIN") ?? "Your server"))
-      : html(setupPage());
+      : html(setupPage(fields, optionsFromEnv(paths.projectDir)));
   }
 
   if (path === "/api/setup" && request.method === "POST") {
@@ -102,6 +116,47 @@ export async function handle(request: Request): Promise<Response> {
       runChecks(target, paths.migrationsDir).catch(() => []),
     ]);
     return json({ services, checks, secrets: visibleSecrets() });
+  }
+
+  if (path === "/api/servers") {
+    const target = targetFromEnv();
+    const [servers, invites] = await Promise.all([
+      listServers(target).catch(() => []),
+      listInvites(target).catch(() => []),
+    ]);
+    return json({
+      servers,
+      // One live invite per server is all the dashboard offers: a list of every
+      // outstanding code would be a list of ways into the server, on a page.
+      invites: servers.map((server) => {
+        const invite = invites.find((i) => i.serverId === server.id);
+        return invite ? { serverId: server.id, link: inviteLinkFor(invite.code) } : null;
+      }).filter((entry) => entry !== null),
+    });
+  }
+
+  if (path === "/api/servers/create" && request.method === "POST") {
+    const { name } = await request.json();
+    try {
+      const created = await createServer(String(name ?? ""));
+      return json(created);
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  }
+
+  if (path === "/api/servers/invite" && request.method === "POST") {
+    const { serverId, maxUses } = await request.json();
+    try {
+      const code = await mintInvite(
+        targetFromEnv(),
+        String(serverId),
+        Number(maxUses ?? 1),
+      );
+      return json({ link: inviteLinkFor(code) });
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   }
 
   if (path === "/api/restart" && request.method === "POST") {
@@ -125,18 +180,44 @@ export async function handle(request: Request): Promise<Response> {
  * hand needs it any more — the console makes the one call that did — and a
  * value on a page is a value in a screenshot.
  */
-function visibleSecrets(): { name: string; value: string }[] {
-  const entries: [string, string | undefined][] = [
-    ["Server URL", `https://${setting("RIFT_DOMAIN") ?? ""}`],
+/** One row of the dashboard's credentials panel. */
+interface VisibleSecret {
+  name: string;
+  value: string;
+  /** Masked until the operator asks for it, and worth a warning when they do. */
+  secret: boolean;
+  /** Why it matters, shown beside a revealed value. */
+  note?: string;
+}
+
+function visibleSecrets(): VisibleSecret[] {
+  const domain = setting("RIFT_DOMAIN") ?? "";
+  const entries: (VisibleSecret | null)[] = [
+    { name: "Server URL", value: `https://${domain}`, secret: false },
+    { name: "LiveKit URL", value: `wss://${domain}`, secret: false },
     // The publishable key, because that is what the server actually issues to
     // clients. Showing the legacy JWT beside it would invite somebody to paste
     // the one nothing hands out any more.
-    ["Publishable key", setting("SUPABASE_PUBLISHABLE_KEY")],
-    ["LiveKit URL", `wss://${setting("RIFT_DOMAIN") ?? ""}`],
+    //
+    // Masked even though every member of the server holds a copy: it is handed
+    // out per member by `resolve_invite`, not published, and it is the key that
+    // reaches this server's API at all. A dashboard that draws it in plain text
+    // by default puts it in every screenshot and every shared screen.
+    keyRow(setting("SUPABASE_PUBLISHABLE_KEY")),
   ];
-  return entries
-    .filter((entry): entry is [string, string] => Boolean(entry[1]))
-    .map(([name, value]) => ({ name, value }));
+  return entries.filter((entry): entry is VisibleSecret => entry !== null);
+}
+
+function keyRow(value: string | undefined): VisibleSecret | null {
+  if (!value) return null;
+  return {
+    name: "Publishable key",
+    value,
+    secret: true,
+    note: "Anyone holding this can reach this server's API as an anonymous " +
+      "caller. Members receive it automatically when they join — you never " +
+      "need to send it to anybody, and it does not belong in a screenshot.",
+  };
 }
 
 /**
@@ -147,10 +228,7 @@ function visibleSecrets(): { name: string; value: string }[] {
  * loop on the other end. Pulling images can take minutes, and a request that
  * returns nothing for that long reads as a hang.
  */
-function setupStream(request: {
-  domain: string;
-  serverName: string;
-}): Response {
+function setupStream(request: Partial<SetupOptions>): Response {
   const encoder = new TextEncoder();
 
   const body = new ReadableStream({
@@ -159,11 +237,10 @@ function setupStream(request: {
         controller.enqueue(encoder.encode(JSON.stringify(value) + "\n"));
 
       try {
+        // Anything the page did not send falls back to the .env-or-default
+        // set, so a caller posting only a domain still gets a whole stack.
         const result = await runSetup(
-          {
-            domain: request.domain,
-            serverName: request.serverName || "Rift",
-          },
+          { ...optionsFromEnv(defaultPaths().projectDir), ...request },
           targetFromEnv(),
           defaultPaths(),
           (progress: SetupProgress) => send(progress),
