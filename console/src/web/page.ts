@@ -182,7 +182,7 @@ export function setupPage(fields: OptionField[], values: SetupOptions): string {
   <p>Save this now. You will need it to reload this page as a dashboard, and it
      is not shown again — though it stays in <code>.env</code>, and
      <code>docker compose logs console</code> prints it too.</p>
-  <div class="secret"><div class="mono" id="consolePassword"></div></div>
+  <div class="secret"><div class="mono" id="issuedPassword"></div></div>
 </div>
 
 <div class="panel" id="failed" style="display:none">
@@ -253,7 +253,11 @@ form.addEventListener("submit", async (event) => {
         document.getElementById("note").style.display = "none";
         document.getElementById("done").style.display = "block";
         document.getElementById("invite").textContent = event.inviteLink;
-        document.getElementById("consolePassword").textContent = event.consolePassword || "";
+        // Not "consolePassword": that id belongs to the form's input above,
+        // and getElementById returns the first match — so this wrote
+        // textContent onto an <input>, which shows nothing, and the panel
+        // stayed blank while the password sat in the log.
+        document.getElementById("issuedPassword").textContent = event.consolePassword || "";
       }
       if (event.error) {
         document.getElementById("note").style.display = "none";
