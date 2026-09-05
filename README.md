@@ -130,20 +130,32 @@ limits surviving a container recreate, `messages` refusing the anon key, and the
 invite the console minted resolving back through `resolve_invite` to the server
 it names.
 
-Also verified, after an earlier run reported success without checking it: an
-**authenticated** call. An ES256 session token reaches an edge function and is
-accepted. This is worth stating separately because the first end-to-end run
-exercised only `resolve_invite`, which takes no token, and `create_server`,
-which compares a key directly — so it passed on a stack where every
-authenticated call failed.
+**Two real clients, end to end.** Against a stack built from this repo with
+nothing patched by hand, two members using the app's own `CryptoRepository`
+each signed in over SIWS, registered, exchanged the channel key wrapped for one
+another, and sent messages the other decrypted — with the sender's signature
+verified. The server held only ciphertext throughout, and the `@mention`
+resolved to the right member id.
+
+That is the check the earlier runs were missing. They exercised
+`resolve_invite`, which takes no token, and `create_server`, which compares a
+key directly — so they passed on a stack where **nobody could log in and no
+authenticated call worked**. Two separate faults, both invisible until a client
+actually tried to authenticate:
+
+- GoTrue signed HS256 and published an empty JWKS, so every authenticated
+  edge-function call failed.
+- `GOTRUE_SITE_URL` named the server's domain, so the fixed `localhost` URI
+  every client signs was refused.
 
 Not yet proved, and worth doing before anyone else runs one:
 
-- **A real certificate.** The end-to-end run used a domain that does not exist,
-  so Caddy never completed an ACME challenge. Everything downstream of it was
-  reached container-to-container.
-- **A real client.** Every check so far has been a hand-made request. Nobody has
-  driven the Rift app through sign-in, `register` and a message.
+- **A real certificate.** The runs used a domain that does not exist, so Caddy
+  never completed an ACME challenge; clients reached Kong directly over http.
+- **A real call.** LiveKit starts and is routed, but nobody has joined a voice
+  channel through it.
+- **The Flutter app itself.** The two clients were headless, sharing the app's
+  crypto and hitting the same endpoints and tables, but not its UI.
 - **A real call.** LiveKit starts and is routed, but no client has joined a
   channel through it, so the single-UDP-port choice is reasoned rather than
   measured.
