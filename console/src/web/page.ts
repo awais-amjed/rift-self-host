@@ -94,7 +94,10 @@ export function loginPage(failed: boolean): string {
   return shell(
     "Rift console",
     `<h1>Rift console</h1>
-<p class="sub">Find the password with <code>docker compose logs console</code>.</p>
+<p class="sub">Setup showed this password once, and printed it with
+<code>docker compose logs console</code>. If the log has rotated away it is
+still <code>CONSOLE_PASSWORD</code> in the <code>.env</code> beside your
+<code>docker-compose.yml</code>.</p>
 <form method="post" action="/login" class="panel">
   <div class="field">
     <label for="password">Console password</label>
@@ -137,7 +140,12 @@ export function setupPage(): string {
   <h2 style="margin-top:0">Your server is running</h2>
   <p>Paste this into the app's Join form. It is a single-use admin invite.</p>
   <div class="invite" id="invite"></div>
-  <p class="hint">Reload this page afterwards for the dashboard.</p>
+
+  <h2>Console password</h2>
+  <p>Save this now. You will need it to reload this page as a dashboard, and it
+     is not shown again — though it stays in <code>.env</code>, and
+     <code>docker compose logs console</code> prints it too.</p>
+  <div class="secret"><div class="mono" id="consolePassword"></div></div>
 </div>
 
 <div class="panel" id="failed" style="display:none">
@@ -200,6 +208,7 @@ form.addEventListener("submit", async (event) => {
         document.getElementById("note").style.display = "none";
         document.getElementById("done").style.display = "block";
         document.getElementById("invite").textContent = event.inviteLink;
+        document.getElementById("consolePassword").textContent = event.consolePassword || "";
       }
       if (event.error) {
         document.getElementById("note").style.display = "none";

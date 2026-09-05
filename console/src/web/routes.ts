@@ -5,6 +5,7 @@
  * the top of [handle] rather than per-route so a route added later cannot
  * forget it.
  */
+import { announce } from "../banner.ts";
 import { setting } from "../env_file.ts";
 import { runChecks } from "../health.ts";
 import { restartService, serviceStatuses, startStack } from "../docker.ts";
@@ -167,7 +168,16 @@ function setupStream(request: {
           defaultPaths(),
           (progress: SetupProgress) => send(progress),
         );
-        send({ inviteLink: result.server.inviteLink, serverId: result.server.serverId });
+        // Both channels, because the operator is on the page and the login
+        // page sends them to the log. Until this existed the log's last word
+        // was the startup banner's "no password yet", printed before setup
+        // could possibly have made one.
+        announce({ password: result.secrets.consolePassword, configured: true });
+        send({
+          inviteLink: result.server.inviteLink,
+          serverId: result.server.serverId,
+          consolePassword: result.secrets.consolePassword,
+        });
       } catch (error) {
         send({ error: error instanceof Error ? error.message : String(error) });
       } finally {

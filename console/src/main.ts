@@ -5,34 +5,12 @@
  * on a fresh machine `docker compose up -d` brings up this container alone,
  * and it is what creates the conditions for the rest.
  */
+import { announce, consolePort } from "./banner.ts";
 import { isDockerReachable, projectDir } from "./docker.ts";
 import { configuredPassword } from "./web/auth.ts";
 import { handle, isConfigured } from "./web/routes.ts";
 
-const PORT = Number(Deno.env.get("CONSOLE_PORT") ?? "8080");
-
-/**
- * Say the password on startup.
- *
- * `docker compose logs console` is the documented way to find it, and it is
- * the only way — the console has no other channel to an operator who has just
- * run one command. Printed on every start rather than only the first, because
- * the log it was printed to may well have been rotated away by the time
- * anybody looks.
- */
-function announce(configured: boolean): void {
-  const password = configuredPassword();
-  const banner = "─".repeat(58);
-
-  console.log(`\n${banner}`);
-  console.log("  Rift console");
-  console.log(`  http://localhost:${PORT}`);
-  if (password) console.log(`  password: ${password}`);
-  else if (!configured) {
-    console.log("  No password yet — set one up at the address above.");
-  }
-  console.log(`${banner}\n`);
-}
+const PORT = consolePort();
 
 async function main(): Promise<void> {
   const configured = await isConfigured(projectDir());
@@ -44,7 +22,7 @@ async function main(): Promise<void> {
     );
   }
 
-  announce(configured);
+  announce({ password: configuredPassword(), configured });
 
   Deno.serve({
     port: PORT,
