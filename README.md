@@ -75,6 +75,20 @@ scripts/sync.sh        refreshes both from ../rift
 own. `scripts/sync.sh` refreshes them and is the only thing that should ever
 write there — edit the originals in the app repo.
 
+## API keys
+
+Servers issue Supabase's **new opaque keys** — `sb_publishable_` for clients,
+`sb_secret_` for the console — rather than the legacy `anon` / `service_role`
+JWTs that Supabase is retiring by the end of 2026. Kong holds both credentials
+and swaps an opaque key for a signed ES256 JWT before the request reaches any
+service, so a client holding an older legacy key still works.
+
+Sessions are signed with a P-256 keypair generated at setup, not with the shared
+secret. That is not a preference: Rift's edge functions verify callers locally
+against the JWKS GoTrue publishes, and a stack configured with only
+`JWT_SECRET` signs HS256 and publishes an empty JWKS — so every authenticated
+call fails while every container reports healthy.
+
 ## Requirements
 
 - Docker with the Compose plugin
@@ -116,11 +130,20 @@ limits surviving a container recreate, `messages` refusing the anon key, and the
 invite the console minted resolving back through `resolve_invite` to the server
 it names.
 
+Also verified, after an earlier run reported success without checking it: an
+**authenticated** call. An ES256 session token reaches an edge function and is
+accepted. This is worth stating separately because the first end-to-end run
+exercised only `resolve_invite`, which takes no token, and `create_server`,
+which compares a key directly — so it passed on a stack where every
+authenticated call failed.
+
 Not yet proved, and worth doing before anyone else runs one:
 
 - **A real certificate.** The end-to-end run used a domain that does not exist,
   so Caddy never completed an ACME challenge. Everything downstream of it was
   reached container-to-container.
+- **A real client.** Every check so far has been a hand-made request. Nobody has
+  driven the Rift app through sign-in, `register` and a message.
 - **A real call.** LiveKit starts and is routed, but no client has joined a
   channel through it, so the single-UDP-port choice is reasoned rather than
   measured.
