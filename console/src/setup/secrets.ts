@@ -8,6 +8,11 @@
  * bytes. Both are generated here so neither can happen.
  */
 import { SignJWT } from "npm:jose@5";
+import {
+  generateSigningKeys,
+  importSigningKey,
+  type SigningKeys,
+} from "./signing_keys.ts";
 
 /** The complete set of generated values. */
 export interface StackSecrets {
@@ -23,6 +28,22 @@ export interface StackSecrets {
   livekitApiSecret: string;
   /** What the operator types to open the console. */
   consolePassword: string;
+
+  /**
+   * The EC keypair GoTrue signs sessions with.
+   *
+   * Without this the stack signs HS256 and publishes an empty JWKS, and every
+   * authenticated edge-function call fails — see signing_keys.ts.
+   */
+  signingKeys: SigningKeys;
+
+  /** The opaque keys clients present, replacing the legacy JWT pair. */
+  publishableKey: string;
+  secretKey: string;
+
+  /** What Kong swaps an opaque key for, before passing it on. */
+  anonKeyAsymmetric: string;
+  serviceRoleKeyAsymmetric: string;
 }
 
 /**
@@ -84,11 +105,49 @@ export async function signApiKey(
     .sign(new TextEncoder().encode(jwtSecret));
 }
 
+/**
+ * Sign an API key with the EC key rather than the shared secret.
+ *
+ * This is what an opaque key becomes once Kong has translated it. The claims
+ * are the same as the legacy pair carries; only the signature differs.
+ */
+export async function signAsymmetricApiKey(
+  keys: SigningKeys,
+  role: "anon" | "service_role",
+): Promise<string> {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const expiresAt = issuedAt + API_KEY_LIFETIME_YEARS * 365 * 24 * 60 * 60;
+
+  return await new SignJWT({ role, iss: "supabase" })
+    .setProtectedHeader({ alg: "ES256", typ: "JWT", kid: keys.kid })
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(expiresAt)
+    .sign(await importSigningKey(keys));
+}
+
+/**
+ * An opaque API key.
+ *
+ * `sb_publishable_` / `sb_secret_` are Supabase's replacements for the legacy
+ * JWT pair. The value carries no claims — it is a bare token Kong recognises
+ * and swaps for the signed JWT above — which is what lets one be withdrawn
+ * without changing the signing key and invalidating every live session.
+ */
+export function opaqueKey(kind: "publishable" | "secret"): string {
+  return `sb_${kind}_${randomString(32)}`;
+}
+
 /** Generate a fresh set. Called once, at setup. */
 export async function generateSecrets(): Promise<StackSecrets> {
   const jwtSecret = randomString(64);
+  const signingKeys = await generateSigningKeys(jwtSecret);
 
   return {
+    signingKeys,
+    publishableKey: opaqueKey("publishable"),
+    secretKey: opaqueKey("secret"),
+    anonKeyAsymmetric: await signAsymmetricApiKey(signingKeys, "anon"),
+    serviceRoleKeyAsymmetric: await signAsymmetricApiKey(signingKeys, "service_role"),
     postgresPassword: randomString(32),
     jwtSecret,
     anonKey: await signApiKey(jwtSecret, "anon"),

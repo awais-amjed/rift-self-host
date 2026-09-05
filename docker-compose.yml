@@ -156,6 +156,15 @@ services:
       GOTRUE_JWT_SECRET: ${JWT_SECRET}
       GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}
 
+      # The keypair sessions are actually signed with, and the reason this
+      # stack works at all. Rift's edge functions verify a caller locally
+      # against the JWKS GoTrue publishes; with only the secret above, GoTrue
+      # signs HS256 and publishes {"keys":[]} — correctly, since serving a
+      # symmetric secret publicly would let any reader mint sessions — and
+      # every authenticated call then fails with token_invalid while the
+      # containers all report healthy.
+      GOTRUE_JWT_KEYS: ${JWT_KEYS}
+
       # How members log in. Rift authenticates with a signature over a
       # per-server keypair (Sign-In With Solana), never a password — see the
       # app's auth.md. Without this flag GoTrue rejects every login with an
@@ -188,7 +197,9 @@ services:
       PGRST_DB_MAX_ROWS: 1000
       PGRST_ADMIN_SERVER_PORT: 3001
       PGRST_ADMIN_SERVER_HOST: localhost
-      PGRST_JWT_SECRET: ${JWT_SECRET}
+      # A JWKS rather than the bare secret: it carries both the EC public key
+      # and the legacy symmetric one, so ES256 and HS256 tokens both verify.
+      PGRST_JWT_SECRET: ${JWT_JWKS}
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
       PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
@@ -224,6 +235,7 @@ services:
       DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
       DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
       API_JWT_SECRET: ${JWT_SECRET}
+      API_JWT_JWKS: ${JWT_JWKS}
       SECRET_KEY_BASE: ${SECRET_KEY_BASE}
       METRICS_JWT_SECRET: ${JWT_SECRET}
       ERL_AFLAGS: -proto_dist inet_tcp
@@ -270,6 +282,7 @@ services:
       SERVICE_KEY: ${SERVICE_ROLE_KEY}
       POSTGREST_URL: http://rest:3000
       AUTH_JWT_SECRET: ${JWT_SECRET}
+      JWT_JWKS: ${JWT_JWKS}
       DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
       STORAGE_PUBLIC_URL: ${API_EXTERNAL_URL}
       REQUEST_ALLOW_X_FORWARDED_PATH: "true"
@@ -312,6 +325,7 @@ services:
       - deno-cache:/root/.cache/deno
     environment:
       JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_JWKS: ${JWT_JWKS}
       SUPABASE_URL: http://kong:8000
       SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
       SUPABASE_ANON_KEY: ${ANON_KEY}

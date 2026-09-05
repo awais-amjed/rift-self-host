@@ -93,17 +93,64 @@ Deno.test("the console stays on the loopback unless moved deliberately", async (
   assertStringIncludes(renderEnv(await context()), "CONSOLE_BIND=127.0.0.1");
 });
 
+/** The two values that are JSON documents rather than plain tokens. */
+const JSON_SETTINGS = new Set(["JWT_KEYS", "JWT_JWKS"]);
+
 Deno.test("no generated value needs quoting in an env file", async () => {
   // docker compose reads .env itself, and its parser has opinions about
-  // spaces, quotes and '#'. Generated values are alphanumeric, and JWTs use
-  // only base64url — so no line here ever needs escaping.
+  // spaces, quotes and '#'. Generated values are alphanumeric and JWTs are
+  // base64url, so no line here needs escaping.
   const env = renderEnv(await context());
   for (const line of env.split("\n")) {
     if (line.startsWith("#") || line.trim() === "") continue;
+    const name = line.slice(0, line.indexOf("="));
+    if (JSON_SETTINGS.has(name)) continue;
     const value = line.slice(line.indexOf("=") + 1);
     assert(
       /^[A-Za-z0-9._:/@-]*$/.test(value),
-      `${line.split("=")[0]} needs quoting: ${value}`,
+      `${name} needs quoting: ${value}`,
     );
   }
+});
+
+Deno.test("the JWK settings are single-line JSON with nothing compose eats", async () => {
+  const env = renderEnv(await context());
+  const lines = new Map(
+    env.split("\n").filter((l) => l.includes("=")).map((l) => [
+      l.slice(0, l.indexOf("=")),
+      l.slice(l.indexOf("=") + 1),
+    ]),
+  );
+
+  for (const name of JSON_SETTINGS) {
+    const value = lines.get(name);
+    assert(value !== undefined, `${name} is missing`);
+    // Parses, so no newline snuck in and split the value across two lines.
+    JSON.parse(value!);
+    // '#' would start a comment mid-value; '$' would be substituted. Neither
+    // can occur in base64url or in these field names, and asserting it means a
+    // future field that does breaks a test rather than a stack.
+    assert(!value!.includes("#"), `${name} contains a comment character`);
+    assert(!value!.includes("$"), `${name} contains a substitution`);
+  }
+});
+
+Deno.test("the published JWKS carries no private key material", async () => {
+  // `d` is the EC private scalar. Publishing it at /.well-known/jwks.json
+  // would let any reader mint sessions for this server.
+  const { secrets } = await context();
+  for (const key of secrets.signingKeys.verifying.keys) {
+    assertEquals(key.d, undefined, "public JWKS must not carry 'd'");
+  }
+  const signing = secrets.signingKeys.signing.find((k) => k.kty === "EC");
+  assert(signing?.d !== undefined, "the signing key must carry 'd'");
+});
+
+Deno.test("only the EC key is allowed to sign", async () => {
+  // GoTrue picks a signing key from JWT_KEYS. If the legacy symmetric key were
+  // eligible it could pick that, sign HS256, and put the stack straight back
+  // into the failure the EC key exists to prevent.
+  const { secrets } = await context();
+  const symmetric = secrets.signingKeys.signing.find((k) => k.kty === "oct");
+  assertEquals(symmetric?.key_ops, undefined, "the oct key must not be signable");
 });
