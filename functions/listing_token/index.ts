@@ -48,7 +48,10 @@ Deno.serve(async (req) => {
     crypto.getRandomValues(raw);
     const token = [...raw].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+    // The member id goes in explicitly: this client holds the service key, so
+    // there is no session inside the function for auth.uid() to read.
     const { data, error } = await supabase.rpc("issue_listing_token", {
+      p_user_id: auth.userId,
       p_server_id: auth.serverId,
       p_token_hash: await sha256Hex(token),
     });
