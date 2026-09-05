@@ -146,7 +146,24 @@ services:
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
 
-      GOTRUE_SITE_URL: ${API_EXTERNAL_URL}
+      # Both of these name `localhost`, and neither is a placeholder anybody
+      # should "fix" to the real domain.
+      #
+      # Every Rift client signs a SIWS message naming a fixed `localhost`
+      # domain and `http://localhost` URI, whatever server it is for — see the
+      # app's auth.md, "Why the SIWS domain is fixed". GoTrue's web3 grant runs
+      # the URI through IsRedirectURLValid, which admits it only if it matches
+      # SITE_URL's hostname or an entry in the allow list. Pointing SITE_URL at
+      # the server's own domain therefore refuses every login on the server, with
+      # "message was signed for another app" — a sentence that names neither
+      # SIWS nor this setting.
+      #
+      # Nothing is loosened by this. GoTrue never redirects anywhere here:
+      # email and phone signup are off, there are no OAuth providers, and the
+      # only grant in use is web3, which returns a token rather than a
+      # redirect. The allow list exists solely so the signature verifies.
+      GOTRUE_SITE_URL: http://localhost
+      GOTRUE_URI_ALLOW_LIST: http://localhost,http://localhost/**
       GOTRUE_DISABLE_SIGNUP: "false"
 
       GOTRUE_JWT_ADMIN_ROLES: service_role
