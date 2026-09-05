@@ -1,4 +1,15 @@
 -- ============================================================
+-- Rift self-hosted server — 012: Proving an admin asked for a public listing
+-- ============================================================
+-- Central cannot tell who administers a server here, so it asks.
+--
+-- Was 1 file: 042_listing_tokens.
+-- Merged unchanged and in the same order, so this applies exactly what
+-- they applied. The sections below are those files, each still carrying
+-- the reasoning it was written with.
+-- ============================================================
+
+-- ============================================================
 -- Rift self-hosted server — 042: proving an admin asked for a listing
 -- ============================================================
 -- The public directory lives on central. Central cannot tell who administers a
