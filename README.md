@@ -112,9 +112,12 @@ worked.
 release that moves GoTrue or Kong cannot reach you through the console image at
 all. This is the step that gets skipped.
 
-`RIFT_AUTO_APPLY=false` turns the automatic part off, for anyone who would
-rather a schema change never happened because a machine rebooted. The console
-then offers it as a button instead.
+There is a switch for the automatic part, in the console's Release panel or as
+`RIFT_AUTO_APPLY` in `.env`. Turn it off if a schema change should never happen
+merely because a machine rebooted; the console then offers Apply as a button.
+The switch takes effect immediately either way — it is read from `.env` on use
+rather than from the environment the console started with, which is the only
+way a console can honour a setting it cannot restart itself to pick up.
 
 ### When a migration has changed under you
 

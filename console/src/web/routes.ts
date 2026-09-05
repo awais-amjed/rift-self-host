@@ -8,7 +8,7 @@
 import { announce } from "../banner.ts";
 import { setting } from "../env_file.ts";
 import { runChecks } from "../health.ts";
-import { applyUpgrade, autoApplyEnabled, pendingWork } from "../upgrade.ts";
+import { applyUpgrade, autoApplyEnabled, pendingWork, setAutoApply } from "../upgrade.ts";
 import {
   createServer,
   inviteLinkFor,
@@ -165,6 +165,12 @@ export async function handle(request: Request): Promise<Response> {
     return json(
       work === null ? { unknown: true } : { ...work, autoApply: autoApplyEnabled() },
     );
+  }
+
+  if (path === "/api/auto-apply" && request.method === "POST") {
+    const { enabled } = await request.json();
+    await setAutoApply(enabled === true);
+    return json({ autoApply: autoApplyEnabled() });
   }
 
   if (path === "/api/upgrade" && request.method === "POST") {
