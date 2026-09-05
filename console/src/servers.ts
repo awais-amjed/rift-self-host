@@ -127,10 +127,20 @@ export async function mintInvite(
   serverId: string,
   maxUses = 1,
 ): Promise<string> {
+  // Both arguments are checked before they are anywhere near a statement.
+  // `literal` would keep a bad server id harmless — it doubles the quote, and
+  // a SQL injection attempt comes back as an invalid uuid — but a `maxUses` of
+  // "abc" became the bare token NaN, which is not injectable and is still a
+  // psql syntax error handed to whoever asked.
+  if (!/^[0-9a-fA-F-]{36}$/.test(serverId)) {
+    throw new Error("That is not a server id.");
+  }
+  const uses = Number.isInteger(maxUses) ? Math.min(Math.max(maxUses, 1), 1000) : 1;
+
   const rows = await queryRows(
     target,
     `INSERT INTO invites (server_id, code, role_id, max_uses, uses)
-     SELECT s.id, encode(gen_random_bytes(8), 'hex'), r.id, ${Math.max(1, maxUses)}, 0
+     SELECT s.id, encode(gen_random_bytes(8), 'hex'), r.id, ${uses}, 0
        FROM servers s
        JOIN roles r ON r.server_id = s.id AND r.is_everyone = TRUE
       WHERE s.id = ${literal(serverId)}

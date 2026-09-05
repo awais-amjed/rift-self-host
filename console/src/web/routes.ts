@@ -16,7 +16,7 @@ import {
   listServers,
   mintInvite,
 } from "../servers.ts";
-import { restartService, serviceStatuses, startStack } from "../docker.ts";
+import { restartService, servicesIn, serviceStatuses, startStack } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
 import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
 import { defaultPaths, runSetup, type SetupProgress } from "../setup/run.ts";
@@ -29,7 +29,7 @@ import {
   sessionCookie,
   tokenFrom,
 } from "./auth.ts";
-import { dashboardPage, loginPage, setupPage } from "./page.ts";
+import { dashboardPage, exposedPage, loginPage, setupPage } from "./page.ts";
 
 /**
  * True once setup has run, as distinct from a `.env` merely existing.
@@ -47,6 +47,18 @@ export function isConfigured(_projectDir?: string): boolean {
   return setting("JWT_SECRET") !== undefined;
 }
 
+/**
+ * Whether the console's published port is on the loopback.
+ *
+ * The check is on the *published* interface rather than what the process binds
+ * to, which is always 0.0.0.0 inside the container — what matters is what
+ * compose exposed to the host.
+ */
+function boundToLoopback(): boolean {
+  const bind = setting("CONSOLE_BIND") ?? "127.0.0.1";
+  return bind === "127.0.0.1" || bind === "localhost" || bind === "::1";
+}
+
 function html(body: string, headers: HeadersInit = {}): Response {
   return new Response(body, {
     headers: { "Content-Type": "text/html; charset=utf-8", ...headers },
@@ -58,6 +70,23 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * A failure the operator can read, without the query that caused it.
+ *
+ * psql answers with the statement, its line number and a caret — useful in a
+ * terminal, and a description of the schema on a web page. The full text goes
+ * to the container log, where the person who can already read the database is
+ * the only one who sees it.
+ */
+function failure(context: string, error: unknown): Response {
+  console.error(`[${context}]`, error);
+  const message = error instanceof Error ? error.message : String(error);
+  const clean = message.startsWith("psql:")
+    ? "The database refused that. See `docker compose logs console` for the reason."
+    : message;
+  return json({ error: clean }, 400);
 }
 
 function redirect(to: string, headers: HeadersInit = {}): Response {
@@ -85,10 +114,17 @@ export async function handle(request: Request): Promise<Response> {
     return html(loginPage(true), { "Set-Cookie": sessionCookie(null) });
   }
 
-  // Before setup there is no password to check, because the file that would
-  // hold one has not been written. The console is loopback-bound, and the
-  // window closes the moment setup finishes.
-  const needsPassword = configuredPassword() !== null;
+  // Before setup there is no password, because the file that would hold one
+  // has not been written yet. That window is safe only because the console is
+  // published on the loopback — an operator who moves it to 0.0.0.0 *before*
+  // running setup would be handing the Docker socket to the network, so that
+  // combination is refused outright rather than trusted to be deliberate.
+  const password = configuredPassword();
+  if (password === null && !boundToLoopback()) {
+    return html(exposedPage());
+  }
+
+  const needsPassword = password !== null;
   if (needsPassword && !isAuthenticated(request)) {
     if (path === "/") return html(loginPage(false));
     return json({ error: "Not signed in" }, 401);
@@ -142,7 +178,7 @@ export async function handle(request: Request): Promise<Response> {
       const created = await createServer(String(name ?? ""));
       return json(created);
     } catch (error) {
-      return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+      return failure("servers/create", error);
     }
   }
 
@@ -178,10 +214,7 @@ export async function handle(request: Request): Promise<Response> {
       const result = await applyUpgrade(targetFromEnv(), paths);
       return json(result);
     } catch (error) {
-      return json(
-        { error: error instanceof Error ? error.message : String(error) },
-        400,
-      );
+      return failure("upgrade", error);
     }
   }
 
@@ -192,6 +225,10 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/api/restart-service" && request.method === "POST") {
     const { service } = await request.json();
+    const known = await servicesIn(["full", "studio"]);
+    if (!known.includes(String(service))) {
+      return json({ error: "No such service in this stack." }, 400);
+    }
     const result = await restartService(String(service));
     return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
   }
