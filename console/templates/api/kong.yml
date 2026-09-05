@@ -13,12 +13,21 @@ _transform: true
 ###
 ### Who may call, and as what
 ###
+### Two credentials per consumer. The `sb_publishable_` / `sb_secret_` pair is
+### what clients are issued; the legacy JWT pair is still accepted so a client
+### holding an older key keeps working. The request-transformer on each route
+### below swaps an opaque key for the matching signed JWT before the request
+### reaches the service, because only Kong knows the mapping — everything
+### behind it verifies an ordinary JWT against the stack's JWKS.
+###
 consumers:
   - username: anon
     keyauth_credentials:
+      - key: {{PUBLISHABLE_KEY}}
       - key: {{ANON_KEY}}
   - username: service_role
     keyauth_credentials:
+      - key: {{SECRET_KEY}}
       - key: {{SERVICE_ROLE_KEY}}
 
 acls:
@@ -73,10 +82,10 @@ services:
         config:
           add:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
           replace:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
       - name: acl
         config:
           hide_groups_header: true
@@ -103,10 +112,10 @@ services:
         config:
           add:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
           replace:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
       - name: acl
         config:
           hide_groups_header: true
@@ -132,10 +141,10 @@ services:
         config:
           add:
             headers:
-              - "x-api-key:$(query_params.apikey)"
+              - "x-api-key:$((query_params.apikey == '{{SECRET_KEY}}' and '{{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (query_params.apikey == '{{PUBLISHABLE_KEY}}' and '{{ANON_KEY_ASYMMETRIC}}') or query_params.apikey)"
           replace:
             querystring:
-              - "apikey:$(query_params.apikey)"
+              - "apikey:$((query_params.apikey == '{{SECRET_KEY}}' and '{{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (query_params.apikey == '{{PUBLISHABLE_KEY}}' and '{{ANON_KEY_ASYMMETRIC}}') or query_params.apikey)"
       - name: acl
         config:
           hide_groups_header: true
@@ -161,10 +170,10 @@ services:
         config:
           add:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
           replace:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
       - name: acl
         config:
           hide_groups_header: true
@@ -189,10 +198,10 @@ services:
         config:
           add:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
           replace:
             headers:
-              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or headers.apikey)"
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '{{SECRET_KEY}}' and 'Bearer {{SERVICE_ROLE_KEY_ASYMMETRIC}}') or (headers.apikey == '{{PUBLISHABLE_KEY}}' and 'Bearer {{ANON_KEY_ASYMMETRIC}}') or headers.apikey)"
       - name: post-function
         config:
           access:

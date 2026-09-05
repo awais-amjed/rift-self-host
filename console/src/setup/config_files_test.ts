@@ -56,6 +56,13 @@ Deno.test("every shipped template renders to something with the real values in i
   const expectations: [string, string][] = [
     ["api/kong.yml", ctx.secrets.anonKey],
     ["api/kong.yml", ctx.secrets.serviceRoleKey],
+    // The opaque pair and what Kong swaps each for. A placeholder missed here
+    // renders as itself, and Kong then holds a credential literally named
+    // "{{PUBLISHABLE_KEY}}" — which fails closed, but only once a client tries.
+    ["api/kong.yml", ctx.secrets.publishableKey],
+    ["api/kong.yml", ctx.secrets.secretKey],
+    ["api/kong.yml", ctx.secrets.anonKeyAsymmetric],
+    ["api/kong.yml", ctx.secrets.serviceRoleKeyAsymmetric],
     ["caddy/Caddyfile", ctx.domain],
     ["caddy/Caddyfile", ctx.acmeEmail],
     ["livekit/livekit.yaml", ctx.secrets.livekitApiKey],

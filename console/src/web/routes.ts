@@ -127,7 +127,10 @@ export async function handle(request: Request): Promise<Response> {
 function visibleSecrets(): { name: string; value: string }[] {
   const entries: [string, string | undefined][] = [
     ["Server URL", `https://${setting("RIFT_DOMAIN") ?? ""}`],
-    ["Anon key", setting("ANON_KEY")],
+    // The publishable key, because that is what the server actually issues to
+    // clients. Showing the legacy JWT beside it would invite somebody to paste
+    // the one nothing hands out any more.
+    ["Publishable key", setting("SUPABASE_PUBLISHABLE_KEY")],
     ["LiveKit URL", `wss://${setting("RIFT_DOMAIN") ?? ""}`],
   ];
   return entries

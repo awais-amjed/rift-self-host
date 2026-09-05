@@ -172,7 +172,9 @@ export async function runSetup(
     provisionServer({
       publicUrl: `https://${request.domain}`,
       internalUrl: "http://kong:8000",
-      serviceRoleKey: secrets.serviceRoleKey,
+      // Matches what the functions container holds, which is now the
+      // opaque secret key rather than the legacy JWT.
+      serviceRoleKey: secrets.secretKey,
       serverName: request.serverName,
       livekitApiKey: secrets.livekitApiKey,
       livekitApiSecret: secrets.livekitApiSecret,

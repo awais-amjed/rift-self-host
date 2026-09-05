@@ -278,6 +278,8 @@ services:
       retries: 3
       start_period: 10s
     environment:
+      # Storage talks to PostgREST directly rather than through Kong, so it
+      # never sees the translation and needs keys it can use as-is.
       ANON_KEY: ${ANON_KEY}
       SERVICE_KEY: ${SERVICE_ROLE_KEY}
       POSTGREST_URL: http://rest:3000
@@ -328,8 +330,17 @@ services:
       SUPABASE_JWKS: ${JWT_JWKS}
       SUPABASE_URL: http://kong:8000
       SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+
+      # The opaque pair, not the legacy JWTs, and this is the whole migration.
+      #
+      # SUPABASE_ANON_KEY does two jobs: the functions build clients with it,
+      # and `resolve_invite` and `create_server` hand it to the app as the key
+      # it should use for this server. Pointing it at the publishable key
+      # therefore moves every future client onto the new keys without a line
+      # changing in the app — a server's key has always been an opaque string
+      # the client receives and never inspects.
+      SUPABASE_ANON_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SECRET_KEY}
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
 
       # Must stay off. The functions verify JWTs themselves, locally against
