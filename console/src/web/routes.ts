@@ -8,6 +8,7 @@
 import { announce } from "../banner.ts";
 import { setting } from "../env_file.ts";
 import { runChecks } from "../health.ts";
+import { applyUpgrade, autoApplyEnabled, pendingWork } from "../upgrade.ts";
 import {
   createServer,
   inviteLinkFor,
@@ -156,6 +157,25 @@ export async function handle(request: Request): Promise<Response> {
       return json({ link: inviteLinkFor(code) });
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  }
+
+  if (path === "/api/version") {
+    const work = await pendingWork(targetFromEnv(), paths).catch(() => null);
+    return json(
+      work === null ? { unknown: true } : { ...work, autoApply: autoApplyEnabled() },
+    );
+  }
+
+  if (path === "/api/upgrade" && request.method === "POST") {
+    try {
+      const result = await applyUpgrade(targetFromEnv(), paths);
+      return json(result);
+    } catch (error) {
+      return json(
+        { error: error instanceof Error ? error.message : String(error) },
+        400,
+      );
     }
   }
 

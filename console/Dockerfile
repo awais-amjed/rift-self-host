@@ -13,6 +13,11 @@ RUN apk add --no-cache postgresql-client docker-cli docker-cli-compose
 
 WORKDIR /app
 
+# The release this image is. Recorded in the database when it applies an
+# upgrade, so the console can tell what a stack has actually been brought to
+# rather than what is merely sitting in the image.
+COPY VERSION ./VERSION
+
 COPY console/deno.jsonc ./deno.jsonc
 COPY console/src ./src
 COPY console/templates ./templates

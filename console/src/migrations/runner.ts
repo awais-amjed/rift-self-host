@@ -119,7 +119,12 @@ export async function applyPlan(
       throw new Error(
         `These migrations have changed since they ran here: ${names}. ` +
           `The database was built by versions of them that no longer exist, so ` +
-          `applying anything on top would be guesswork.`,
+          `applying anything on top would be guesswork.\n\n` +
+          `If you know this database already matches the new files — because ` +
+          `you applied them by hand, or because the change was made before ` +
+          `anyone else had them — record that and carry on with:\n` +
+          `  docker compose exec console deno run --allow-env --allow-read ` +
+          `--allow-run=psql /app/src/migrations/cli.ts --accept-drift`,
       );
     }
     await acceptDrift(

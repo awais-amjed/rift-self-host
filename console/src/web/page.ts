@@ -279,6 +279,16 @@ export function dashboardPage(domain: string): string {
     `<h1>${domain}</h1>
 <p class="sub">Rift server console</p>
 
+<h2>Release</h2>
+<div class="panel">
+  <table id="version"><tr><td class="name">Loading…</td></tr></table>
+  <div id="upgradeBox" style="display:none;margin-top:14px">
+    <button id="applyUpgrade">Apply this release</button>
+    <p class="hint" id="upgradeHint"></p>
+  </div>
+  <p class="error" id="upgradeError" style="display:none"></p>
+</div>
+
 <h2>Health</h2>
 <div class="panel"><table id="checks"><tr><td class="name">Loading…</td></tr></table></div>
 
@@ -337,6 +347,7 @@ async function load() {
   // because nobody noticed it come back.
   const revealed = window._revealed || (window._revealed = new Set());
 
+  await loadVersion();
   await loadServers();
 
   document.getElementById("secrets").innerHTML = state.secrets.map((entry, i) => {
@@ -377,6 +388,51 @@ function escapeHtml(value) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
 }
+
+async function loadVersion() {
+  const v = await (await fetch("/api/version")).json();
+  const rows = [];
+  if (v.unknown) {
+    rows.push(["Release", "Could not be read — the database may be down."]);
+  } else {
+    rows.push(["This image", escapeHtml(v.imageVersion)]);
+    rows.push(["This stack", escapeHtml(v.appliedVersion || "not recorded")]);
+    if (v.pendingMigrations.length) {
+      rows.push(["Migrations waiting", v.pendingMigrations.length + " to apply"]);
+    }
+    if (v.driftedMigrations.length) {
+      rows.push(["Changed after running", escapeHtml(v.driftedMigrations.join(", "))]);
+    }
+  }
+  document.getElementById("version").innerHTML = rows
+    .map(([k, val]) => '<tr><td class="name">' + k + "</td><td>" + val + "</td></tr>")
+    .join("");
+
+  const needed = !v.unknown && v.needed;
+  document.getElementById("upgradeBox").style.display = needed ? "block" : "none";
+  document.getElementById("upgradeHint").textContent = needed
+    ? (v.autoApply
+      ? "This normally happens by itself on start. Press it if a reload was left undone."
+      : "Automatic applying is off (RIFT_AUTO_APPLY=false), so this is the way to do it.")
+    : "";
+}
+
+document.getElementById("applyUpgrade").addEventListener("click", async (event) => {
+  const error = document.getElementById("upgradeError");
+  error.style.display = "none";
+  event.target.disabled = true;
+  event.target.textContent = "Applying…";
+
+  const body = await (await fetch("/api/upgrade", { method: "POST" })).json();
+
+  event.target.disabled = false;
+  event.target.textContent = "Apply this release";
+  if (body.error) {
+    error.textContent = body.error;
+    error.style.display = "block";
+  }
+  load();
+});
 
 async function loadServers() {
   const data = await (await fetch("/api/servers")).json();

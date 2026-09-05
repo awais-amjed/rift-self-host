@@ -162,3 +162,41 @@ export async function isDockerReachable(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Wait until compose has finished converging the project.
+ *
+ * The console applies upgrades on boot, which means it wants to recreate the
+ * functions container while the `docker compose up -d` that started *it* may
+ * still be working on the same project. Two compose runs converging one
+ * project at once is not a defined thing, so this waits for the stack to look
+ * settled first: nothing being created, nothing restarting, and the services
+ * that carry a healthcheck reporting something other than `starting`.
+ *
+ * Returns false on timeout rather than throwing. A caller that cannot get a
+ * clean moment should say so and leave the work for a button, not force it.
+ */
+export async function waitForSettled(
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<boolean> {
+  const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+
+  while (Date.now() < deadline) {
+    const statuses = await serviceStatuses();
+
+    // Nothing at all means compose has not started anything yet, which is not
+    // the same as settled.
+    if (statuses.length > 0) {
+      const busy = statuses.some((service) =>
+        service.state === "created" ||
+        service.state === "restarting" ||
+        service.health === "starting"
+      );
+      if (!busy) return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? 3000));
+  }
+
+  return false;
+}

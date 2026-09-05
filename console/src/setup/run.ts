@@ -26,6 +26,7 @@ import { installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
 import { applyLimits } from "./realtime.ts";
 import { generateSecrets, type StackSecrets } from "./secrets.ts";
+import { APPLIED_VERSION, imageVersion, writeState } from "../state.ts";
 
 /** One line of progress. */
 export interface SetupProgress {
@@ -193,6 +194,11 @@ export async function runSetup(
       livekitApiKey: secrets.livekitApiKey,
       livekitApiSecret: secrets.livekitApiSecret,
     }));
+
+  // A stack that has just been built is at this release, and saying so is what
+  // stops the first boot after setup offering to "upgrade" to what it already
+  // is.
+  await writeState(database, APPLIED_VERSION, imageVersion());
 
   return { secrets, server };
 }

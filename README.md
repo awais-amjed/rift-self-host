@@ -89,6 +89,45 @@ against the JWKS GoTrue publishes, and a stack configured with only
 `JWT_SECRET` signs HS256 and publishes an empty JWKS — so every authenticated
 call fails while every container reports healthy.
 
+## Updating
+
+```bash
+curl -fsSL https://joinrift.app/self-host/docker-compose.yml -o docker-compose.yml
+docker compose pull
+docker compose up -d
+```
+
+The console applies the rest itself on start: it installs the endpoints the new
+image carries, runs any migrations the database has not seen, reloads the edge
+runtime, and records the release it brought everything to. Watch it with
+`docker compose logs console`.
+
+That is worth stating because the obvious assumption is wrong. A pull delivers
+new console code, new migrations *and* new endpoints in one image — but only
+the first of those runs by itself. Without the console applying them you get a
+new console sitting on an old schema serving old endpoints, which looks like it
+worked.
+
+**Fetch the compose file first.** It pins every upstream image tag, so a
+release that moves GoTrue or Kong cannot reach you through the console image at
+all. This is the step that gets skipped.
+
+`RIFT_AUTO_APPLY=false` turns the automatic part off, for anyone who would
+rather a schema change never happened because a machine rebooted. The console
+then offers it as a button instead.
+
+### When a migration has changed under you
+
+The migrator refuses to run if a file that already ran here has since been
+edited — the database was built by a version of it that no longer exists, so
+anything applied on top is guesswork. If you know the database already matches
+the new files, record that and carry on:
+
+```bash
+docker compose exec console deno run --allow-env --allow-read \
+  --allow-run=psql /app/src/migrations/cli.ts --accept-drift
+```
+
 ## Requirements
 
 - Docker with the Compose plugin
