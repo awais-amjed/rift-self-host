@@ -19,6 +19,20 @@
 
 name: rift
 
+# Every variable below carries an empty default (`${NAME:-}`), and that is
+# about the first minute rather than about correctness.
+#
+# Compose resolves variables for the whole file on every invocation, whichever
+# service you name. Before setup there is no .env, so `docker compose up -d` —
+# the first command anybody runs here — answered with thirty lines of "variable
+# is not set" for a stack that was working exactly as intended. The same wall
+# appears for existing operators after any upgrade that adds a variable, until
+# they re-run setup.
+#
+# An unset variable and one defaulting to empty substitute identically; the
+# default only silences the warning. Nothing here relies on the warning: the
+# console writes .env before it starts anything that reads one.
+
 services:
   # ── The console ────────────────────────────────────────────────────────────
   #
@@ -141,10 +155,10 @@ services:
     environment:
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 9999
-      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL:-}
 
       GOTRUE_DB_DRIVER: postgres
-      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD:-}@db:5432/postgres
 
       # Both of these name `localhost`, and neither is a placeholder anybody
       # should "fix" to the real domain.
@@ -170,8 +184,8 @@ services:
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
-      GOTRUE_JWT_SECRET: ${JWT_SECRET}
-      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:-}
+      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL:-}
 
       # The keypair sessions are actually signed with, and the reason this
       # stack works at all. Rift's edge functions verify a caller locally
@@ -180,7 +194,7 @@ services:
       # symmetric secret publicly would let any reader mint sessions — and
       # every authenticated call then fails with token_invalid while the
       # containers all report healthy.
-      GOTRUE_JWT_KEYS: ${JWT_KEYS}
+      GOTRUE_JWT_KEYS: ${JWT_KEYS:-}
 
       # How members log in. Rift authenticates with a signature over a
       # per-server keypair (Sign-In With Solana), never a password — see the
@@ -208,7 +222,7 @@ services:
       timeout: 5s
       retries: 3
     environment:
-      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-}@db:5432/postgres
       PGRST_DB_SCHEMAS: public,storage
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_MAX_ROWS: 1000
@@ -216,9 +230,9 @@ services:
       PGRST_ADMIN_SERVER_HOST: localhost
       # A JWKS rather than the bare secret: it carries both the EC public key
       # and the legacy symmetric one, so ES256 and HS256 tokens both verify.
-      PGRST_JWT_SECRET: ${JWT_JWKS}
+      PGRST_JWT_SECRET: ${JWT_JWKS:-}
       PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET:-}
       PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
     command: ["postgrest"]
 
@@ -236,7 +250,7 @@ services:
         - CMD-SHELL
         - >-
           curl -sSfL --head -o /dev/null
-          -H "Authorization: Bearer ${ANON_KEY}"
+          -H "Authorization: Bearer ${ANON_KEY:-}"
           http://localhost:4000/api/tenants/realtime-dev/health
       timeout: 5s
       interval: 30s
@@ -247,14 +261,14 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_USER: supabase_admin
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-}
       DB_NAME: postgres
       DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
-      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
-      API_JWT_SECRET: ${JWT_SECRET}
-      API_JWT_JWKS: ${JWT_JWKS}
-      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
-      METRICS_JWT_SECRET: ${JWT_SECRET}
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY:-}
+      API_JWT_SECRET: ${JWT_SECRET:-}
+      API_JWT_JWKS: ${JWT_JWKS:-}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-}
+      METRICS_JWT_SECRET: ${JWT_SECRET:-}
       ERL_AFLAGS: -proto_dist inet_tcp
       DNS_NODES: "''"
       RLIMIT_NOFILE: "10000"
@@ -297,13 +311,13 @@ services:
     environment:
       # Storage talks to PostgREST directly rather than through Kong, so it
       # never sees the translation and needs keys it can use as-is.
-      ANON_KEY: ${ANON_KEY}
-      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      ANON_KEY: ${ANON_KEY:-}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY:-}
       POSTGREST_URL: http://rest:3000
-      AUTH_JWT_SECRET: ${JWT_SECRET}
-      JWT_JWKS: ${JWT_JWKS}
-      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:5432/postgres
-      STORAGE_PUBLIC_URL: ${API_EXTERNAL_URL}
+      AUTH_JWT_SECRET: ${JWT_SECRET:-}
+      JWT_JWKS: ${JWT_JWKS:-}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD:-}@db:5432/postgres
+      STORAGE_PUBLIC_URL: ${API_EXTERNAL_URL:-}
       REQUEST_ALLOW_X_FORWARDED_PATH: "true"
       FILE_SIZE_LIMIT: 52428800
       STORAGE_BACKEND: file
@@ -343,10 +357,10 @@ services:
       - functions:/home/deno/functions
       - deno-cache:/root/.cache/deno
     environment:
-      JWT_SECRET: ${JWT_SECRET}
-      SUPABASE_JWKS: ${JWT_JWKS}
+      JWT_SECRET: ${JWT_SECRET:-}
+      SUPABASE_JWKS: ${JWT_JWKS:-}
       SUPABASE_URL: http://kong:8000
-      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
+      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL:-}
 
       # The opaque pair, not the legacy JWTs, and this is the whole migration.
       #
@@ -356,9 +370,9 @@ services:
       # therefore moves every future client onto the new keys without a line
       # changing in the app — a server's key has always been an opaque string
       # the client receives and never inspects.
-      SUPABASE_ANON_KEY: ${SUPABASE_PUBLISHABLE_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SECRET_KEY}
-      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SUPABASE_ANON_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SECRET_KEY:-}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-}@db:5432/postgres
 
       # Must stay off. The functions verify JWTs themselves, locally against
       # the JWKS, and three of them (login, resolve_invite, is_username_available)
@@ -390,8 +404,8 @@ services:
       POSTGRES_HOST: /var/run/postgresql
       PGPORT: 5432
       POSTGRES_PORT: 5432
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       PGDATABASE: postgres
       POSTGRES_DB: postgres
       # POSTGRES_USER is deliberately NOT set. The image defaults it to
@@ -401,7 +415,7 @@ services:
       # own migrate.sh fail on `role "supabase_admin" does not exist`, so none
       # of the role passwords are ever set and GoTrue and PostgREST then fail
       # authentication against a database that came up healthy.
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:-}
       JWT_EXP: ${JWT_EXPIRY:-3600}
     command:
       - postgres
@@ -448,14 +462,14 @@ services:
         condition: service_started
     environment:
       STUDIO_PG_META_URL: http://meta:8080
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       DEFAULT_ORGANIZATION_NAME: Rift
       DEFAULT_PROJECT_NAME: ${RIFT_DOMAIN:-rift}
       SUPABASE_URL: http://kong:8000
-      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL}
-      SUPABASE_ANON_KEY: ${ANON_KEY}
-      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
-      AUTH_JWT_SECRET: ${JWT_SECRET}
+      SUPABASE_PUBLIC_URL: ${API_EXTERNAL_URL:-}
+      SUPABASE_ANON_KEY: ${ANON_KEY:-}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:-}
+      AUTH_JWT_SECRET: ${JWT_SECRET:-}
 
   meta:
     container_name: rift-meta
@@ -471,7 +485,7 @@ services:
       PG_META_DB_PORT: 5432
       PG_META_DB_NAME: postgres
       PG_META_DB_USER: supabase_admin
-      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD:-}
 
 volumes:
   db-data:
