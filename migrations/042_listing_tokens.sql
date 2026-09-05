@@ -65,8 +65,17 @@ ALTER TABLE listing_tokens ENABLE ROW LEVEL SECURITY;
 -- that the caller is an admin of this server. The check is repeated here
 -- anyway: a function that mints proof of administration should not be one
 -- whose safety depends on its only caller remembering to ask.
+--
+-- The member is passed in rather than read from `auth.uid()`, and that is not
+-- a preference. The edge function holds the service key — as every one of them
+-- does — so inside this function there is no session and `auth.uid()` is null.
+-- Written the obvious way, with `app.is_admin()`, it refused every caller
+-- including the admin it was written for, and said `not_server_admin` while
+-- doing it. `publish_server_as` on central takes the same shape for the same
+-- reason: a verified id, passed by the only thing that could verify it.
 
 CREATE OR REPLACE FUNCTION issue_listing_token(
+  p_user_id    UUID,
   p_server_id  UUID,
   p_token_hash TEXT
 ) RETURNS TIMESTAMPTZ
@@ -74,13 +83,16 @@ CREATE OR REPLACE FUNCTION issue_listing_token(
 DECLARE
   v_expires TIMESTAMPTZ;
 BEGIN
-  IF NOT app.is_admin() THEN
+  -- An admin of *this* server, not banned, and not an admin of some other
+  -- server on the same stack.
+  IF NOT EXISTS (
+    SELECT 1 FROM users u
+     WHERE u.id = p_user_id
+       AND u.server_id = p_server_id
+       AND u.is_server_admin
+       AND NOT u.is_banned
+  ) THEN
     RAISE EXCEPTION 'not_server_admin';
-  END IF;
-
-  -- An admin of *this* server, not of some other one on the same stack.
-  IF p_server_id IS DISTINCT FROM app.server_id() THEN
-    RAISE EXCEPTION 'wrong_server';
   END IF;
 
   -- Housekeeping on the way past, so the table cannot grow without a job to
@@ -94,7 +106,7 @@ BEGIN
   RETURN v_expires;
 END; $$;
 
-COMMENT ON FUNCTION issue_listing_token(UUID, TEXT) IS
+COMMENT ON FUNCTION issue_listing_token(UUID, UUID, TEXT) IS
   'Record a one-time listing token for this server. Admin only, and it checks '
   'that itself rather than trusting its caller to have done so.';
 
@@ -121,5 +133,5 @@ COMMENT ON FUNCTION redeem_listing_token(TEXT) IS
   'Burn a listing token and return the server it was issued for, or nothing. '
   'Single-use and single-statement, so a replay finds it already spent.';
 
-REVOKE ALL ON FUNCTION issue_listing_token(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION issue_listing_token(UUID, UUID, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION redeem_listing_token(TEXT) FROM PUBLIC, anon, authenticated;
