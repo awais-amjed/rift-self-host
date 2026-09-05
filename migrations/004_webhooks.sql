@@ -1,4 +1,16 @@
 -- ============================================================
+-- Rift self-hosted server — 004: Messages from things that cannot log in
+-- ============================================================
+-- One endpoint anybody may call, one statement behind it, and the rate
+-- limiting that makes that safe to offer.
+--
+-- Was 1 file: 013_webhooks.
+-- Merged unchanged and in the same order, so this applies exactly what
+-- they applied. The sections below are those files, each still carrying
+-- the reasoning it was written with.
+-- ============================================================
+
+-- ============================================================
 -- Rift self-hosted server — 013: webhooks (unencrypted messages)
 -- ============================================================
 -- The first thing in this schema that writes a message the server can read.

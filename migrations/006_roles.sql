@@ -1,4 +1,15 @@
 -- ============================================================
+-- Rift self-hosted server — 006: Roles and permissions
+-- ============================================================
+-- Named roles with positions, replacing the three booleans that came before.
+--
+-- Was 1 file: 018_roles.
+-- Merged unchanged and in the same order, so this applies exactly what
+-- they applied. The sections below are those files, each still carrying
+-- the reasoning it was written with.
+-- ============================================================
+
+-- ============================================================
 -- Rift self-hosted server — 018: roles and granular permissions
 -- ============================================================
 -- Three booleans have carried every authority decision on a server so far:

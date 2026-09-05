@@ -1,4 +1,126 @@
 -- ============================================================
+-- Rift self-hosted server — 007: Private channels and who can open one
+-- ============================================================
+-- Channels stop being uniformly visible: an audience per channel, the
+-- eligibility rules that follow from it, and creating and leaving one.
+--
+-- Was 5 files: 019_dm_attest_fix, 020_private_channels, 021_channel_eligibility, 022_create_channel, 023_leave_channel.
+-- Merged unchanged and in the same order, so this applies exactly what
+-- they applied. The sections below are those files, each still carrying
+-- the reasoning it was written with.
+-- ============================================================
+
+-- ============================================================
+-- Rift self-hosted server — 019: a DM could not be sent
+-- ============================================================
+-- `attest_message` runs on two tables — `attest_messages` on `messages` and
+-- `attest_dm_messages` on `dm_messages`. 013 added the webhook columns to the
+-- first and taught the trigger to clear them on a member's insert:
+--
+--     IF NEW.sender_id IS NOT NULL THEN
+--       NEW.webhook_id  := NULL;
+--       NEW.origin_name := NULL;
+--     END IF;
+--
+-- `dm_messages` has neither column, so every DM sent by a logged-in member
+-- raised `record "new" has no field "webhook_id"` and never reached the table.
+-- Only a member's insert took that branch, which is why nothing else noticed:
+-- the service role has no `auth.uid()` and skipped it entirely.
+--
+-- The UPDATE branch below it has always been guarded by `TG_TABLE_NAME`. The
+-- INSERT branch was written as though it had only one table to serve.
+--
+-- ---------- and the line that went with it ----------
+--
+-- 001 opened the function with an early return:
+--
+--     IF auth.uid() IS NULL THEN RETURN NEW; END IF;
+--
+-- Nothing that reaches this trigger without a session is a client — `anon` holds
+-- no INSERT grant on either table — so that branch is the service role and the
+-- superuser, both of which are trusted to write a row as it stands. It is how
+-- `post_webhook_message` writes a NULL sender, and how anything that needs to
+-- back-date a row (retention tests, fixtures, a repair script) can.
+--
+-- 013 dropped it, and three things stopped working for the same reason: a
+-- fixture insert had its `sender_id` overwritten with NULL and hit
+-- `messages_one_origin`; a back-dating UPDATE had its `created_at` pinned back;
+-- and the DM path above. It is restored here, which costs 013 nothing — a
+-- *member* still cannot claim to be a webhook, because a member has a session
+-- and never takes this branch.
+--
+-- ---------- why this was not caught ----------
+--
+-- `tests/policies_test.sql` sends a DM. It has been unable to run since the
+-- same migration: its fixtures are written as the superuser, and 013 made
+-- `sender_id := auth.uid()` — NULL, there — collide with the new
+-- `messages_one_origin` CHECK. So the suite failed while loading its fixtures
+-- and never reached the assertion that would have shown this.
+--
+-- One migration broke the code and the thing watching the code. That is the
+-- argument for the suite being part of the migration rather than after it.
+
+CREATE OR REPLACE FUNCTION attest_message()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  -- Restored from 001. Everything below is about not trusting a client; there
+  -- is no client here.
+  IF auth.uid() IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    NEW.sender_id  := auth.uid();
+    NEW.created_at := now();
+    NEW.edited_at  := NULL;
+
+    -- A member's insert is never a webhook's, whatever it sent. The service
+    -- role never arrives here at all now, and it does not need to:
+    -- `post_webhook_message` writes both columns itself.
+    --
+    -- Guarded on the table, like the UPDATE branch below: these two columns
+    -- exist on `messages` and nowhere else, and a DM has no origin to overrule.
+    IF TG_TABLE_NAME = 'messages' THEN
+      NEW.webhook_id  := NULL;
+      NEW.origin_name := NULL;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- An edit may only change the envelope. Identity, placement and time of
+  -- sending are the server's word and stay put; edited_at is stamped here
+  -- rather than trusted from the client.
+  NEW.id         := OLD.id;
+  NEW.sender_id  := OLD.sender_id;
+  NEW.created_at := OLD.created_at;
+  IF TG_TABLE_NAME = 'messages' THEN
+    NEW.channel_id  := OLD.channel_id;
+    -- The displayed name is frozen; the reference is not.
+    --
+    -- `webhook_id` is deliberately NOT pinned here, and that is not an
+    -- oversight. `ON DELETE SET NULL` is implemented as an UPDATE, so this
+    -- trigger fires during the cascade — pinning the column put the id back,
+    -- and the FK then rejected its own cascade. Deleting a webhook that had
+    -- ever posted was impossible.
+    --
+    -- Nothing is lost by leaving it open: `authenticated` holds a column-level
+    -- UPDATE grant on (ciphertext, nonce, signature, key_version) only, so no
+    -- member can write `webhook_id` by hand in the first place.
+    NEW.origin_name := OLD.origin_name;
+  ELSE
+    NEW.recipient_id := OLD.recipient_id;
+  END IF;
+  IF NEW.ciphertext IS DISTINCT FROM OLD.ciphertext THEN
+    NEW.edited_at := now();
+  ELSE
+    NEW.edited_at := OLD.edited_at;
+  END IF;
+  RETURN NEW;
+END; $$;
+
+
+-- ============================================================
 -- Rift self-hosted server — 020: private channels
 -- ============================================================
 -- 018 left one permission bit unread. This is it.
@@ -676,3 +798,295 @@ REVOKE ALL ON FUNCTION seed_private_channel_owner() FROM PUBLIC;
 -- behind it. A plain UPDATE would not, and the channel would quietly hand its
 -- private history to the next person who joined the server.
 GRANT UPDATE (name) ON channels TO authenticated;
+
+
+-- ============================================================
+-- Rift self-hosted server — 021: what the key sweep needs to know
+-- ============================================================
+-- 020 put "who may read this channel" in the database. Four things outside the
+-- database ask that question — `sweep_channel_keys`, `get_channel_key`,
+-- `voice_roster` and `get_channel_token` — and all four run as the service
+-- role, which is to say with row-level security switched off.
+--
+-- So none of them is protected by 020. Each one has to filter for itself, and
+-- four hand-written filters is four places for the answer to drift. This is
+-- the answer, written once, in the same place the policies read it from.
+--
+-- 017 did the same thing for the bot grant and for the same reason.
+
+-- ============================================================
+-- 1. Who may hold a key, and from which version
+-- ============================================================
+-- One row per (channel, person) that a key may legitimately be wrapped for,
+-- carrying the floor that person's access starts at. The sweep's
+-- `eligibleFor(channel, version)` is this view with one `<=`.
+--
+-- The floor is 1 for a member, because a member joining a public channel is
+-- offered the current key and reads back as far as it goes. For a bot it is the
+-- grant's `from_key_version`, which is what makes a moderation grant
+-- forward-only (BOTS.md §6).
+
+CREATE OR REPLACE VIEW channel_eligible_members AS
+  SELECT c.id AS channel_id,
+         u.id AS user_id,
+         u.chat_public_key,
+         u.is_bot,
+         CASE WHEN u.is_bot THEN g.from_key_version ELSE 1 END AS from_key_version
+    FROM channels c
+    JOIN users u ON u.server_id = c.server_id
+    LEFT JOIN bot_channel_keys g ON g.channel_id = c.id AND g.bot_id = u.id
+   WHERE NOT u.is_banned
+     -- Sealing to somebody who has published no chat key is a message nobody
+     -- can ever open, so they are not "missing" an entry — they are not ready
+     -- for one.
+     AND u.chat_public_key IS NOT NULL
+     AND CASE WHEN u.is_bot
+              -- A bot is keyed only where somebody said so, never by the sweep
+              -- being helpful.
+              THEN g.bot_id IS NOT NULL
+              ELSE (NOT c.is_private OR app.in_channel(c.id, u.id))
+         END;
+
+COMMENT ON VIEW channel_eligible_members IS
+  'Service-role only. Who a channel key may be wrapped for, and from which key '
+  'version. Not granted to authenticated: it would list the membership of every '
+  'private channel on the server.';
+
+-- Deliberately no grant to `authenticated`. A member reads their own keyring
+-- through `get_channel_key`, which returns only what is sealed to them.
+REVOKE ALL ON channel_eligible_members FROM anon, authenticated;
+
+-- ============================================================
+-- 2. Visibility without a key
+-- ============================================================
+-- Voice needs a different question. Joining a call is not holding a key —
+-- there is no encryption in the room to hold one for — so `CONNECT` is an
+-- ordinary rule, and the only thing that matters is whether the channel is
+-- yours to see.
+--
+-- These live in `public` rather than `app` because PostgREST only exposes
+-- `public`, and an edge function calling in is a PostgREST client like any
+-- other. They are locked to the service role, which is the only caller that
+-- needs to ask about somebody who is not itself.
+
+CREATE OR REPLACE FUNCTION app.sees_channel(p_channel UUID, p_user UUID)
+  RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM channels c
+      JOIN users u ON u.id = p_user AND u.server_id = c.server_id
+     WHERE c.id = p_channel
+       AND NOT u.is_banned
+       AND (NOT c.is_private OR app.in_channel(p_channel, p_user)))
+$$;
+
+CREATE OR REPLACE FUNCTION channel_visible_to(p_channel UUID, p_user UUID)
+  RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT app.sees_channel(p_channel, p_user)
+$$;
+
+CREATE OR REPLACE FUNCTION visible_channels(p_user UUID)
+  RETURNS TABLE (channel_id UUID)
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT c.id
+    FROM channels c
+    JOIN users u ON u.id = p_user AND u.server_id = c.server_id
+   WHERE NOT u.is_banned
+     AND (NOT c.is_private OR app.in_channel(c.id, p_user))
+$$;
+
+REVOKE ALL ON FUNCTION channel_visible_to(UUID, UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION visible_channels(UUID)         FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION channel_visible_to(UUID, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION visible_channels(UUID)         TO service_role;
+
+-- ============================================================
+-- 3. Asking about somebody else's permissions
+-- ============================================================
+-- `app.has_perm` answers for `auth.uid()`, which is what a policy needs. An
+-- edge function minting a LiveKit token is deciding about the person who asked
+-- it, not about itself, so it needs the two-argument form.
+
+CREATE OR REPLACE FUNCTION user_has_permission(p_user UUID, p_name TEXT)
+  RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT (app.permissions_of(p_user)
+          & (app.perm('ADMINISTRATOR') | app.perm(p_name))) <> 0
+$$;
+
+REVOKE ALL ON FUNCTION user_has_permission(UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION user_has_permission(UUID, TEXT) TO service_role;
+
+-- ============================================================
+-- 4. What a client is allowed to draw
+-- ============================================================
+-- A client has read three booleans off its own `users` row since 002 and drawn
+-- its buttons from them. With 018 those columns are a cache of three bits out
+-- of twenty-two, so a client that only reads them can only offer three of the
+-- twenty-two things a member might be allowed to do — and `CREATE_PRIVATE_CHANNEL`
+-- is on `@everyone`, which none of the three would ever say.
+--
+-- The bits themselves, then. `app.permissions()` is in the `app` schema, which
+-- PostgREST does not expose; this is the same answer through the front door.
+--
+-- It only ever describes the caller. There is no argument to point somewhere
+-- else, which is what keeps it safe to hand to `authenticated` — and a client
+-- drawing a button it is not allowed to press is a cosmetic bug, because the
+-- policy is still the thing that decides.
+
+CREATE OR REPLACE FUNCTION my_permissions() RETURNS BIGINT
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT app.permissions()
+$$;
+
+REVOKE ALL ON FUNCTION my_permissions() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION my_permissions() TO authenticated;
+
+
+-- ============================================================
+-- Rift self-hosted server — 022: making a channel is one statement
+-- ============================================================
+-- 020 let a member create a private channel, and then made it impossible to
+-- read back the one they had just made.
+--
+-- `INSERT ... RETURNING` applies the **SELECT** policy to the row it hands back,
+-- and `channels_select` now asks whether the caller is in the channel. The
+-- creator is seated by an AFTER INSERT trigger, which has not run when RETURNING
+-- is evaluated — so the insert succeeded, the read of its own row did not, and
+-- Postgres reported the whole thing as `new row violates row-level security
+-- policy for table "channels"`. Which is true, and names the wrong policy.
+--
+-- Found by clicking the button.
+--
+-- Three fixes were possible and only one of them is honest. Widening
+-- `channels_select` to include whoever created a channel would mean recording a
+-- creator and then explaining why they can still see a room they were removed
+-- from. Dropping the RETURNING would leave the client looking its own channel
+-- up by name. So: one function that makes the channel, seats the people, and
+-- hands the row back — which is what the two round trips were pretending to be
+-- anyway, minus the moment in between where the channel exists and nobody is
+-- in it.
+
+CREATE OR REPLACE FUNCTION create_channel(
+  p_name    TEXT,
+  p_type    TEXT,
+  p_private BOOLEAN DEFAULT false,
+  p_members UUID[]  DEFAULT '{}'
+) RETURNS JSONB
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server  UUID := app.server_id();
+  v_channel channels%ROWTYPE;
+BEGIN
+  IF v_server IS NULL THEN
+    RAISE EXCEPTION 'not_a_member';
+  END IF;
+
+  -- The same split the policy makes, checked here so the failure has a name.
+  -- A private channel is how a few people talk without asking permission;
+  -- one the whole server can see is a change to the server's shape.
+  IF p_private THEN
+    IF NOT app.has_perm('CREATE_PRIVATE_CHANNEL') THEN
+      RAISE EXCEPTION 'not_authorized';
+    END IF;
+  ELSIF NOT app.has_perm('MANAGE_CHANNELS') THEN
+    RAISE EXCEPTION 'not_authorized';
+  END IF;
+
+  IF length(btrim(p_name)) = 0 THEN
+    RAISE EXCEPTION 'bad_name';
+  END IF;
+  IF p_type NOT IN ('text', 'voice') THEN
+    RAISE EXCEPTION 'bad_type';
+  END IF;
+
+  INSERT INTO channels (server_id, name, channel_type, is_private)
+  VALUES (v_server, btrim(p_name), p_type::channel_type, p_private)
+  RETURNING * INTO v_channel;
+
+  -- `seed_private_channel_owner` has already seated the caller by the time this
+  -- runs, so the members list only has to add the others — and cannot remove
+  -- the creator by omitting them, which is the mistake the two-call version was
+  -- one forgotten id away from.
+  IF p_private AND array_length(p_members, 1) IS NOT NULL THEN
+    INSERT INTO channel_members (channel_id, user_id, added_by)
+    SELECT v_channel.id, u.id, auth.uid()
+      FROM users u
+     WHERE u.id = ANY (p_members)
+       AND u.server_id = v_server
+       AND NOT u.is_banned
+       -- A bot is keyed by `grant_bot_channel_key` and nothing else.
+       AND NOT u.is_bot
+    ON CONFLICT DO NOTHING;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'reason', 'ok',
+    'id', v_channel.id,
+    'name', v_channel.name,
+    'channel_type', v_channel.channel_type,
+    'is_private', v_channel.is_private
+  );
+EXCEPTION WHEN unique_violation THEN
+  RETURN jsonb_build_object('reason', 'name_taken');
+END; $$;
+
+REVOKE ALL ON FUNCTION create_channel(TEXT, TEXT, BOOLEAN, UUID[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION create_channel(TEXT, TEXT, BOOLEAN, UUID[]) TO authenticated;
+
+
+-- ============================================================
+-- Rift self-hosted server — 023: walking out of a private channel
+-- ============================================================
+-- `set_channel_members` needs the manage bit, which is right for deciding who
+-- else is in a room and wrong for deciding whether *you* are. A member who was
+-- added to a private channel and would rather not be in it could not leave;
+-- they could only ask the person who added them.
+--
+-- So: one function that removes exactly the caller and nobody else. There is no
+-- target parameter, which is what makes it safe to hand to every member.
+--
+-- Two things it does not do, both deliberate:
+--
+--   * **It does not rotate the key.** It does not have to — leaving makes the
+--     caller ineligible, and the sweep's standing signal is "somebody sealed
+--     into the current version who is no longer entitled to it". The next
+--     member's client rotates. What the leaver already read, they keep; nobody
+--     can take that back, and pretending otherwise would be the lie.
+--   * **It does not delete the channel itself.** `reassign_or_close_channel`
+--     already handles the last person out, and handles the manage bit moving
+--     on if the leaver was holding it.
+
+CREATE OR REPLACE FUNCTION leave_channel(p_channel UUID) RETURNS JSONB
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_private BOOLEAN;
+BEGIN
+  SELECT is_private INTO v_private FROM channels
+   WHERE id = p_channel AND server_id = app.server_id();
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('reason', 'no_such_channel');
+  END IF;
+  -- Leaving a channel everyone can see would be a no-op with a button.
+  IF NOT v_private THEN
+    RETURN jsonb_build_object('reason', 'not_private');
+  END IF;
+
+  -- Access granted through a role is not the caller's to give up: deleting
+  -- their own row would leave them in the room and the button looking broken,
+  -- and dropping the role grant would take everybody else out with them.
+  IF EXISTS (SELECT 1 FROM channel_role_access cra
+               JOIN member_roles mr ON mr.role_id = cra.role_id
+              WHERE cra.channel_id = p_channel AND mr.user_id = auth.uid()) THEN
+    RETURN jsonb_build_object('reason', 'in_by_role');
+  END IF;
+
+  DELETE FROM channel_members
+   WHERE channel_id = p_channel AND user_id = auth.uid();
+
+  RETURN jsonb_build_object('reason', 'ok');
+END; $$;
+
+REVOKE ALL ON FUNCTION leave_channel(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION leave_channel(UUID) TO authenticated;
