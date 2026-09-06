@@ -56,7 +56,52 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error reading channel access", EC.DB_ERROR, visibleError);
     }
     if (visible !== true) {
-      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+      // 037: a summoned bot is in the room without being of it.
+      //
+      // It cannot *see* this channel — `channel_visible_to` stays the whole
+      // truth for every other caller — but it does have to open the media key a
+      // member sealed for it, or it joins the call and publishes frames nobody
+      // can decrypt. `get_channel_token` already admits it on exactly this
+      // test, and the SDK asks for the key one call *earlier* (`voice.ts`), so
+      // without this the flow 037 was written to allow fails before reaching
+      // the function that allows it.
+      //
+      // The answer is the narrowest thing that works: its own sealed key and
+      // nothing else. No keyring, no roster, no version count — a summoned bot
+      // learns nothing here that was not already sealed to it by hand.
+      const { data: joinable, error: joinableError } = await supabase.rpc(
+        "channel_joinable_by",
+        { p_channel: channel_id, p_user: auth.userId },
+      );
+      if (joinableError) {
+        return CustomResponse.error("Error reading channel access", EC.DB_ERROR, joinableError);
+      }
+      if (joinable !== true) {
+        return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+      }
+
+      // Its newest sealed row, rather than the one at the channel's current
+      // version: the version on the row is what the bot maps onto LiveKit's key
+      // ring, and reading the keyring to learn the channel's version would be
+      // telling it something this branch exists to withhold.
+      const { data: sealed, error: sealedError } = await supabase
+        .from("bot_voice_keys")
+        .select("key_version, is_channel_key, ephemeral_public_key, ciphertext, nonce")
+        .eq("channel_id", channel_id)
+        .eq("bot_id", auth.userId)
+        .order("key_version", { ascending: false })
+        .limit(1);
+      if (sealedError) {
+        return CustomResponse.error("Error reading voice key", EC.DB_ERROR, sealedError);
+      }
+
+      return CustomResponse.success({
+        current_version: 0,
+        my_keys: [],
+        members_missing: [],
+        bots_missing: [],
+        my_voice_key: (sealed ?? [])[0] ?? null,
+      });
     }
 
     // All keyring rows for this channel (id + version + user for the roster
