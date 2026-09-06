@@ -74,9 +74,16 @@ SELECT u.id, r.id
  WHERE u.server_id IN ('aaaa0000-0000-4000-8000-000000000001',
                        'bbbb0000-0000-4000-8000-000000000001')
    AND ((r.name = 'Admin'     AND u.is_server_admin)
-     OR (r.name = 'Moderator' AND u.is_channel_manager)
-     OR (r.name = 'Members'   AND u.can_create_tokens))
+     OR (r.name = 'Moderator' AND u.is_channel_manager))
 ON CONFLICT DO NOTHING;
+
+-- The booleans above are a cache of the roles (006), written by hand here
+-- only so the fixture reads plainly. Recompute them the way the server does,
+-- so a bit the baseline carries — inviting, since 016 — reaches everybody the
+-- fixture never gave a role to.
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id IN ('aaaa0000-0000-4000-8000-000000000001',
+                     'bbbb0000-0000-4000-8000-000000000001');
 
 -- `attest_message` stamps `sender_id := auth.uid()` on every insert, so a
 -- fixture written as the superuser — who has no claim — came out with no sender
@@ -380,15 +387,15 @@ END $$;
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
 
+-- Since 016 the baseline carries CREATE_INVITE: a plain member may bring a
+-- friend. The permission is still a permission — take the bit off @everyone
+-- and this insert is refused — but the default is open.
 DO $$
 BEGIN
-  BEGIN
-    INSERT INTO invites (server_id, created_by)
-    VALUES ('aaaa0000-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000002');
-    RAISE EXCEPTION 'FAIL: a member without can_create_tokens minted an invite';
-  EXCEPTION WHEN insufficient_privilege THEN NULL;
-  END;
-  RAISE NOTICE 'ok  inviting requires the permission';
+  INSERT INTO invites (server_id, created_by)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000002');
+  DELETE FROM invites WHERE created_by = '11111111-aaaa-4aaa-8aaa-000000000002';
+  RAISE NOTICE 'ok  a plain member may invite, by default';
 END $$;
 
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -1165,8 +1172,8 @@ BEGIN
   IF NOT app.has_perm('SEND_MESSAGES') THEN
     RAISE EXCEPTION 'FAIL: @everyone is not being folded in for a member with no roles';
   END IF;
-  IF app.has_perm('CREATE_INVITE') THEN
-    RAISE EXCEPTION 'FAIL: bob could never mint invites, and can now';
+  IF NOT app.has_perm('CREATE_INVITE') THEN
+    RAISE EXCEPTION 'FAIL: the baseline stopped carrying CREATE_INVITE (016)';
   END IF;
   IF app.has_perm('MANAGE_ROLES') THEN
     RAISE EXCEPTION 'FAIL: a plain member can manage roles';
@@ -1376,15 +1383,15 @@ BEGIN
   -- ...but a role she genuinely stands above is hers to drop.
   INSERT INTO member_roles (user_id, role_id)
   SELECT auth.uid(), id FROM roles
-   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Members'
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Moderator'
   ON CONFLICT DO NOTHING;
   DELETE FROM member_roles
    WHERE user_id = auth.uid()
      AND role_id IN (SELECT id FROM roles
                       WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
-                        AND name = 'Members');
+                        AND name = 'Moderator');
   IF EXISTS (SELECT 1 FROM member_roles mr JOIN roles r ON r.id = mr.role_id
-              WHERE mr.user_id = auth.uid() AND r.name = 'Members') THEN
+              WHERE mr.user_id = auth.uid() AND r.name = 'Moderator') THEN
     RAISE EXCEPTION 'FAIL: a role below her own could not be dropped';
   END IF;
   RAISE NOTICE 'ok  nobody demotes themselves out of the server';
@@ -1434,12 +1441,10 @@ BEGIN
   IF v_result->>'reason' <> 'ok' THEN
     RAISE EXCEPTION 'FAIL: registration returned %', v_result;
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM member_roles mr
-      JOIN roles r ON r.id = mr.role_id
-     WHERE mr.user_id = '11111111-aaaa-4aaa-8aaa-00000000000a'
-       AND r.is_default) THEN
-    RAISE EXCEPTION 'FAIL: a new member did not receive their roles';
+  -- The invite named no role, so dave holds none (016 dropped the default
+  -- one); what he can do is the baseline, and that is the whole point.
+  IF NOT EXISTS (SELECT 1 FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-00000000000a') THEN
+    RAISE EXCEPTION 'FAIL: a new member has no row';
   END IF;
   RAISE NOTICE 'ok  somebody can still join a server';
 END $$;
@@ -2642,13 +2647,13 @@ BEGIN
 END $$;
 
 -- Somebody who may invite and holds nothing else, which is exactly the member
--- this bit was split out for. Carol will not do: she is a Moderator by now, and
--- Moderator is one of the roles the migration hands `ADD_BOTS` to.
+-- this bit was split out for — since 016 that is anybody holding no role at
+-- all, because the baseline carries CREATE_INVITE. Carol will not do: she is
+-- a Moderator by now, and Moderator is one of the roles that hold `ADD_BOTS`.
+-- This member was inserted by hand above, so their cache is recomputed the way
+-- registration would have.
 RESET ROLE;
-INSERT INTO member_roles (user_id, role_id)
-SELECT '11111111-aaaa-4aaa-8aaa-0000000000a1', id FROM roles
- WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Members'
-ON CONFLICT DO NOTHING;
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-0000000000a1');
 SET LOCAL ROLE authenticated;
 
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
