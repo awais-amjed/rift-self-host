@@ -23,7 +23,6 @@ Deno.serve(async (req) => {
   try {
     const { channel_id, screen_share, device_id } = await req.json();
     const token = extractBearerToken(req);
-    console.log(`[get_channel_token] token="${token?.substring(0,8)}...", channel_id="${channel_id}"`);
 
     const auth = await authenticateToken(supabase, token);
     if (isAuthError(auth)) return auth;
