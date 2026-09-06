@@ -365,16 +365,13 @@ ${banner}
       <input id="localAddress" placeholder="192.168.1.6" style="flex:1">
       <input id="localPort" type="number" style="width:120px" aria-label="API port">
     </div>
-    <p class="hint">The API is published on that port <em>beside</em> the
-      proxy, not instead of it — the domain keeps working throughout.</p>
+    <p class="hint">Your domain keeps working the whole time.</p>
   </div>
   <div id="localAddresses" style="display:none"></div>
   <button id="localToggle">Switch voice to this network</button>
-  <p class="warn"><span>While this is on, voice points at your network for
-    <strong>everybody</strong>: a member connecting from anywhere else can still
-    read and send messages, but cannot join a call. And do not invite anyone
-    with the local link — a member's identity is derived from the address they
-    joined at, so they would be stranded the moment you switch it back.</span></p>
+  <p class="warn"><span>Use this for testing on your own network. While it is
+    on, people outside it cannot join a call — and the local link only works
+    from here, so do not send it to anyone.</span></p>
   <p class="error" id="localError" style="display:none"></p>
 </div>
 </div>
@@ -575,10 +572,9 @@ function renderLocal(local) {
   const button = document.getElementById("localToggle");
 
   document.getElementById("localSummary").textContent = local.on
-    ? "Voice is pointed at your network. Everything else is unchanged — the " +
-      "domain still answers, and members who joined through it keep working."
-    : "Point voice at this machine's own address for a while, so a client on " +
-      "your network can join a call without going out to the internet and back.";
+    ? "Calls are on your own network. Switch back when you are done testing."
+    : "Move calls onto your own network, so you can test one from a machine " +
+      "here.";
 
   // Left alone while it is being typed into, because this runs every ten
   // seconds and overwriting a half-typed address is maddening.
