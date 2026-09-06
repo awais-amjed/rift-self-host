@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
+  composeProblem,
   localLivekitUrl,
   localPublicUrl,
   type LocalTesting,
@@ -22,14 +23,48 @@ Deno.test("everything a client is handed follows the switch", () => {
   assertEquals(inviteLinkFor("abc123", local), "http://192.168.1.6:18000#abc123");
 });
 
+/** What a stack with the default ports already has. */
+const taken = { 8080: "this console", 443: "the HTTPS port", 7880: "signalling" };
+
 Deno.test("an address is refused before it becomes a URL nothing can reach", () => {
-  assertEquals(problemWithAddress("192.168.1.6", 18000), null);
-  assert(problemWithAddress("", 18000)?.includes("192.168.1.6"));
-  assert(problemWithAddress("http://192.168.1.6", 18000)?.includes("without http://"));
+  assertEquals(problemWithAddress("192.168.1.6", 18000, taken), null);
+  assert(problemWithAddress("", 18000, taken)?.includes("192.168.1.6"));
+  assert(
+    problemWithAddress("http://192.168.1.6", 18000, taken)?.includes("without http://"),
+  );
   // The port has a box of its own, so an address carrying one would produce
   // `http://192.168.1.6:8000:18000`.
-  assert(problemWithAddress("192.168.1.6:8000", 18000)?.includes("without a port"));
-  assert(problemWithAddress("192.168.1.6", 0)?.includes("between 1 and 65535"));
+  assert(
+    problemWithAddress("192.168.1.6:8000", 18000, taken)?.includes("without a port"),
+  );
+  assert(problemWithAddress("192.168.1.6", 0, taken)?.includes("between 1 and 65535"));
+});
+
+Deno.test("a port this stack already holds is refused, by name", () => {
+  // The port an operator reaches for first is the one they are looking at.
+  const onConsole = problemWithAddress("192.168.1.6", 8080, taken);
+  assert(onConsole?.includes("8080"));
+  assert(onConsole?.includes("this console"));
+  assert(problemWithAddress("192.168.1.6", 443, taken)?.includes("the HTTPS port"));
+  assert(problemWithAddress("192.168.1.6", 7880, taken)?.includes("signalling"));
+  // Otherwise Docker refuses a minute later, after the override is written.
+  assertEquals(problemWithAddress("192.168.1.6", 8081, taken), null);
+});
+
+Deno.test("a compose failure is reported as its reason, not its narration", () => {
+  const stderr = [
+    " Container rift-db  Running",
+    " Container rift-kong  Recreated",
+    " Container rift-kong  Starting",
+    "Error response from daemon: ports are not available: " +
+    "listen tcp4 0.0.0.0:8080: bind: address already in use",
+  ].join("\n");
+  const problem = composeProblem(stderr);
+  assert(problem.startsWith("ports are not available"));
+  assert(!problem.includes("rift-db"));
+  // Nothing recognisable still beats an empty string.
+  assertEquals(composeProblem("something odd\n"), "something odd");
+  assertEquals(composeProblem(""), "docker compose failed");
 });
 
 Deno.test("switching back restores each server's own URL", () => {

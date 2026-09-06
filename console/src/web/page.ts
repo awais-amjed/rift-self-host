@@ -365,14 +365,16 @@ ${banner}
       <input id="localAddress" placeholder="192.168.1.6" style="flex:1">
       <input id="localPort" type="number" style="width:120px" aria-label="API port">
     </div>
-    <p class="hint">Your domain keeps working the whole time.</p>
+    <p class="hint">The second box is which port to use — leave it unless
+      something else on this machine already has it. Your domain keeps working
+      the whole time.</p>
   </div>
   <div id="localAddresses" style="display:none"></div>
+  <p class="error" id="localError" style="display:none;margin:0 0 14px"></p>
   <button id="localToggle">Switch voice to this network</button>
   <p class="warn"><span>Use this for testing on your own network. While it is
     on, people outside it cannot join a call — and the local link only works
     from here, so do not send it to anyone.</span></p>
-  <p class="error" id="localError" style="display:none"></p>
 </div>
 </div>
 
@@ -632,6 +634,10 @@ document.getElementById("localToggle").addEventListener("click", async (event) =
 
   button.disabled = false;
   if (body.error) {
+    // Put the label back here rather than waiting for the refresh: a button
+    // still reading "Recreating containers…" beside an error looks like a
+    // press that never finished.
+    button.textContent = on ? "Switch voice to this network" : "Switch back";
     error.textContent = body.error;
     error.style.display = "block";
   }

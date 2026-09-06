@@ -38,6 +38,7 @@ import {
 } from "./postgres.ts";
 import { clearState, readState, writeState } from "./state.ts";
 import { projectDir, restartService } from "./docker.ts";
+import { setting } from "./env_file.ts";
 import { renderLocalOverride } from "./setup/config_files.ts";
 import { join } from "jsr:@std/path@1";
 
@@ -95,8 +96,40 @@ export async function readLocalTesting(
   }
 }
 
-/** Complain about an address that would produce a URL nothing can reach. */
-export function problemWithAddress(address: string, port: number): string | null {
+/** Read a port from `.env`, or [fallback] if it does not say. */
+function envPort(name: string, fallback: number): number {
+  const parsed = Number(setting(name));
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * The ports this stack already publishes, and what has each.
+ *
+ * Checked before the switch rather than discovered afterwards. Docker reports a
+ * collision as a wall of container status with one useful line at the bottom,
+ * arriving a minute in and after the compose override has already been written
+ * — and the port an operator reaches for first is 8080, which is the console
+ * they are pressing the button on.
+ */
+export function stackPorts(): Record<number, string> {
+  const taken: Record<number, string> = {};
+  const claim = (port: number, owner: string) => {
+    if (!(port in taken)) taken[port] = owner;
+  };
+  claim(envPort("CONSOLE_PORT", 8080), "this console");
+  claim(envPort("HTTP_PORT", 80), "the HTTP port");
+  claim(envPort("HTTPS_PORT", 443), "the HTTPS port");
+  claim(envPort("LIVEKIT_TCP_PORT", 7881), "voice");
+  claim(SIGNALLING_PORT, "LiveKit's signalling, which this switch publishes");
+  return taken;
+}
+
+/** Complain about an address or port that would produce a stack that cannot start. */
+export function problemWithAddress(
+  address: string,
+  port: number,
+  taken: Record<number, string> = stackPorts(),
+): string | null {
   const trimmed = address.trim();
   if (trimmed.length === 0) {
     return "Enter the address this machine has on your network, such as 192.168.1.6.";
@@ -108,7 +141,12 @@ export function problemWithAddress(address: string, port: number): string | null
     return "Enter the address on its own, without a port or a path.";
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return "The API port must be between 1 and 65535.";
+    return "The port must be between 1 and 65535.";
+  }
+  const owner = taken[port];
+  if (owner) {
+    return `Port ${port} is already ${owner}. Pick another — ${DEFAULT_API_PORT} ` +
+      "is free unless something else on this machine has it.";
   }
   return null;
 }
@@ -202,11 +240,29 @@ async function removeOverride(): Promise<void> {
   await Deno.remove(path).catch(() => {});
 }
 
+/**
+ * The one line of a compose failure worth showing.
+ *
+ * Compose narrates every container it touched on stderr and puts the reason
+ * last, so handing the whole thing to the page produced twenty lines of
+ * "Container rift-db Healthy" above the sentence that mattered.
+ */
+export function composeProblem(stderr: string): string {
+  const lines = stderr.split("\n").map((line) => line.trim()).filter((line) =>
+    line.length > 0
+  );
+  const reason = lines.find((line) => /^Error( response from daemon)?:/i.test(line));
+  return (reason ?? lines[lines.length - 1] ?? "docker compose failed")
+    .replace(/^Error response from daemon:\s*/i, "");
+}
+
 /** Kong publishes the API; LiveKit publishes signalling. Both change here. */
 async function recreate(): Promise<void> {
   for (const service of ["kong", "livekit"]) {
     const result = await restartService(service);
-    if (!result.ok) throw new Error(`Could not recreate ${service}: ${result.stderr}`);
+    if (!result.ok) {
+      throw new Error(`Could not start ${service}: ${composeProblem(result.stderr)}`);
+    }
   }
 }
 
@@ -232,14 +288,23 @@ export async function turnOn(
     restore: already?.restore ?? await livekitUrls(target),
   };
 
-  // Recorded before anything is changed. A crash between here and the update
-  // leaves a stack that looks switched on and is not, which the switch fixes;
-  // the other order leaves one that is switched on and does not know what to
-  // go back to, which nothing fixes.
+  // The containers move first, and the database only once they have. Publishing
+  // a port is the one step here that can fail — something else may hold it —
+  // and doing it first means a failure leaves the server exactly as it was
+  // rather than pointed at an address that never came up.
+  await writeOverride(local);
+  try {
+    await recreate();
+  } catch (error) {
+    await removeOverride();
+    // Best effort: if this fails too the override is already gone, so
+    // "Restart the stack" puts everything back.
+    await recreate().catch(() => {});
+    throw error;
+  }
+
   await writeState(target, LOCAL_TESTING, JSON.stringify(local));
   await setLivekitUrl(target, localLivekitUrl(local));
-  await writeOverride(local);
-  await recreate();
   return local;
 }
 
@@ -259,7 +324,9 @@ export async function turnOff(
 ): Promise<void> {
   const local = await readLocalTesting(target);
   if (local !== null) await restoreLivekitUrls(target, local.restore, fallback);
-  await removeOverride();
-  await recreate();
   await clearState(target, LOCAL_TESTING);
+  await removeOverride();
+  // Last, because everything above has already made this a normal server. If
+  // the containers sulk, "Restart the stack" is the whole of the repair.
+  await recreate();
 }
