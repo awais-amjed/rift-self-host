@@ -1193,11 +1193,11 @@ BEGIN
   BEGIN
     INSERT INTO roles (server_id, name, position, permissions)
     VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Bobs Role', 1, 0);
-    RAISE EXCEPTION 'FAIL: a member without MANAGE_ROLES created a role';
+    RAISE EXCEPTION 'FAIL: a member who is not an administrator created a role';
   EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
     IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
   END;
-  RAISE NOTICE 'ok  creating a role needs MANAGE_ROLES';
+  RAISE NOTICE 'ok  creating a role needs ADMINISTRATOR';
 END $$;
 
 -- ---------- delegation ----------
@@ -1303,15 +1303,16 @@ BEGIN
   RAISE NOTICE 'ok  editing a role resyncs everybody holding it';
 END $$;
 
--- ---------- the subset rule ----------
--- Position alone is not enough. Somebody who may manage rank 1 could otherwise
--- put `BAN_MEMBERS` on it and hand it to themselves.
+-- ---------- the bit that used to open the editor ----------
+-- `MANAGE_ROLES` did, until 015. A role carrying it is still a role — the
+-- editor is an administrator's now, and nothing below that rank reshapes
+-- the ladder, whatever bits it holds.
 DO $$
 DECLARE v_staff UUID;
 BEGIN
   INSERT INTO roles (server_id, name, position, permissions)
   VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Staff', 2,
-          app.perm('MANAGE_ROLES'))
+          app.perm('MANAGE_ROLES') | app.perm('CREATE_INVITE'))
   RETURNING id INTO v_staff;
   INSERT INTO member_roles (user_id, role_id)
   VALUES ('11111111-aaaa-4aaa-8aaa-000000000003', v_staff);
@@ -1325,21 +1326,15 @@ BEGIN
   IF NOT app.has_perm('MANAGE_ROLES') THEN
     RAISE EXCEPTION 'FAIL: carol did not receive MANAGE_ROLES';
   END IF;
-
   BEGIN
     INSERT INTO roles (server_id, name, position, permissions)
-    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Sneak', 1,
-            app.perm('BAN_MEMBERS'));
-    RAISE EXCEPTION 'FAIL: a permission was granted by somebody who lacks it';
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Greeter', 1,
+            app.perm('CREATE_INVITE'));
+    RAISE EXCEPTION 'FAIL: MANAGE_ROLES alone still opens the roles editor';
   EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
     IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
   END;
-
-  -- ...and she may still make one out of what she actually holds.
-  INSERT INTO roles (server_id, name, position, permissions)
-  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Greeter', 1,
-          app.perm('CREATE_INVITE'));
-  RAISE NOTICE 'ok  a role may only carry permissions its author holds';
+  RAISE NOTICE 'ok  the roles editor is an administrator''s, whatever bits you hold';
 END $$;
 
 -- Rank is checked on the role being handed out, not on the person handing it.
