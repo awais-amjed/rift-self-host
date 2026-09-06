@@ -34,7 +34,10 @@ Deno.serve(async (req) => {
 
     const { data, error } = await supabase
       .from(DBSchema.invites.tableName)
-      .select(`${DBSchema.invites.serverId}, ${DBSchema.invites.expiresAt}`)
+      .select(
+        `${DBSchema.invites.serverId}, ${DBSchema.invites.expiresAt},` +
+          ` ${DBSchema.invites.uses}, ${DBSchema.invites.maxUses}`,
+      )
       .eq(DBSchema.invites.code, invite_code)
       .maybeSingle();
 
@@ -49,6 +52,20 @@ Deno.serve(async (req) => {
     const expiresAt = invite[DBSchema.invites.expiresAt];
     if (expiresAt && new Date(expiresAt as string) <= new Date()) {
       return CustomResponse.error("Invite code has expired", EC.INVITE_EXPIRED);
+    }
+
+    // Spent invites are refused here rather than by `register`, which is the
+    // only other thing that counts them. Both answers are correct; this one
+    // arrives before somebody has picked a username and generated a keypair
+    // for a server they were never going to be let into. `max_uses` of 0 is
+    // unlimited, as everywhere else.
+    const maxUses = invite[DBSchema.invites.maxUses] as number | null;
+    const uses = (invite[DBSchema.invites.uses] as number | null) ?? 0;
+    if (maxUses !== null && maxUses > 0 && uses >= maxUses) {
+      return CustomResponse.error(
+        "Invite code has reached its maximum uses",
+        EC.INVITE_EXHAUSTED,
+      );
     }
 
     const serverId = invite[DBSchema.invites.serverId] as string;
