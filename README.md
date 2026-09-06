@@ -192,6 +192,13 @@ Two consequences worth stating plainly:
   desktop and is invisible to every phone.
 - UDP 7882 and TCP 7881 open, for voice. Media goes straight to those ports and
   cannot be proxied — only LiveKit's signalling passes through Caddy.
+
+  Three ports is the whole list because `livekit.yaml` sets `rtc.udp_port`,
+  which multiplexes every participant onto one UDP port; without it LiveKit
+  advertises host candidates across 50000–60000 and that range is what has to
+  be open instead. There is no embedded TURN server, so 3478 and 5349 are not
+  used — a client on a network that blocks UDP falls back to ICE/TCP on 7881.
+  See [LiveKit's ports reference](https://docs.livekit.io/transport/self-hosting/ports-firewall/).
 - Roughly 4 GB of RAM and 2 CPUs to be comfortable
 
 ## Building it
