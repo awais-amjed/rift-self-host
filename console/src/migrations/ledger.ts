@@ -17,6 +17,7 @@ import {
   queryRows,
   runSql,
 } from "../postgres.ts";
+import { ensureConsoleSchema, SCHEMA } from "../console_schema.ts";
 
 /** What the ledger says about one applied migration. */
 export interface LedgerEntry {
@@ -26,7 +27,8 @@ export interface LedgerEntry {
 }
 
 /**
- * The ledger lives in its own schema, not in `public`.
+ * The ledger lives in its own schema, not in `public`, and shares that schema
+ * with the console's state table.
  *
  * PostgREST is published with `PGRST_DB_SCHEMAS: public,storage`, and Supabase
  * grants new tables in `public` to `authenticated` by default — so a ledger
@@ -34,32 +36,17 @@ export interface LedgerEntry {
  * server holding nothing but its anon key. Out of the published schemas it is
  * not reachable over the API at all, whatever its grants say. The REVOKE is
  * the second line of defence rather than the first.
+ *
+ * Creating it is [ensureConsoleSchema]'s job, not this module's: both tables
+ * used to run their own `CREATE SCHEMA` and `REVOKE`, and two of those at once
+ * rewrite the same `pg_namespace` row — which Postgres refuses with `tuple
+ * concurrently updated`.
  */
-const LEDGER_SCHEMA = "rift_console";
-
-const CREATE_LEDGER = `
-CREATE SCHEMA IF NOT EXISTS ${LEDGER_SCHEMA};
-
-REVOKE ALL ON SCHEMA ${LEDGER_SCHEMA} FROM PUBLIC, anon, authenticated;
-
-CREATE TABLE IF NOT EXISTS ${LEDGER_SCHEMA}.migrations (
-  name       text PRIMARY KEY,
-  checksum   text NOT NULL,
-  applied_at timestamptz NOT NULL DEFAULT now()
-);
-
-REVOKE ALL ON ${LEDGER_SCHEMA}.migrations FROM PUBLIC, anon, authenticated;
-
-COMMENT ON TABLE ${LEDGER_SCHEMA}.migrations IS
-  'Which files in migrations/ have run here. Managed by the Rift console; do not edit by hand.';
-`;
+export const LEDGER_SCHEMA = SCHEMA;
 
 /** Create the ledger if this database has never had one. */
-export async function ensureLedger(target: PostgresTarget): Promise<void> {
-  const result = await runSql(target, CREATE_LEDGER, { singleTransaction: true });
-  if (!result.ok) {
-    throw new Error(`Could not create the migration ledger: ${result.error}`);
-  }
+export function ensureLedger(target: PostgresTarget): Promise<void> {
+  return ensureConsoleSchema(target);
 }
 
 /** Every migration this database has recorded, oldest first. */

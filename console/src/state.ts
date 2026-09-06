@@ -10,45 +10,22 @@
  *
  * Kept in the `rift_console` schema beside the migration ledger, and for the
  * same reason: PostgREST publishes `public`, and Supabase grants new tables
- * there to `authenticated` by default.
+ * there to `authenticated` by default. The schema and this table are created
+ * by [ensureConsoleSchema], which owns both of the schema's tables so that two
+ * of them cannot race to revoke the same grants.
  */
 import { literal, type PostgresTarget, queryRows, runSql } from "./postgres.ts";
-
-const SCHEMA = "rift_console";
-
-const CREATE_STATE = `
-CREATE SCHEMA IF NOT EXISTS ${SCHEMA};
-REVOKE ALL ON SCHEMA ${SCHEMA} FROM PUBLIC, anon, authenticated;
-
-CREATE TABLE IF NOT EXISTS ${SCHEMA}.state (
-  key        text PRIMARY KEY,
-  value      text NOT NULL,
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
-
-REVOKE ALL ON ${SCHEMA}.state FROM PUBLIC, anon, authenticated;
-
-COMMENT ON TABLE ${SCHEMA}.state IS
-  'Small facts the Rift console keeps about this stack — the release last '
-  'applied, and whether voice is currently pointed at a LAN address. Managed '
-  'by the console; do not edit by hand.';
-`;
+import { ensureConsoleSchema, SCHEMA } from "./console_schema.ts";
 
 /** The release that last finished applying itself here. */
 export const APPLIED_VERSION = "applied_version";
-
-/** Create the table if this database has never had one. */
-export async function ensureState(target: PostgresTarget): Promise<void> {
-  const result = await runSql(target, CREATE_STATE, { singleTransaction: true });
-  if (!result.ok) throw new Error(`Could not create console state: ${result.error}`);
-}
 
 /** Read one value, or null if it has never been set. */
 export async function readState(
   target: PostgresTarget,
   key: string,
 ): Promise<string | null> {
-  await ensureState(target);
+  await ensureConsoleSchema(target);
   const rows = await queryRows(
     target,
     `SELECT value FROM ${SCHEMA}.state WHERE key = ${literal(key)}`,
@@ -62,7 +39,7 @@ export async function writeState(
   key: string,
   value: string,
 ): Promise<void> {
-  await ensureState(target);
+  await ensureConsoleSchema(target);
   const result = await runSql(
     target,
     `INSERT INTO ${SCHEMA}.state (key, value)
@@ -84,7 +61,7 @@ export async function clearState(
   target: PostgresTarget,
   key: string,
 ): Promise<void> {
-  await ensureState(target);
+  await ensureConsoleSchema(target);
   const result = await runSql(
     target,
     `DELETE FROM ${SCHEMA}.state WHERE key = ${literal(key)};`,
