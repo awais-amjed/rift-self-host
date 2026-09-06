@@ -66,14 +66,22 @@ they end up disagreeing.
 ```
 docker-compose.yml     what an operator downloads
 console/               the one custom image
-migrations/            vendored from the app repo
-functions/             vendored from the app repo
-scripts/sync.sh        refreshes both from ../rift
+migrations/            the schema, applied in filename order
+migrations/tests/      policy tests — what each role may actually reach
+functions/             the server's endpoints, mounted into the edge runtime
+scripts/db_test.sh     runs both suites against a Postgres container
 ```
 
-`migrations/` and `functions/` are copies, committed so this repo builds on its
-own. `scripts/sync.sh` refreshes them and is the only thing that should ever
-write there — edit the originals in the app repo.
+`migrations/` and `functions/` **are the originals**. They used to be copies of
+directories in the app repo, refreshed by a sync script; they now live here,
+where the thing that ships them lives, and the app repo has none. Their history
+came with them, so `git log migrations/001_core.sql` still answers why.
+
+That also means the schema's tests are here. `./scripts/db_test.sh` runs the
+policy suite and the migration-path test — the second one exists because a
+policy test only ever sees the finished shape, and cannot catch a migration
+that reads a column it has already overwritten. One did, and every server came
+out with no administrator.
 
 ## API keys
 
@@ -142,12 +150,11 @@ docker compose exec console deno run --allow-env --allow-read \
 ## Building it
 
 ```bash
-scripts/sync.sh                     # refresh migrations/ and functions/
 docker build -f console/Dockerfile -t riftapp/rift-console:latest .
 ```
 
 The build context is the repository root, not `console/` — the migrations and
-endpoints are vendored beside it and go into the image.
+endpoints sit beside it and go into the image.
 
 The console's own checks:
 
