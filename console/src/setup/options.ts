@@ -15,6 +15,31 @@ import { readEnvFile } from "../env_file.ts";
 
 /** Every value setup writes, with the type the form needs to render it. */
 export interface SetupOptions {
+  /**
+   * A **disposable** stack on a LAN address, over plain HTTP.
+   *
+   * Not a mode a server graduates out of, and the console says so. A server's
+   * address is part of every member's identity — the SIWS keypair is derived
+   * from `(host, serverId)` — so changing it later makes every member a
+   * stranger and every message sealed to them unreadable. A real server is
+   * therefore named once, and the name is what moves when the machine does.
+   *
+   * It is also weaker than it looks: over HTTP nothing proves the address is
+   * the address, and every SIWS message is the same constant string, so
+   * anybody on the network can collect a signature that works on the real
+   * thing. Fine for an afternoon on a trusted LAN; not fine for a server with
+   * people on it.
+   *
+   * Phones cannot use it at all — Android has blocked cleartext since API 28.
+   */
+  localTesting: boolean;
+
+  /** The LAN address clients reach, e.g. `192.168.1.6`. Local testing only. */
+  localAddress: string;
+
+  /** Where Kong is published in local testing — 8000 is usually taken. */
+  localPort: number;
+
   domain: string;
   serverName: string;
   /** Blank means "generate one" — the common case. */
@@ -30,6 +55,9 @@ export interface SetupOptions {
 
 /** What the form shows when nothing says otherwise. */
 export const defaults: SetupOptions = {
+  localTesting: false,
+  localAddress: "",
+  localPort: 18000,
   domain: "",
   serverName: "Rift",
   consolePassword: "",
@@ -47,7 +75,7 @@ export interface OptionField {
   key: keyof SetupOptions;
   label: string;
   hint?: string;
-  kind: "text" | "number" | "password";
+  kind: "text" | "number" | "password" | "toggle";
   /** Tucked behind "Advanced" — correct for almost everyone as it stands. */
   advanced: boolean;
 }
@@ -70,6 +98,31 @@ export const fields: OptionField[] = [
       "invisible to every phone.",
   },
   { key: "serverName", label: "Server name", kind: "text", advanced: false },
+  {
+    key: "localTesting",
+    label: "Local testing only",
+    kind: "toggle",
+    advanced: false,
+    hint: "A throwaway server on your LAN, over plain HTTP, with no domain and " +
+      "no certificate. Phones cannot reach it, and it cannot be turned into a " +
+      "real server later — a server's address is part of every member's " +
+      "identity. Use it to try Rift, then build a real one.",
+  },
+  {
+    key: "localAddress",
+    label: "LAN address",
+    kind: "text",
+    advanced: false,
+    hint: "What clients will type, such as 192.168.1.6. Local testing only.",
+  },
+  {
+    key: "localPort",
+    label: "Local API port",
+    kind: "number",
+    advanced: true,
+    hint: "Where the API is published for local testing. 8000 is usually " +
+      "already taken by something.",
+  },
   {
     key: "consolePassword",
     label: "Console password",
@@ -141,6 +194,9 @@ export function optionsFromEnv(directory?: string): SetupOptions {
     domain: values.RIFT_DOMAIN ?? defaults.domain,
     serverName: values.RIFT_SERVER_NAME ?? defaults.serverName,
     consolePassword: "",
+    localTesting: values.RIFT_LOCAL_TESTING === "true",
+    localAddress: values.RIFT_LOCAL_ADDRESS ?? defaults.localAddress,
+    localPort: port(values, "RIFT_LOCAL_PORT", defaults.localPort),
     consoleBind: values.CONSOLE_BIND ?? defaults.consoleBind,
     consolePort: port(values, "CONSOLE_PORT", defaults.consolePort),
     httpPort: port(values, "HTTP_PORT", defaults.httpPort),
@@ -161,7 +217,18 @@ export function problemsWith(options: SetupOptions): string[] {
   const problems: string[] = [];
 
   const domain = options.domain.trim();
-  if (domain.length === 0) {
+  if (options.localTesting) {
+    // A LAN address instead of a name. Deliberately not validated as a
+    // hostname: the point of this mode is the addresses a name cannot be
+    // issued for.
+    if (options.localAddress.trim().length === 0) {
+      problems.push(
+        "Local testing needs the address clients will reach, such as 192.168.1.6.",
+      );
+    } else if (/^https?:\/\//i.test(options.localAddress)) {
+      problems.push("Enter the address on its own, without http:// or https://.");
+    }
+  } else if (domain.length === 0) {
     problems.push("A domain is required — it is what the certificate is issued for.");
   } else if (/^https?:\/\//i.test(domain)) {
     problems.push("Enter the domain on its own, without http:// or https://.");
@@ -175,6 +242,9 @@ export function problemsWith(options: SetupOptions): string[] {
     ["Voice (UDP)", options.livekitUdpPort],
     ["Voice (TCP)", options.livekitTcpPort],
     ["Console", options.consolePort],
+    ...(options.localTesting
+      ? [["Local API", options.localPort] as [string, number]]
+      : []),
   ];
   for (const [name, value] of ports) {
     if (!Number.isInteger(value) || value < 1 || value > 65535) {

@@ -20,7 +20,7 @@ import { setting, updateSetting } from "../env_file.ts";
 import { isReachable, type PostgresTarget } from "../postgres.ts";
 import { restartService, startStack } from "../docker.ts";
 import { applyPlan, planMigrations } from "../migrations/runner.ts";
-import { type StackConfig, writeConfigFiles } from "./config_files.ts";
+import { publicUrlFor, type StackConfig, writeConfigFiles } from "./config_files.ts";
 import { envHasPassword, problemsWith } from "./options.ts";
 import { installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
@@ -135,7 +135,14 @@ export async function runSetup(
 
   await step("Starting containers", async () => {
     // The images are pulled here on a first run, which is most of the wait.
-    const result = await startStack(["full"]);
+    //
+    // Caddy is left out of a local-testing stack. Its whole job is a
+    // certificate, and one cannot be issued for a LAN address; started anyway
+    // it would sit there failing ACME challenges against a name that does not
+    // resolve. The override published Kong directly instead.
+    const result = await startStack(["full"], {
+      exclude: request.localTesting ? ["caddy"] : [],
+    });
     if (!result.ok) {
       throw new Error(result.stderr || "docker compose could not start the stack");
     }
@@ -185,7 +192,9 @@ export async function runSetup(
 
   const server = await step("Creating your server", () =>
     provisionServer({
-      publicUrl: `https://${request.domain}`,
+      publicUrl: publicUrlFor(request),
+      // Published directly when there is no proxy in front of it.
+      livekitSignallingPort: request.localTesting ? 7880 : undefined,
       internalUrl: "http://kong:8000",
       // Matches what the functions container holds, which is now the
       // opaque secret key rather than the legacy JWT.

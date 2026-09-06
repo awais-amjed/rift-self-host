@@ -106,3 +106,40 @@ Deno.test("a port outside the range is refused", () => {
   assert(problemsWith({ ...valid, httpPort: 0 }).length > 0);
   assert(problemsWith({ ...valid, httpPort: 70000 }).length > 0);
 });
+
+Deno.test("local testing wants an address instead of a domain", () => {
+  // The whole point of the mode is the addresses a certificate cannot be
+  // issued for, so a domain must not be required — and must not be silently
+  // demanded through the back door either.
+  const local: SetupOptions = {
+    ...defaults,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+    domain: "",
+  };
+  assertEquals(problemsWith(local), []);
+
+  const problems = problemsWith({ ...local, localAddress: "  " });
+  assertEquals(problems.length, 1);
+  assert(problems[0].includes("192.168.1.6"), problems[0]);
+});
+
+Deno.test("a scheme on the LAN address is corrected, not accepted", () => {
+  // `http://http://192.168.1.6:18000` is what it would otherwise become.
+  const problems = problemsWith({
+    ...defaults,
+    localTesting: true,
+    localAddress: "http://192.168.1.6",
+  });
+  assert(problems[0].includes("without http"), problems[0]);
+});
+
+Deno.test("the local API port cannot collide with the console", () => {
+  const problems = problemsWith({
+    ...defaults,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+    localPort: defaults.consolePort,
+  });
+  assert(problems.some((p) => p.includes("port")), problems.join("; "));
+});

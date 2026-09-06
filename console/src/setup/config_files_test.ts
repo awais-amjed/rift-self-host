@@ -4,7 +4,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@1";
-import { placeholders, render, renderEnv } from "./config_files.ts";
+import { placeholders, render, renderEnv, renderLocalOverride } from "./config_files.ts";
 import { defaults } from "./options.ts";
 import { generateSecrets } from "./secrets.ts";
 
@@ -179,4 +179,39 @@ Deno.test("the Caddyfile asks Caddy for nothing it does not need", async () => {
     if (code.startsWith("#")) continue;
     assert(!code.startsWith("email"), `Caddyfile still sets an email: ${line}`);
   }
+});
+
+Deno.test("a local stack is addressed over http, a real one over https", async () => {
+  const base = await context();
+
+  const real = renderEnv(base);
+  assertStringIncludes(real, "API_EXTERNAL_URL=https://chat.example.com");
+  assertStringIncludes(real, "RIFT_LOCAL_TESTING=false");
+
+  const local = renderEnv({
+    ...base,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+    localPort: 18000,
+  });
+  assertStringIncludes(local, "API_EXTERNAL_URL=http://192.168.1.6:18000");
+  assertStringIncludes(local, "RIFT_LOCAL_TESTING=true");
+  // The mode has to survive a restart: the dashboard keeps saying so, and
+  // creating a second server has to reach LiveKit the same way.
+  assertStringIncludes(local, "RIFT_LOCAL_ADDRESS=192.168.1.6");
+});
+
+Deno.test("the local override publishes what Caddy would have fronted", () => {
+  const yaml = renderLocalOverride({
+    ...defaults,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+    localPort: 18000,
+  });
+  assertStringIncludes(yaml, '"0.0.0.0:18000:8000"');
+  assertStringIncludes(yaml, '"0.0.0.0:7880:7880"');
+  // Behind a router, STUN answers with the router's address and the call
+  // connects with no sound. This is the line that prevents it.
+  assertStringIncludes(yaml, 'LIVEKIT_RTC_NODE_IP: "192.168.1.6"');
+  assertStringIncludes(yaml, 'LIVEKIT_RTC_USE_EXTERNAL_IP: "false"');
 });

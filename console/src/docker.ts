@@ -90,8 +90,12 @@ export async function servicesIn(profiles: string[]): Promise<string[]> {
  * Bring up every service in [profiles] except this one, waiting for
  * healthchecks to pass.
  *
- * The exclusion is not tidiness. A plain `up` covers every service in the
- * project, and the console *is* one of them — so it recreates the container it
+ * [options.exclude] leaves out a service the stack does not want this time —
+ * Caddy on a local-testing stack, which exists only to hold a certificate that
+ * cannot be issued for a LAN address.
+ *
+ * Excluding the console is not tidiness. A plain `up` covers every service in
+ * the project, and the console *is* one of them — so it recreates the container it
  * is running in, SIGTERMs itself mid-setup, and the operator watches the
  * progress stream die at "Starting containers" with no error, because the
  * process that would have reported one is gone.
@@ -99,8 +103,12 @@ export async function servicesIn(profiles: string[]): Promise<string[]> {
  * The list is read back from the compose file rather than written down here,
  * so a service added later is started without anyone remembering to add it.
  */
-export async function startStack(profiles: string[] = ["full"]): Promise<CommandResult> {
-  const services = (await servicesIn(profiles)).filter((service) => service !== SELF);
+export async function startStack(
+  profiles: string[] = ["full"],
+  options: { exclude?: string[] } = {},
+): Promise<CommandResult> {
+  const skip = new Set([SELF, ...(options.exclude ?? [])]);
+  const services = (await servicesIn(profiles)).filter((s) => !skip.has(s));
   if (services.length === 0) {
     return {
       ok: false,

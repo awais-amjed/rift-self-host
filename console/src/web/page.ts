@@ -129,6 +129,17 @@ still <code>CONSOLE_PASSWORD</code> in the <code>.env</code> beside your
 
 /** One input, rendered from its [OptionField] and current value. */
 function optionInput(field: OptionField, value: unknown): string {
+  if (field.kind === "toggle") {
+    return `<div class="field">
+      <label for="${field.key}">
+        <input id="${field.key}" name="${field.key}" type="checkbox"
+               data-kind="toggle" ${value === true ? "checked" : ""}>
+        ${field.label}
+      </label>
+      ${field.hint ? `<p class="hint">${field.hint}</p>` : ""}
+    </div>`;
+  }
+
   const type = field.kind === "number"
     ? "number"
     : field.kind === "password"
@@ -223,10 +234,12 @@ form.addEventListener("submit", async (event) => {
 
   const options = {};
   for (const input of form.querySelectorAll("input[name]")) {
-    const raw = input.value.trim();
+    const raw = input.type === "checkbox" ? "" : input.value.trim();
     // A blank number means "leave the default alone"; sending 0 would be a
     // port choice rather than an absence.
-    if (input.dataset.kind === "number") {
+    if (input.dataset.kind === "toggle") {
+      options[input.name] = input.checked;
+    } else if (input.dataset.kind === "number") {
       if (raw !== "") options[input.name] = Number(raw);
     } else {
       options[input.name] = raw;
@@ -281,13 +294,27 @@ form.addEventListener("submit", async (event) => {
 }
 
 /** The running dashboard. */
-export function dashboardPage(domain: string): string {
+export function dashboardPage(domain: string, localTesting = false): string {
+  // Said on every load, not once at setup. A throwaway stack that has been
+  // running for a fortnight stops looking like one, and the thing that makes it
+  // throwaway — its address, which every member's identity derives from — is
+  // invisible from here.
+  const banner = localTesting
+    ? `<p class="warn" style="margin:0 0 22px"><span>This is a
+       <strong>local testing</strong> stack: plain HTTP on a LAN address, no
+       certificate, and unreachable from any phone. It cannot become a real
+       server — every member's identity is derived from the address they joined
+       at, so changing it makes them strangers and their history unreadable.
+       Build a real one when you want to keep it.</span></p>`
+    : "";
+
   return shell(
     "Rift console",
     // Escaped like every other operator-supplied value on this page. The
     // domain comes out of `.env`, which somebody may have written by hand.
     `<h1>${escapeAttribute(domain)}</h1>
 <p class="sub">Rift server console</p>
+${banner}
 
 <h2>Release</h2>
 <div class="panel">

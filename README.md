@@ -137,6 +137,33 @@ docker compose exec console deno run --allow-env --allow-read \
   --allow-run=psql /app/src/migrations/cli.ts --accept-drift
 ```
 
+## A server's address is permanent
+
+**Decided September 2026.** A Rift server is named once, and the name is what
+moves when the machine does.
+
+Every member's identity is derived from the address they joined at — the SIWS
+keypair from `(host, serverId)`, and the X25519 key they are sealed with from
+the host alone. Change the address and every member gets a new `auth.uid()`, a
+new `stable_id` that no ban follows, and a new chat key that cannot open a
+single message in their history. There is no migration for that; it is a
+server-wide identity reset.
+
+A DNS name is what makes this a non-problem rather than a trap. Repoint the
+record and the host is unchanged, so identities, stored URLs, the certificate
+and the public listing all keep working. That is what names are for, and it is
+why HTTPS on a name is the only supported way to run a server people use.
+
+Two consequences worth stating plainly:
+
+- **Local testing is disposable.** The console offers it, and says on every page
+  load that the stack cannot become a real server. Use it to try Rift.
+- **No name, no server.** If a domain is impractical — CGNAT, a home
+  connection — Tailscale issues real certificates for `*.ts.net`, which is a
+  name and a certificate without a registrar. An air-gapped LAN with neither is
+  the one case with no good answer: a self-signed certificate and desktop-only
+  clients, or nothing.
+
 ## Requirements
 
 - Docker with the Compose plugin

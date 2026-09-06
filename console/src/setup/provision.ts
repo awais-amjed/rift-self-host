@@ -37,6 +37,12 @@ interface CreateServerResponse {
 export interface ProvisionOptions {
   /** Public base URL of the server, e.g. `https://chat.example.com`. */
   publicUrl: string;
+  /**
+   * LiveKit's signalling port, when it is published directly rather than
+   * proxied. Local testing only — a real server shares the domain, so
+   * signalling rides the same `wss://` the API does.
+   */
+  livekitSignallingPort?: number;
   /** Reached container-to-container, so setup does not wait on DNS or a cert. */
   internalUrl: string;
   serviceRoleKey: string;
@@ -52,8 +58,15 @@ export interface ProvisionOptions {
  * shares the domain (see the Caddyfile), so anything else would be a second
  * value to keep in step with the first.
  */
-export function livekitUrlFor(publicUrl: string): string {
-  return publicUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:").replace(/\/$/, "");
+export function livekitUrlFor(publicUrl: string, signallingPort?: number): string {
+  const scheme = publicUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+    .replace(/\/$/, "");
+  if (signallingPort === undefined) return scheme;
+
+  // Local testing reaches LiveKit directly, so the port is its own rather than
+  // the proxy's — there is no proxy. Host only: the API's port is not this one.
+  const host = scheme.replace(/^wss?:\/\//, "").split(":")[0];
+  return `${scheme.startsWith("wss:") ? "wss" : "ws"}://${host}:${signallingPort}`;
 }
 
 /** Create the server and return what the operator needs. */
@@ -67,7 +80,7 @@ export async function provisionServer(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       name: options.serverName,
-      livekit_url: livekitUrlFor(options.publicUrl),
+      livekit_url: livekitUrlFor(options.publicUrl, options.livekitSignallingPort),
       livekit_api_key: options.livekitApiKey,
       livekit_secret_key: options.livekitApiSecret,
       service_key: options.serviceRoleKey,

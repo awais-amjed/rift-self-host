@@ -103,6 +103,9 @@ export async function createServer(name: string): Promise<{
 
   return await provisionServer({
     publicUrl,
+    // Same arrangement setup chose. A local stack publishes LiveKit directly;
+    // a real one shares the domain through the proxy.
+    livekitSignallingPort: setting("RIFT_LOCAL_TESTING") === "true" ? 7880 : undefined,
     // Container-to-container, so creating a server does not wait on DNS or on
     // a certificate that may not have been issued.
     internalUrl: "http://kong:8000",
@@ -161,5 +164,8 @@ export function inviteLinkFor(code: string): string {
 export function livekitUrl(): string {
   const publicUrl = setting("API_EXTERNAL_URL") ??
     `https://${setting("RIFT_DOMAIN") ?? ""}`;
-  return livekitUrlFor(publicUrl);
+  return livekitUrlFor(
+    publicUrl,
+    setting("RIFT_LOCAL_TESTING") === "true" ? 7880 : undefined,
+  );
 }

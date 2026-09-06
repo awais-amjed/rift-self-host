@@ -38,6 +38,19 @@ export function render(template: string, values: Record<string, string>): string
   });
 }
 
+/**
+ * The address clients reach this server at, scheme included.
+ *
+ * Everything downstream derives from it: what goes in `.env`, the LiveKit URL
+ * `create_server` stores, and the invite link an operator pastes. HTTPS on a
+ * name for a real server; plain HTTP on a LAN address for a throwaway one.
+ */
+export function publicUrlFor(options: StackConfig): string {
+  return options.localTesting
+    ? `http://${options.localAddress.trim()}:${options.localPort}`
+    : `https://${options.domain.trim()}`;
+}
+
 /** The placeholder values every template is rendered against. */
 export function placeholders(context: RenderContext): Record<string, string> {
   const { secrets } = context;
@@ -69,7 +82,14 @@ export function renderEnv(context: RenderContext): string {
     "",
     `RIFT_DOMAIN=${context.domain}`,
     `RIFT_SERVER_NAME=${context.serverName}`,
-    `API_EXTERNAL_URL=https://${context.domain}`,
+    `API_EXTERNAL_URL=${publicUrlFor(context)}`,
+    "",
+    "# A throwaway stack on a LAN address, over plain HTTP. Recorded so the",
+    "# console can keep saying so on the dashboard — it is not a mode a server",
+    "# grows out of, because its address is part of every member's identity.",
+    `RIFT_LOCAL_TESTING=${context.localTesting}`,
+    `RIFT_LOCAL_ADDRESS=${context.localAddress}`,
+    `RIFT_LOCAL_PORT=${context.localPort}`,
     "",
     "# Published ports. Every one has a standard default in the compose file;",
     "# these are here so a host that already uses 80 or 443 can move them, and",
@@ -177,6 +197,21 @@ export async function writeConfigFiles(
     written.push(`volumes/db/${script}`);
   }
 
+  // Local testing publishes what Caddy would otherwise front, because there is
+  // no Caddy: a certificate cannot be issued for a LAN address. Written as an
+  // override rather than into the compose file so the file an operator
+  // downloaded stays the file they downloaded, and so deleting one file undoes
+  // the whole arrangement.
+  const overridePath = join(projectDir, "docker-compose.override.yml");
+  if (context.localTesting) {
+    await Deno.writeTextFile(overridePath, renderLocalOverride(context));
+    written.push("docker-compose.override.yml");
+  } else {
+    // A stack set up for real must not inherit a previous run's override — it
+    // would publish the API in the clear beside the TLS that replaced it.
+    await Deno.remove(overridePath).catch(() => {});
+  }
+
   // Last, and with a mode of its own: until this exists, `docker compose` has
   // no values for the `full` profile, so a half-written stack cannot start.
   const envPath = join(projectDir, ".env");
@@ -184,4 +219,39 @@ export async function writeConfigFiles(
   written.push(".env");
 
   return written;
+}
+
+/**
+ * The compose override a throwaway LAN stack needs.
+ *
+ * Two things Caddy would have done, done directly: publish the API, and publish
+ * LiveKit's signalling. Media was already going straight to a published UDP
+ * port and never touched Caddy, which is why that part is unchanged.
+ *
+ * `LIVEKIT_RTC_NODE_IP` is the one that is not obvious. `use_external_ip` asks
+ * STUN which address the internet sees, which is right on a public host and
+ * wrong behind a home router — it answers with the *router's* address, so
+ * clients on the same network send audio out to the internet expecting it back,
+ * and the call connects with no sound.
+ */
+export function renderLocalOverride(context: StackConfig): string {
+  const address = context.localAddress.trim();
+  return `# Written by the Rift console for a local-testing stack. Delete it and the
+# stack stops being reachable over plain HTTP.
+#
+# This server has no certificate and no name. It cannot become a real one:
+# every member's identity is derived from the address they joined at, so
+# changing it makes them strangers. Build a real server when you want one.
+services:
+  kong:
+    ports:
+      - "0.0.0.0:${context.localPort}:8000"
+
+  livekit:
+    ports:
+      - "0.0.0.0:7880:7880"
+    environment:
+      LIVEKIT_RTC_USE_EXTERNAL_IP: "false"
+      LIVEKIT_RTC_NODE_IP: "${address}"
+`;
 }

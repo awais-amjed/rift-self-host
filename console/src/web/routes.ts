@@ -138,7 +138,12 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/") {
     return isConfigured()
-      ? html(dashboardPage(setting("RIFT_DOMAIN") ?? "Your server"))
+      ? html(dashboardPage(
+        setting("RIFT_LOCAL_TESTING") === "true"
+          ? `${setting("RIFT_LOCAL_ADDRESS") ?? ""}:${setting("RIFT_LOCAL_PORT") ?? ""}`
+          : setting("RIFT_DOMAIN") ?? "Your server",
+        setting("RIFT_LOCAL_TESTING") === "true",
+      ))
       : html(setupPage(fields, optionsFromEnv(paths.projectDir)));
   }
 
