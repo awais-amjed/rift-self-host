@@ -43,7 +43,7 @@ import { dashboardPage, exposedPage, loginPage, setupPage } from "./page.ts";
  * `JWT_SECRET` is the test instead: it is generated, never something anybody
  * writes by hand, and nothing in the stack works without it.
  */
-export function isConfigured(_projectDir?: string): boolean {
+export function isConfigured(): boolean {
   return setting("JWT_SECRET") !== undefined;
 }
 
@@ -137,12 +137,24 @@ export async function handle(request: Request): Promise<Response> {
   }
 
   if (path === "/") {
-    return isConfigured(paths.projectDir)
+    return isConfigured()
       ? html(dashboardPage(setting("RIFT_DOMAIN") ?? "Your server"))
       : html(setupPage(fields, optionsFromEnv(paths.projectDir)));
   }
 
   if (path === "/api/setup" && request.method === "POST") {
+    // Only the page is gated on `isConfigured`; this is the endpoint behind
+    // it. A second run generates a fresh set of everything — a new Postgres
+    // password, new signing keys — writes them over `.env`, and then cannot
+    // reach the database it has just locked itself out of. There is no
+    // recovery worth offering, so it is refused.
+    if (isConfigured()) {
+      return json({
+        error: "This stack is already set up. Setup generates a new database " +
+          "password and new signing keys, which would lock the stack out of " +
+          "its own database.",
+      }, 409);
+    }
     return setupStream(await request.json());
   }
 

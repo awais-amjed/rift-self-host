@@ -6,7 +6,7 @@
  * and it is what creates the conditions for the rest.
  */
 import { announce, consolePort } from "./banner.ts";
-import { isDockerReachable, projectDir } from "./docker.ts";
+import { isDockerReachable } from "./docker.ts";
 import { configuredPassword } from "./web/auth.ts";
 import { targetFromEnv } from "./postgres.ts";
 import { applyUpgrade, pendingWork } from "./upgrade.ts";
@@ -16,7 +16,7 @@ import { handle, isConfigured } from "./web/routes.ts";
 const PORT = consolePort();
 
 async function main(): Promise<void> {
-  const configured = isConfigured(projectDir());
+  const configured = isConfigured();
 
   if (!await isDockerReachable()) {
     console.error(
