@@ -86,6 +86,14 @@ details[open] summary { margin-bottom: 10px; }
   border-radius: 8px; padding: 10px 12px; margin: 8px 0 0; }
 `;
 
+/** The server-side half of the page's own `escapeHtml`. */
+function escapeAttribute(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
+  );
+}
+
 function shell(title: string, body: string, script = ""): string {
   return `<!doctype html>
 <html lang="en"><head>
@@ -276,7 +284,9 @@ form.addEventListener("submit", async (event) => {
 export function dashboardPage(domain: string): string {
   return shell(
     "Rift console",
-    `<h1>${domain}</h1>
+    // Escaped like every other operator-supplied value on this page. The
+    // domain comes out of `.env`, which somebody may have written by hand.
+    `<h1>${escapeAttribute(domain)}</h1>
 <p class="sub">Rift server console</p>
 
 <h2>Release</h2>
