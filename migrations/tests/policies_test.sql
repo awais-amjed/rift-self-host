@@ -1462,6 +1462,34 @@ SET LOCAL ROLE authenticated;
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
 
+-- Bob holds no roles, and since 014 the baseline does not include making a
+-- private room: that is a moderator's by default, and a bit like any other.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO channels (id, server_id, name, channel_type, is_private)
+    VALUES ('aaaa1111-0000-4000-8000-00000000fff0',
+            'aaaa0000-0000-4000-8000-000000000001', 'too-soon', 'text', true);
+    RAISE EXCEPTION 'FAIL: a plain member made a private channel';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  making a private channel is a permission, not a birthright';
+END $$;
+
+-- Only that bit, so bob's three cached booleans stay false and the tests
+-- below that lean on him being a plain member still mean what they say.
+RESET ROLE;
+INSERT INTO roles (id, server_id, name, position, permissions)
+VALUES ('aaaa2222-0000-4000-8000-000000000001',
+        'aaaa0000-0000-4000-8000-000000000001', 'Room makers', 50,
+        app.perm('CREATE_PRIVATE_CHANNEL'));
+INSERT INTO member_roles (user_id, role_id)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000002', 'aaaa2222-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
 DO $$
 BEGIN
   INSERT INTO channels (id, server_id, name, channel_type, is_private)
@@ -3448,6 +3476,27 @@ BEGIN
   RAISE NOTICE 'ok  a page is a page, and it is only ever your own';
 END $$;
 
+
+-- ============================================================
+-- 18b. Where the private-channel bit lands by default (014)
+-- ============================================================
+RESET ROLE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM roles
+              WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001'
+                AND is_everyone
+                AND (permissions & app.perm('CREATE_PRIVATE_CHANNEL')) <> 0) THEN
+    RAISE EXCEPTION 'FAIL: the baseline still lets everybody make private rooms';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM roles
+                  WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001'
+                    AND name = 'Moderator'
+                    AND (permissions & app.perm('CREATE_PRIVATE_CHANNEL')) <> 0) THEN
+    RAISE EXCEPTION 'FAIL: moderators cannot make private rooms by default';
+  END IF;
+  RAISE NOTICE 'ok  private rooms are a moderator''s to make, by default';
+END $$;
 
 -- ============================================================
 -- 19. One owner per server (013)
