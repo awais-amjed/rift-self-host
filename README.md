@@ -212,3 +212,15 @@ Not yet proved, and worth doing before anyone else runs one:
   other, but nobody has spoken into one and heard it come out the other side.
 - **The `studio` profile**, which has not been started once.
 - **Backups.** Nothing here dumps the database or the attachment volume.
+
+## Where this sits
+
+Rift is five repositories, meant to be cloned as siblings.
+
+| Repo | Holds |
+|---|---|
+| `rift` | the client: Flutter app, Rust crate, `rift_crypto` |
+| `rift-self-host` | a server's schema, endpoints and console — anyone runs one |
+| `rift-central` | accounts, the public directory, the push relay — we run it |
+| `rift-bot-sdk` | the TypeScript bot SDK |
+| `rift-website` | joinrift.app, and the self-hosting docs |
