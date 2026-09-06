@@ -25,7 +25,7 @@ Everything Rift adds on top is **data, not modified software**:
 | What Rift adds | Where it goes |
 |---|---|
 | Schema, policies, RPCs | `migrations/` — SQL applied to Postgres |
-| Server endpoints | `functions/` — Deno, mounted into the edge runtime |
+| Server endpoints | `supabase/functions/` — Deno, mounted into the edge runtime |
 | Non-default settings | environment variables in `docker-compose.yml` |
 | Voice config | a generated `livekit.yaml` |
 
@@ -68,11 +68,11 @@ docker-compose.yml     what an operator downloads
 console/               the one custom image
 migrations/            the schema, applied in filename order
 migrations/tests/      policy tests — what each role may actually reach
-functions/             the server's endpoints, mounted into the edge runtime
+supabase/functions/    the server's endpoints, mounted into the edge runtime
 scripts/db_test.sh     runs both suites against a Postgres container
 ```
 
-`migrations/` and `functions/` **are the originals**. They used to be copies of
+`migrations/` and `supabase/functions/` **are the originals**. They used to be copies of
 directories in the app repo, refreshed by a sync script; they now live here,
 where the thing that ships them lives, and the app repo has none. Their history
 came with them, so `git log migrations/001_core.sql` still answers why.

@@ -22,7 +22,9 @@ COPY console/deno.jsonc ./deno.jsonc
 COPY console/src ./src
 COPY console/templates ./templates
 COPY migrations ./migrations
-COPY functions ./functions
+# From `supabase/functions`, which is the layout the Supabase CLI deploys from,
+# to a flat `/app/functions` inside the image, which is what the console reads.
+COPY supabase/functions ./functions
 
 # Resolve and compile the dependency graph now, so a container that starts on a
 # machine with no outbound network still runs. Without this the first request

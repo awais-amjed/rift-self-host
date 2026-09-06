@@ -226,14 +226,8 @@ file remembers the newest message already announced per conversation, so a later
 doorbell does not repeat it. One notification per conversation, posted under a
 stable id derived from the scope, so it updates in place rather than stacking.
 
-Deploying it needs `TMPDIR` pointed somewhere Docker Desktop shares — `/tmp` is
-not, and the bundler fails with "path is not shared from the host":
-
-```
-cd ../rift-central          # the central tier is its own repository
-TMPDIR=$HOME/tmp supabase functions deploy push_send \
-  --project-ref <ref> --no-verify-jwt     # the DB trigger calls it without a JWT
-```
+`push_send` is central's, not a server's, and deploying it is documented in the
+`rift-central` repository beside the function itself.
 
 ### A webhook rings its own doorbell
 
@@ -321,11 +315,15 @@ check happens at plan time — so it is refused whether or not the row exists. `
 ### Hosted Supabase project
 
 ```bash
-cd edge_functions
 supabase functions deploy --project-ref <ref>
 ```
 
-Apply the migrations via the SQL editor or `psql`, in order.
+From the root of this repository — the endpoints are under `supabase/functions/`,
+which is where the CLI looks. Apply the migrations via the SQL editor or `psql`,
+in filename order.
+
+A stack built with the console needs none of this: it installs the endpoints
+from its own image and runs the migrations itself.
 
 ### Self-hosted Docker stack
 
