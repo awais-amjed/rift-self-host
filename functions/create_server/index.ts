@@ -108,8 +108,11 @@ Deno.serve(async (req) => {
     //
     // It names a role now rather than three booleans (migration 025). The one
     // it wants is the most senior on a server that has existed for a
-    // millisecond and has exactly the four roles its own trigger just seeded —
-    // so "highest position" is `Admin`, without this having to know the name.
+    // millisecond and has exactly the roles its own trigger just seeded — so
+    // "highest position" is `Admin`, without this having to know the name.
+    // Not `Owner`, which sits above it (013): that one is never named by an
+    // invite. Registration hands it to the first person in, which is whoever
+    // redeems this.
     const inviteCode = generateInviteCode();
 
     const { data: topRole, error: roleError } = await supabase
@@ -117,6 +120,7 @@ Deno.serve(async (req) => {
       .select("id")
       .eq("server_id", server_id)
       .eq("is_everyone", false)
+      .eq("is_owner", false)
       .order("position", { ascending: false })
       .limit(1)
       .maybeSingle();

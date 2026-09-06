@@ -3448,5 +3448,197 @@ BEGIN
   RAISE NOTICE 'ok  a page is a page, and it is only ever your own';
 END $$;
 
+
+-- ============================================================
+-- 19. One owner per server (013)
+-- ============================================================
+-- Dave joined Alpha in section 12 through a plain invite, on a server whose
+-- fixture admins were inserted by hand and so never passed through
+-- registration. That makes him the first person *registered* on Alpha — which
+-- is the whole rule, and it must hold whether the invite named a role or not.
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT (SELECT is_owner FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-00000000000a') THEN
+    RAISE EXCEPTION 'FAIL: the first person registered did not become the owner';
+  END IF;
+  IF (SELECT is_owner FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: an admin inserted by hand reads as owner';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM member_role_list
+                  WHERE user_id = '11111111-aaaa-4aaa-8aaa-00000000000a' AND is_owner) THEN
+    RAISE EXCEPTION 'FAIL: the roster view does not say who the owner is';
+  END IF;
+  RAISE NOTICE 'ok  the first person in owns the server, and everybody can see it';
+END $$;
+
+-- Alice holds ADMINISTRATOR, which since 018 has let her hand out a role at
+-- her own rank. The owner role is above her rank and, more to the point, is
+-- not hers to hand out at any rank: not to a member, and not through an
+-- invite.
+DO $$
+DECLARE v_owner UUID := (SELECT id FROM roles
+                          WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_owner);
+BEGIN
+  BEGIN
+    INSERT INTO member_roles (user_id, role_id)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000002', v_owner);
+    RAISE EXCEPTION 'FAIL: an admin handed out the owner role';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO invites (server_id, created_by, role_id)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001',
+            '11111111-aaaa-4aaa-8aaa-000000000001', v_owner);
+    RAISE EXCEPTION 'FAIL: an admin minted an invite that grants ownership';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  nobody hands out the owner role';
+END $$;
+
+-- Nor edits it. RLS filters the row out rather than raising, so the tell is
+-- that nothing changed.
+DO $$
+DECLARE v_count INTEGER;
+BEGIN
+  UPDATE roles SET name = 'Boss'
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_owner;
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'FAIL: an admin renamed the owner role';
+  END IF;
+  DELETE FROM roles
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_owner;
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'FAIL: an admin deleted the owner role';
+  END IF;
+  BEGIN
+    PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-00000000000a', NULL, NULL, true);
+    RAISE EXCEPTION 'FAIL: an admin banned the owner';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%cannot_moderate_admin%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM transfer_ownership('11111111-aaaa-4aaa-8aaa-000000000001');
+    RAISE EXCEPTION 'FAIL: an admin took ownership for herself';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%not_owner%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM delete_server();
+    RAISE EXCEPTION 'FAIL: an admin deleted the server';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%not_owner%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  the owner role, and the owner, are beyond an admin''s reach';
+END $$;
+
+-- Even by the service role, which is what registration and every edge
+-- function run as: the trigger, not the policy, is what keeps it singular.
+RESET ROLE;
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO member_roles (user_id, role_id)
+    SELECT '11111111-aaaa-4aaa-8aaa-000000000002', id FROM roles
+     WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_owner;
+    RAISE EXCEPTION 'FAIL: a server has two owners';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%owner_is_singular%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    DELETE FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-00000000000a';
+    RAISE EXCEPTION 'FAIL: the owner left, and the server has nobody who can end it';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%owner_cannot_leave%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  one owner, who cannot leave without passing it on';
+END $$;
+RESET ROLE;
+
+-- Passing it on. Dave hands Alpha to Bob and is left an admin, not a member:
+-- stepping down from owning the place is not stepping down from running it.
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-00000000000a","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM transfer_ownership('11111111-aaaa-4aaa-8aaa-00000000000a');
+    RAISE EXCEPTION 'FAIL: the owner transferred the server to themselves';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%cannot_transfer_to_self%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM transfer_ownership('22222222-bbbb-4bbb-8bbb-000000000001');
+    RAISE EXCEPTION 'FAIL: a server was handed to somebody on another server';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%user_not_found%' THEN RAISE; END IF;
+  END;
+
+  PERFORM transfer_ownership('11111111-aaaa-4aaa-8aaa-000000000002');
+
+  IF NOT (SELECT is_owner FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: the new owner is not the owner';
+  END IF;
+  IF (SELECT is_owner FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-00000000000a') THEN
+    RAISE EXCEPTION 'FAIL: the old owner is still the owner';
+  END IF;
+  IF NOT (SELECT is_server_admin FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-00000000000a') THEN
+    RAISE EXCEPTION 'FAIL: the old owner was not left an admin';
+  END IF;
+  IF NOT app.has_perm('ADMINISTRATOR') THEN
+    RAISE EXCEPTION 'FAIL: the old owner''s permissions did not follow the cache';
+  END IF;
+
+  -- Once. The role moved, and with it the right to move it.
+  BEGIN
+    PERFORM transfer_ownership('11111111-aaaa-4aaa-8aaa-000000000001');
+    RAISE EXCEPTION 'FAIL: a former owner transferred the server again';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%not_owner%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  ownership moves once, and leaves an admin behind';
+END $$;
+
+-- Ending it. Bob, now the owner, deletes Alpha; the cascade takes its members
+-- with it, owner included — the one delete of an owner's row that is allowed.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_id UUID;
+BEGIN
+  v_id := delete_server();
+  IF v_id <> 'aaaa0000-0000-4000-8000-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: delete_server answered with the wrong server: %', v_id;
+  END IF;
+  RAISE NOTICE 'ok  the owner can end the server';
+END $$;
+
+RESET ROLE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM servers WHERE id = 'aaaa0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: the server is still there';
+  END IF;
+  IF EXISTS (SELECT 1 FROM users WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: the cascade stopped at the owner';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM servers WHERE id = 'bbbb0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: deleting one server took another with it';
+  END IF;
+  RAISE NOTICE 'ok  and it takes everything of its own with it, and nothing else';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
