@@ -18,6 +18,12 @@ function lookupsIn(html: string): string[] {
   return [...html.matchAll(/getElementById\("([^"]+)"\)/g)].map((m) => m[1]);
 }
 
+/** The inline script, as the browser receives it. */
+function scriptIn(html: string): string {
+  const match = html.match(/<script>([\s\S]*)<\/script>/);
+  return match ? match[1] : "";
+}
+
 const pages: [string, string][] = [
   ["setup", setupPage(fields, defaults)],
   ["dashboard", dashboardPage("chat.example.com")],
@@ -88,5 +94,29 @@ Deno.test("advanced options are behind the fold, plain ones are not", () => {
       field.advanced,
       `${field.key} is on the wrong side of the fold`,
     );
+  }
+});
+
+/**
+ * The scripts are written inside a TypeScript template literal, which eats a
+ * backslash it does not recognise. `/^\w+:\/\//` reached the browser as
+ * `/^w+:///` — a regex followed by a line comment, which commented out the
+ * rest of the call and left the whole file a syntax error. Every panel on the
+ * dashboard said "Loading…" and nothing said why.
+ */
+Deno.test("every page's inline script parses", () => {
+  const pages: [string, string][] = [
+    ["login", loginPage(false)],
+    ["setup", setupPage(fields, defaults)],
+    ["dashboard", dashboardPage("chat.example.com")],
+  ];
+  for (const [name, html] of pages) {
+    const script = scriptIn(html);
+    if (script.trim().length === 0) continue;
+    try {
+      new Function(script);
+    } catch (error) {
+      throw new Error(`The ${name} page's script does not parse: ${error}`);
+    }
   }
 });

@@ -603,7 +603,7 @@ function renderLocal(local) {
 
   button.dataset.on = local.on ? "1" : "";
   button.textContent = local.on
-    ? "Switch back to " + local.home.replace(/^\w+:\/\//, "")
+    ? "Switch back to " + local.home.split("://").pop()
     : "Switch voice to this network";
 
   for (const copy of document.querySelectorAll("[data-copy-local]")) {
