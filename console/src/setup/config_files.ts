@@ -91,6 +91,13 @@ export function renderEnv(context: RenderContext): string {
     `RIFT_LOCAL_ADDRESS=${context.localAddress}`,
     `RIFT_LOCAL_PORT=${context.localPort}`,
     "",
+    "# Whether this stack runs its own Caddy. False when the operator already",
+    "# terminates TLS here for something else — the compose override then",
+    "# publishes Kong and LiveKit's signalling on the loopback for their proxy,",
+    "# and `docker compose up` leaves caddy out.",
+    `RIFT_OWN_PROXY=${context.ownProxy}`,
+    `RIFT_PROXY_PORT=${context.proxyPort}`,
+    "",
     "# Published ports. Every one has a standard default in the compose file;",
     "# these are here so a host that already uses 80 or 443 can move them, and",
     "# so re-running setup remembers what was chosen.",
@@ -197,22 +204,12 @@ export async function writeConfigFiles(
     written.push(`volumes/db/${script}`);
   }
 
-  // Local testing publishes what Caddy would otherwise front, because there is
-  // no Caddy: a certificate cannot be issued for a LAN address. Written as an
-  // override rather than into the compose file so the file an operator
-  // downloaded stays the file they downloaded, and so deleting one file undoes
-  // the whole arrangement.
-  const overridePath = join(projectDir, "docker-compose.override.yml");
-  if (context.localTesting) {
-    await Deno.writeTextFile(
-      overridePath,
-      renderLocalOverride(context.localAddress, context.localPort),
-    );
-    written.push("docker-compose.override.yml");
-  } else {
-    // A stack set up for real must not inherit a previous run's override — it
-    // would publish the API in the clear beside the TLS that replaced it.
-    await Deno.remove(overridePath).catch(() => {});
+  // Whatever Caddy is not fronting has to be published instead. A stack that
+  // *is* behind Caddy writes nothing and clears any override a previous run
+  // left, which would otherwise publish the API in the clear beside the TLS
+  // that replaced it.
+  if (await writeOverride(projectDir, publishingFor(context))) {
+    written.push(OVERRIDE_FILE);
   }
 
   // Last, and with a mode of its own: until this exists, `docker compose` has
@@ -225,35 +222,123 @@ export async function writeConfigFiles(
 }
 
 /**
- * The compose override a throwaway LAN stack needs.
+ * What this stack publishes on the host, beyond the ports the compose file
+ * already names.
  *
- * Two things Caddy would have done, done directly: publish the API, and publish
- * LiveKit's signalling. Media was already going straight to a published UDP
- * port and never touched Caddy, which is why that part is unchanged.
- *
- * `LIVEKIT_RTC_NODE_IP` is the one that is not obvious. `use_external_ip` asks
- * STUN which address the internet sees, which is right on a public host and
- * wrong behind a home router — it answers with the *router's* address, so
- * clients on the same network send audio out to the internet expecting it back,
- * and the call connects with no sound.
+ * Three arrangements produce one file between them, which is why this is a
+ * shape rather than three renderers. Caddy fronts Kong and LiveKit's
+ * signalling on a normal stack, so neither is published and there is nothing
+ * to write. Without Caddy — because the operator has their own proxy, or
+ * because the stack is a throwaway on a LAN address — both have to be
+ * reachable from outside the compose network, and the same two `ports:` blocks
+ * are what does it.
  */
-export function renderLocalOverride(address: string, port: number): string {
-  return `# Written by the Rift console for a local-testing stack. Delete it and the
-# stack stops being reachable over plain HTTP.
+export interface Publishing {
+  /** Host port for Kong, or null to leave it behind the proxy. */
+  apiPort: number | null;
+  /**
+   * Interface to publish on.
+   *
+   * `127.0.0.1` for an operator's own proxy, which is on this machine: a
+   * signalling port on every interface is LiveKit answering in the clear
+   * beside the TLS that was meant to front it. `0.0.0.0` for local testing,
+   * where the whole point is that other machines can reach it.
+   */
+  bind: string;
+  /**
+   * LAN address to pin LiveKit's media to, or null to leave STUN to it.
+   *
+   * Only a home network needs this. `use_external_ip` asks STUN which address
+   * the internet sees, which is right on a public host and wrong behind a
+   * router — it answers with the *router's* address, so clients on the same
+   * network send audio out to the internet expecting it back, and the call
+   * connects with no sound.
+   */
+  lanAddress: string | null;
+}
+
+/** What a stack with its own Caddy publishes: nothing extra. */
+export const behindCaddy: Publishing = {
+  apiPort: null,
+  bind: "127.0.0.1",
+  lanAddress: null,
+};
+
+/**
+ * The compose override for [publishing], or null when there is nothing to say.
+ *
+ * Written as an override rather than into the compose file so the file an
+ * operator downloaded stays the file they downloaded, and so deleting one file
+ * undoes the whole arrangement.
+ */
+export function renderOverride(publishing: Publishing): string | null {
+  const { apiPort, bind, lanAddress } = publishing;
+  if (apiPort === null) return null;
+
+  const livekitEnvironment = lanAddress === null ? "" : `    environment:
+      LIVEKIT_RTC_USE_EXTERNAL_IP: "false"
+      LIVEKIT_RTC_NODE_IP: "${lanAddress.trim()}"
+`;
+
+  return `${OVERRIDE_MARK}. It publishes what Caddy would otherwise have
+# fronted: the API gateway, and LiveKit's signalling. Media was already going
+# straight to a published UDP port and never touched Caddy, which is why that
+# part is not here.
 #
-# This server has no certificate and no name. It cannot become a real one:
-# every member's identity is derived from the address they joined at, so
-# changing it makes them strangers. Build a real server when you want one.
+# Delete it and both stop being reachable from outside the compose network.
 services:
   kong:
     ports:
-      - "0.0.0.0:${port}:8000"
+      - "${bind}:${apiPort}:8000"
 
   livekit:
     ports:
-      - "0.0.0.0:7880:7880"
-    environment:
-      LIVEKIT_RTC_USE_EXTERNAL_IP: "false"
-      LIVEKIT_RTC_NODE_IP: "${address}"
-`;
+      - "${bind}:7880:7880"
+${livekitEnvironment}`;
+}
+
+/** The first line of every override this console writes. */
+export const OVERRIDE_MARK = "# Written by the Rift console";
+
+/** The name compose picks up without being told. */
+export const OVERRIDE_FILE = "docker-compose.override.yml";
+
+/** How [options] publishes, before any dashboard switch is thrown. */
+export function publishingFor(options: StackConfig): Publishing {
+  if (options.localTesting) {
+    return {
+      apiPort: options.localPort,
+      bind: "0.0.0.0",
+      lanAddress: options.localAddress,
+    };
+  }
+  if (options.ownProxy) {
+    return { apiPort: options.proxyPort, bind: "127.0.0.1", lanAddress: null };
+  }
+  return behindCaddy;
+}
+
+/**
+ * Write the override for [publishing] under [projectDir], or remove ours.
+ *
+ * Removal only ever takes a file this console wrote.
+ * `docker-compose.override.yml` is the documented way for an operator to
+ * change the stack without editing what they downloaded, so deleting one
+ * somebody else put there would silently undo their work.
+ */
+export async function writeOverride(
+  projectDir: string,
+  publishing: Publishing,
+): Promise<boolean> {
+  const path = join(projectDir, OVERRIDE_FILE);
+  const body = renderOverride(publishing);
+  if (body !== null) {
+    await Deno.writeTextFile(path, body);
+    return true;
+  }
+  const existing = await Deno.readTextFile(path).catch(() => null);
+  if (existing !== null && existing.startsWith(OVERRIDE_MARK)) {
+    await Deno.remove(path).catch(() => {});
+  }
+  return false;
 }

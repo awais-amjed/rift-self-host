@@ -136,13 +136,11 @@ export async function runSetup(
   await step("Starting containers", async () => {
     // The images are pulled here on a first run, which is most of the wait.
     //
-    // Caddy is left out of a local-testing stack. Its whole job is a
-    // certificate, and one cannot be issued for a LAN address; started anyway
-    // it would sit there failing ACME challenges against a name that does not
-    // resolve. The override published Kong directly instead.
-    const result = await startStack(["full"], {
-      exclude: request.localTesting ? ["caddy"] : [],
-    });
+    // Caddy is left out where it cannot or should not run — see
+    // [disabledServices], which reads that from the `.env` written above
+    // rather than taking it as an argument, so a later restart makes the same
+    // decision this one did.
+    const result = await startStack(["full"]);
     if (!result.ok) {
       throw new Error(result.stderr || "docker compose could not start the stack");
     }

@@ -40,6 +40,30 @@ export interface SetupOptions {
   /** Where Kong is published in local testing — 8000 is usually taken. */
   localPort: number;
 
+  /**
+   * The operator already runs a reverse proxy, so this stack should not start
+   * one of its own.
+   *
+   * Caddy here is a convenience, not a component: it holds a certificate and
+   * routes two upstreams. Somebody who already terminates TLS for other things
+   * on this machine has all of that, and starting a second proxy would mean
+   * two processes competing for 80 and 443. So the stack keeps the domain —
+   * every member's identity is derived from it, and TLS is still required —
+   * and publishes its two upstreams on the loopback for the proxy to reach.
+   */
+  ownProxy: boolean;
+
+  /**
+   * Where Kong is published for that proxy, on 127.0.0.1.
+   *
+   * Loopback rather than every interface, because a published signalling port
+   * on a public host is LiveKit and the API answering in the clear beside the
+   * TLS that was meant to front them. A proxy in a container reaches
+   * `kong:8000` on this stack's network instead and needs no published port at
+   * all.
+   */
+  proxyPort: number;
+
   domain: string;
   serverName: string;
   /** Blank means "generate one" — the common case. */
@@ -58,6 +82,8 @@ export const defaults: SetupOptions = {
   localTesting: false,
   localAddress: "",
   localPort: 18000,
+  ownProxy: false,
+  proxyPort: 8000,
   domain: "",
   serverName: "Rift",
   consolePassword: "",
@@ -92,10 +118,11 @@ export const fields: OptionField[] = [
     label: "Domain",
     kind: "text",
     advanced: false,
-    hint: "Must already point at this machine, with the HTTP and HTTPS ports " +
-      "below reachable. A certificate is fetched automatically. Rift will not " +
-      "work over plain HTTP: Android blocks it, so the server would be " +
-      "invisible to every phone.",
+    hint: "Must already point at this machine. Unless you bring your own " +
+      "reverse proxy below, the HTTP and HTTPS ports must be reachable and a " +
+      "certificate is fetched automatically. Rift will not work over plain " +
+      "HTTP: Android blocks it, so the server would be invisible to every " +
+      "phone.",
   },
   { key: "serverName", label: "Server name", kind: "text", advanced: false },
   {
@@ -122,6 +149,25 @@ export const fields: OptionField[] = [
     advanced: true,
     hint: "Where the API is published for local testing. 8000 is usually " +
       "already taken by something.",
+  },
+  {
+    key: "ownProxy",
+    label: "I have my own reverse proxy",
+    kind: "toggle",
+    advanced: false,
+    hint: "Skips the built-in Caddy, for a machine that already terminates " +
+      "TLS for something else. The stack publishes its two upstreams on " +
+      "127.0.0.1 instead, and the dashboard shows the routes to point at " +
+      "them. You still need the domain above — it is what your proxy serves, " +
+      "and what every member's identity is derived from.",
+  },
+  {
+    key: "proxyPort",
+    label: "API port for your proxy",
+    kind: "number",
+    advanced: false,
+    hint: "Where Kong is published on 127.0.0.1 for your proxy to reach. " +
+      "LiveKit's signalling goes to 127.0.0.1:7880 beside it.",
   },
   {
     key: "consolePassword",
@@ -197,6 +243,8 @@ export function optionsFromEnv(directory?: string): SetupOptions {
     localTesting: values.RIFT_LOCAL_TESTING === "true",
     localAddress: values.RIFT_LOCAL_ADDRESS ?? defaults.localAddress,
     localPort: port(values, "RIFT_LOCAL_PORT", defaults.localPort),
+    ownProxy: values.RIFT_OWN_PROXY === "true",
+    proxyPort: port(values, "RIFT_PROXY_PORT", defaults.proxyPort),
     consoleBind: values.CONSOLE_BIND ?? defaults.consoleBind,
     consolePort: port(values, "CONSOLE_PORT", defaults.consolePort),
     httpPort: port(values, "HTTP_PORT", defaults.httpPort),
@@ -217,6 +265,15 @@ export function problemsWith(options: SetupOptions): string[] {
   const problems: string[] = [];
 
   const domain = options.domain.trim();
+  // Two ways of not running Caddy, and they do not compose: a local-testing
+  // stack has no domain for a proxy to serve, and it publishes on the LAN
+  // rather than the loopback so that other machines can reach it at all.
+  if (options.localTesting && options.ownProxy) {
+    problems.push(
+      "Local testing already publishes the API directly, and has no domain " +
+        "for a reverse proxy to serve. Pick one.",
+    );
+  }
   if (options.localTesting) {
     // A LAN address instead of a name. Deliberately not validated as a
     // hostname: the point of this mode is the addresses a name cannot be
@@ -236,14 +293,26 @@ export function problemsWith(options: SetupOptions): string[] {
     problems.push("Enter the domain on its own, without a path.");
   }
 
+  // 80 and 443 belong to whoever is terminating TLS. With an operator's own
+  // proxy doing that, they are not this stack's to bind or to complain about.
   const ports: [string, number][] = [
-    ["HTTP", options.httpPort],
-    ["HTTPS", options.httpsPort],
+    ...(options.ownProxy ? [] : [
+      ["HTTP", options.httpPort] as [string, number],
+      ["HTTPS", options.httpsPort] as [string, number],
+    ]),
     ["Voice (UDP)", options.livekitUdpPort],
     ["Voice (TCP)", options.livekitTcpPort],
     ["Console", options.consolePort],
     ...(options.localTesting
       ? [["Local API", options.localPort] as [string, number]]
+      : []),
+    ...(options.ownProxy
+      ? [
+        ["Proxy API", options.proxyPort] as [string, number],
+        // Published beside it, and fixed: it is LiveKit's own port, and the
+        // routes the dashboard hands the operator name it.
+        ["LiveKit signalling", 7880] as [string, number],
+      ]
       : []),
   ];
   for (const [name, value] of ports) {

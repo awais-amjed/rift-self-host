@@ -156,6 +156,14 @@ why HTTPS on a name is the only supported way to run a server people use.
 
 Two consequences worth stating plainly:
 
+- **Bring your own proxy if you have one.** Setup has a *"I have my own
+  reverse proxy"* toggle for a machine that already terminates TLS for
+  something else. It skips Caddy, publishes Kong and LiveKit's signalling on
+  `127.0.0.1`, and the dashboard shows the two upstreams plus the stack's own
+  Caddyfile repointed at them. The domain is still required — it is what your
+  proxy serves, and what every member's identity derives from. Route
+  `/rtc /rtc/* /twirp/* /validate` to signalling and everything else to the
+  API, or messages will work and calls will not.
 - **Local testing is disposable.** The console offers it, and says on every page
   load that the stack cannot become a real server. Use it to try Rift. A real
   server has a switch of its own — *Local testing* on the dashboard — which
@@ -175,9 +183,11 @@ Two consequences worth stating plainly:
 ## Requirements
 
 - Docker with the Compose plugin
-- A domain name pointing at the machine, and ports 80/443 reachable.
-  **TLS is not optional**: Android blocks cleartext HTTP, so a server on plain
-  `http://` works from a desktop and is invisible to every phone.
+- A domain name pointing at the machine, and ports 80/443 reachable — unless
+  you bring your own reverse proxy, in which case it needs the domain and the
+  ports and this stack needs neither. **TLS is not optional either way**:
+  Android blocks cleartext HTTP, so a server on plain `http://` works from a
+  desktop and is invisible to every phone.
 - UDP 7882 and TCP 7881 open, for voice. Media goes straight to those ports and
   cannot be proxied — only LiveKit's signalling passes through Caddy.
 - Roughly 4 GB of RAM and 2 CPUs to be comfortable

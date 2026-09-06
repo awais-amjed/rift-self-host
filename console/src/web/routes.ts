@@ -25,6 +25,7 @@ import {
   turnOff,
   turnOn,
 } from "../local_testing.ts";
+import { proxyRoutes } from "../proxy.ts";
 import { restartService, servicesIn, serviceStatuses, startStack } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
 import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
@@ -67,6 +68,20 @@ export function isConfigured(): boolean {
  */
 function setupWasLocal(): boolean {
   return setting("RIFT_LOCAL_TESTING") === "true";
+}
+
+/**
+ * The routing to hand an operator who brought their own reverse proxy, or null
+ * on a stack running its own Caddy.
+ */
+function ownProxyRoutes(templateRoot: string) {
+  if (setting("RIFT_OWN_PROXY") !== "true") return Promise.resolve(null);
+  const port = Number(setting("RIFT_PROXY_PORT"));
+  return proxyRoutes(
+    templateRoot,
+    setting("RIFT_DOMAIN") ?? "",
+    Number.isInteger(port) && port > 0 ? port : 8000,
+  );
 }
 
 /** The LAN switch, as the dashboard draws it. */
@@ -200,10 +215,11 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/api/status") {
     const target = targetFromEnv();
-    const [services, checks, local] = await Promise.all([
+    const [services, checks, local, proxy] = await Promise.all([
       serviceStatuses(),
       runChecks(target, paths.migrationsDir).catch(() => []),
       readLocalTesting(target).catch(() => null),
+      ownProxyRoutes(paths.templateRoot).catch(() => null),
     ]);
     return json({
       services,
@@ -212,6 +228,9 @@ export async function handle(request: Request): Promise<Response> {
       // Absent on a stack that was set up for local testing: the switch would
       // be asking to move a LAN address onto a LAN address.
       local: setupWasLocal() ? null : describeLocal(local),
+      // Present only when this stack does not run Caddy because somebody else
+      // is terminating TLS for it. Nothing else needs the routing.
+      proxy,
     });
   }
 

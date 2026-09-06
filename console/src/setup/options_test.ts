@@ -143,3 +143,55 @@ Deno.test("the local API port cannot collide with the console", () => {
   });
   assert(problems.some((p) => p.includes("port")), problems.join("; "));
 });
+
+Deno.test("bringing your own proxy still needs the domain it will serve", () => {
+  const problems = problemsWith({ ...defaults, ownProxy: true, domain: "" });
+  assert(problems.some((p) => p.includes("domain is required")));
+  assertEquals(
+    problemsWith({ ...defaults, ownProxy: true, domain: "chat.example.com" }),
+    [],
+  );
+});
+
+Deno.test("80 and 443 stop being this stack's business without Caddy", () => {
+  // Whoever is terminating TLS has them. Complaining that the console shares a
+  // port with an HTTP listener this stack will not start is a refusal with
+  // nothing behind it.
+  assertEquals(
+    problemsWith({
+      ...defaults,
+      domain: "chat.example.com",
+      ownProxy: true,
+      consolePort: 443,
+    }),
+    [],
+  );
+  // With Caddy, the same pair really would fight.
+  assert(
+    problemsWith({ ...defaults, domain: "chat.example.com", consolePort: 443 })
+      .some((p) => p.includes("443")),
+  );
+});
+
+Deno.test("the proxy's port cannot be one this stack already holds", () => {
+  const clash = problemsWith({
+    ...defaults,
+    domain: "chat.example.com",
+    ownProxy: true,
+    proxyPort: 7880,
+  });
+  // 7880 is published beside it for LiveKit's signalling, so this is a
+  // container that will not start — reported here rather than by Docker a
+  // minute later.
+  assert(clash.some((p) => p.includes("7880")));
+});
+
+Deno.test("local testing and your own proxy are not a combination", () => {
+  const problems = problemsWith({
+    ...defaults,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+    ownProxy: true,
+  });
+  assert(problems.some((p) => p.includes("Pick one")));
+});

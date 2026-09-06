@@ -39,8 +39,7 @@ import {
 import { clearState, readState, writeState } from "./state.ts";
 import { projectDir, restartService } from "./docker.ts";
 import { setting } from "./env_file.ts";
-import { renderLocalOverride } from "./setup/config_files.ts";
-import { join } from "jsr:@std/path@1";
+import { behindCaddy, type Publishing, writeOverride } from "./setup/config_files.ts";
 
 /** Where the state row lives. */
 export const LOCAL_TESTING = "local_testing";
@@ -208,38 +207,6 @@ async function restoreLivekitUrls(
   if (!result.ok) throw new Error(`Could not restore the voice URL: ${result.error}`);
 }
 
-const OVERRIDE_FILE = "docker-compose.override.yml";
-
-/** The first line of every override this console writes. */
-const OVERRIDE_MARK = "# Written by the Rift console";
-
-async function writeOverride(local: LocalTesting): Promise<void> {
-  await Deno.writeTextFile(
-    join(projectDir(), OVERRIDE_FILE),
-    renderLocalOverride(local.address, local.port),
-  );
-}
-
-/**
- * Remove the override, unless somebody else wrote it.
- *
- * `docker-compose.override.yml` is a file operators are invited to use — it is
- * the documented way to change the stack without editing what they downloaded.
- * Deleting one this console did not write would silently undo their work, so
- * the marker line is checked first.
- */
-async function removeOverride(): Promise<void> {
-  const path = join(projectDir(), OVERRIDE_FILE);
-  let existing: string;
-  try {
-    existing = await Deno.readTextFile(path);
-  } catch {
-    return;
-  }
-  if (!existing.startsWith(OVERRIDE_MARK)) return;
-  await Deno.remove(path).catch(() => {});
-}
-
 /**
  * The one line of a compose failure worth showing.
  *
@@ -254,6 +221,32 @@ export function composeProblem(stderr: string): string {
   const reason = lines.find((line) => /^Error( response from daemon)?:/i.test(line));
   return (reason ?? lines[lines.length - 1] ?? "docker compose failed")
     .replace(/^Error response from daemon:\s*/i, "");
+}
+
+/**
+ * What this stack publishes when the switch is *not* on.
+ *
+ * Not always "nothing". A stack whose operator brought their own reverse proxy
+ * publishes Kong on the loopback for it, permanently — so switching back has to
+ * restore that rather than delete the file, which is what a renderer for the
+ * switch alone would have done.
+ */
+function restingPublishing(): Publishing {
+  if (setting("RIFT_OWN_PROXY") !== "true") return behindCaddy;
+  return {
+    apiPort: envPort("RIFT_PROXY_PORT", DEFAULT_API_PORT),
+    bind: "127.0.0.1",
+    lanAddress: null,
+  };
+}
+
+/** What it publishes while the switch is on: the LAN, for other machines. */
+function localPublishing(local: LocalTesting): Publishing {
+  return {
+    apiPort: local.port,
+    bind: "0.0.0.0",
+    lanAddress: local.address,
+  };
 }
 
 /** Kong publishes the API; LiveKit publishes signalling. Both change here. */
@@ -292,11 +285,11 @@ export async function turnOn(
   // a port is the one step here that can fail — something else may hold it —
   // and doing it first means a failure leaves the server exactly as it was
   // rather than pointed at an address that never came up.
-  await writeOverride(local);
+  await writeOverride(projectDir(), localPublishing(local));
   try {
     await recreate();
   } catch (error) {
-    await removeOverride();
+    await writeOverride(projectDir(), restingPublishing());
     // Best effort: if this fails too the override is already gone, so
     // "Restart the stack" puts everything back.
     await recreate().catch(() => {});
@@ -325,7 +318,7 @@ export async function turnOff(
   const local = await readLocalTesting(target);
   if (local !== null) await restoreLivekitUrls(target, local.restore, fallback);
   await clearState(target, LOCAL_TESTING);
-  await removeOverride();
+  await writeOverride(projectDir(), restingPublishing());
   // Last, because everything above has already made this a normal server. If
   // the containers sulk, "Restart the stack" is the whole of the repair.
   await recreate();

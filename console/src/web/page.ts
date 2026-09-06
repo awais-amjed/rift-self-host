@@ -77,6 +77,12 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
 .secret .mono { flex: 1; background: var(--inset); border: 1px solid var(--line);
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }
 .secret .mono.masked { color: var(--faint); letter-spacing: 0.18em; user-select: none; }
+.block {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
+  line-height: 1.5; background: var(--inset); border: 1px solid var(--line);
+  border-radius: 8px; padding: 12px 14px; margin: 0; color: var(--dim);
+  white-space: pre; overflow-x: auto; max-height: 320px; overflow-y: auto;
+}
 .secret button { padding: 8px 12px; font-size: 13px; font-weight: 500; }
 details { margin: 4px 0 20px; }
 summary { cursor: pointer; color: var(--dim); font-size: 14px; padding: 6px 0; }
@@ -355,6 +361,24 @@ ${banner}
   </div>
 </div>
 
+<div id="proxySection" style="display:none">
+<h2>Your reverse proxy</h2>
+<div class="panel">
+  <p>This stack does not run Caddy, so nothing is listening on 80 or 443 for
+    it. Point your proxy at the two upstreams below — <strong>both</strong>, or
+    messages will work and calls will not.</p>
+  <div id="proxyUpstreams"></div>
+  <p class="hint">If your proxy runs in a container, attach it to this stack's
+    compose network and use <code>kong:8000</code> and
+    <code>livekit:7880</code> instead; nothing then needs to be published at
+    all.</p>
+  <h2 style="margin-top:24px">If your proxy is Caddy</h2>
+  <p>This is the stack's own Caddyfile, repointed at those upstreams.</p>
+  <pre class="block" id="proxyCaddyfile"></pre>
+  <button class="quiet" id="copyCaddyfile" style="margin-top:10px">Copy</button>
+</div>
+</div>
+
 <div id="localSection" style="display:none">
 <h2>Local testing</h2>
 <div class="panel">
@@ -411,6 +435,7 @@ async function load() {
   await loadVersion();
   await loadServers();
   renderLocal(state.local);
+  renderProxy(state.proxy);
 
   document.getElementById("secrets").innerHTML = state.secrets.map((entry, i) => {
     const shown = !entry.secret || revealed.has(entry.name);
@@ -559,6 +584,36 @@ document.getElementById("createServer").addEventListener("click", async (event) 
     error.textContent = body.error || "Could not create the server.";
     error.style.display = "block";
   }
+});
+
+/// Shown only where this stack has no Caddy of its own. Without the routing an
+/// operator gets messages working and calls silently failing, because
+/// signalling is four paths on the same host and nothing says so anywhere else.
+function renderProxy(proxy) {
+  const section = document.getElementById("proxySection");
+  if (!proxy) { section.style.display = "none"; return; }
+  section.style.display = "block";
+
+  const rows = [
+    ["Signalling", proxy.signallingUpstream, proxy.signallingPaths.join("  ")],
+    ["Everything else", proxy.apiUpstream, "all other paths"],
+  ];
+  document.getElementById("proxyUpstreams").innerHTML =
+    '<table>' + rows.map(([name, upstream, paths]) =>
+      '<tr><td class="name">' + name + '</td><td><span class="mono">' +
+      escapeHtml(upstream) + '</span><div class="hint">' + escapeHtml(paths) +
+      '</div></td></tr>'
+    ).join("") + '</table>';
+
+  document.getElementById("proxyCaddyfile").textContent = proxy.caddyfile;
+}
+
+document.getElementById("copyCaddyfile").addEventListener("click", async (event) => {
+  await navigator.clipboard.writeText(
+    document.getElementById("proxyCaddyfile").textContent,
+  );
+  event.target.textContent = "Copied";
+  setTimeout(() => (event.target.textContent = "Copy"), 1500);
 });
 
 /// Drawn from /api/status on every refresh, so a switch thrown from another

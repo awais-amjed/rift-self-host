@@ -4,7 +4,14 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@1";
-import { placeholders, render, renderEnv, renderLocalOverride } from "./config_files.ts";
+import {
+  behindCaddy,
+  placeholders,
+  publishingFor,
+  render,
+  renderEnv,
+  renderOverride,
+} from "./config_files.ts";
 import { defaults } from "./options.ts";
 import { generateSecrets } from "./secrets.ts";
 
@@ -202,11 +209,45 @@ Deno.test("a local stack is addressed over http, a real one over https", async (
 });
 
 Deno.test("the local override publishes what Caddy would have fronted", () => {
-  const yaml = renderLocalOverride("192.168.1.6", 18000);
+  const yaml = renderOverride(
+    publishingFor({ ...defaults, localTesting: true, localAddress: "192.168.1.6" }),
+  )!;
   assertStringIncludes(yaml, '"0.0.0.0:18000:8000"');
   assertStringIncludes(yaml, '"0.0.0.0:7880:7880"');
   // Behind a router, STUN answers with the router's address and the call
   // connects with no sound. This is the line that prevents it.
   assertStringIncludes(yaml, 'LIVEKIT_RTC_NODE_IP: "192.168.1.6"');
   assertStringIncludes(yaml, 'LIVEKIT_RTC_USE_EXTERNAL_IP: "false"');
+});
+
+Deno.test("a stack behind Caddy publishes nothing extra", () => {
+  assertEquals(renderOverride(behindCaddy), null);
+  assertEquals(renderOverride(publishingFor({ ...defaults, domain: "a.example" })), null);
+});
+
+Deno.test("an operator's own proxy gets the upstreams on the loopback", () => {
+  const yaml = renderOverride(
+    publishingFor({ ...defaults, domain: "a.example", ownProxy: true, proxyPort: 8000 }),
+  )!;
+  // Loopback, not every interface: a signalling port on a public host is
+  // LiveKit answering in the clear beside the TLS meant to front it.
+  assertStringIncludes(yaml, '"127.0.0.1:8000:8000"');
+  assertStringIncludes(yaml, '"127.0.0.1:7880:7880"');
+  // A VPS behind no router: STUN gives the right answer, so nothing overrides
+  // it. Pinning the node IP here would break media on the one host that has a
+  // real external address.
+  assertEquals(yaml.includes("LIVEKIT_RTC_NODE_IP"), false);
+});
+
+Deno.test("an own-proxy stack still records its domain and its port", async () => {
+  const env = renderEnv({
+    ...(await context()),
+    ownProxy: true,
+    proxyPort: 8001,
+  });
+  // The domain is not Caddy's to own — it is what the proxy serves, what the
+  // invite link names, and what every member's identity derives from.
+  assertStringIncludes(env, "API_EXTERNAL_URL=https://chat.example.com");
+  assertStringIncludes(env, "RIFT_OWN_PROXY=true");
+  assertStringIncludes(env, "RIFT_PROXY_PORT=8001");
 });

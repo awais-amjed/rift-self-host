@@ -12,6 +12,7 @@
  * docker-compose.yml for why that path has to match.
  */
 import { run } from "./subprocess.ts";
+import { setting } from "./env_file.ts";
 
 /** One service, as compose sees it. */
 export interface ServiceStatus {
@@ -76,6 +77,25 @@ export async function serviceStatuses(): Promise<ServiceStatus[]> {
 /** The service the console runs as, which it must never bring up. */
 const SELF = "console";
 
+/**
+ * Services this stack has been configured not to run.
+ *
+ * Read from `.env` rather than passed in, because the answer is a property of
+ * the stack and every caller needs it. It used to be an argument that setup
+ * passed and the dashboard's "Restart the stack" did not — so a local-testing
+ * stack came back from a restart with Caddy running, failing ACME challenges
+ * against a name that does not resolve.
+ *
+ * Caddy is the only one so far. It is left out when a certificate cannot be
+ * issued (a LAN address) or is not wanted (the operator's own proxy already
+ * terminates TLS on this machine).
+ */
+export function disabledServices(): string[] {
+  const noCaddy = setting("RIFT_LOCAL_TESTING") === "true" ||
+    setting("RIFT_OWN_PROXY") === "true";
+  return noCaddy ? ["caddy"] : [];
+}
+
 /** Every service in [profiles], as the compose file defines them. */
 export async function servicesIn(profiles: string[]): Promise<string[]> {
   const flags = profiles.flatMap((profile) => ["--profile", profile]);
@@ -90,9 +110,8 @@ export async function servicesIn(profiles: string[]): Promise<string[]> {
  * Bring up every service in [profiles] except this one, waiting for
  * healthchecks to pass.
  *
- * [options.exclude] leaves out a service the stack does not want this time —
- * Caddy on a local-testing stack, which exists only to hold a certificate that
- * cannot be issued for a LAN address.
+ * Anything in [disabledServices] is left out, and [options.exclude] adds to
+ * that for a caller with a reason of its own.
  *
  * Excluding the console is not tidiness. A plain `up` covers every service in
  * the project, and the console *is* one of them — so it recreates the container it
@@ -107,7 +126,7 @@ export async function startStack(
   profiles: string[] = ["full"],
   options: { exclude?: string[] } = {},
 ): Promise<CommandResult> {
-  const skip = new Set([SELF, ...(options.exclude ?? [])]);
+  const skip = new Set([SELF, ...disabledServices(), ...(options.exclude ?? [])]);
   const services = (await servicesIn(profiles)).filter((s) => !skip.has(s));
   if (services.length === 0) {
     return {
@@ -123,8 +142,21 @@ export async function startStack(
   return compose([...flags, "up", "-d", "--wait", ...services]);
 }
 
-/** Recreate one service, picking up any config file that changed under it. */
+/**
+ * Recreate one service, picking up any config file that changed under it.
+ *
+ * Refuses a service this stack does not run: `up -d` on one would *start* it,
+ * which for Caddy means a second process reaching for 80 and 443 on a machine
+ * whose operator is already using them.
+ */
 export function restartService(service: string): Promise<CommandResult> {
+  if (disabledServices().includes(service)) {
+    return Promise.resolve({
+      ok: false,
+      stdout: "",
+      stderr: `This stack does not run ${service}.`,
+    });
+  }
   // `up -d --force-recreate`, not `restart`: a restarted container keeps the
   // environment it was created with, so a changed .env would not reach it.
   // This is the difference that makes a raised Realtime limit stick.
