@@ -30,7 +30,8 @@ REVOKE ALL ON ${SCHEMA}.state FROM PUBLIC, anon, authenticated;
 
 COMMENT ON TABLE ${SCHEMA}.state IS
   'Small facts the Rift console keeps about this stack — the release last '
-  'applied, and when. Managed by the console; do not edit by hand.';
+  'applied, and whether voice is currently pointed at a LAN address. Managed '
+  'by the console; do not edit by hand.';
 `;
 
 /** The release that last finished applying itself here. */
@@ -70,6 +71,26 @@ export async function writeState(
     { singleTransaction: true },
   );
   if (!result.ok) throw new Error(`Could not record console state: ${result.error}`);
+}
+
+/**
+ * Forget one value.
+ *
+ * Not the same as writing an empty string: a caller asks "has this ever been
+ * set", and a fact that is over is one that was never set rather than one set
+ * to nothing.
+ */
+export async function clearState(
+  target: PostgresTarget,
+  key: string,
+): Promise<void> {
+  await ensureState(target);
+  const result = await runSql(
+    target,
+    `DELETE FROM ${SCHEMA}.state WHERE key = ${literal(key)};`,
+    { singleTransaction: true },
+  );
+  if (!result.ok) throw new Error(`Could not clear console state: ${result.error}`);
 }
 
 /**

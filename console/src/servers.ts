@@ -13,6 +13,7 @@
  */
 import { FIELD_SEPARATOR, literal, type PostgresTarget, queryRows } from "./postgres.ts";
 import { setting } from "./env_file.ts";
+import { localPublicUrl, type LocalTesting, SIGNALLING_PORT } from "./local_testing.ts";
 import { livekitUrlFor, provisionServer } from "./setup/provision.ts";
 
 /** A server as the dashboard lists one. */
@@ -73,6 +74,27 @@ export async function listInvites(target: PostgresTarget): Promise<ServerInvite[
 }
 
 /**
+ * The address this stack is handing out right now.
+ *
+ * Three of the things below — the invite link, the voice URL, and what a new
+ * server is told its voice URL is — are the same question asked three times,
+ * so they ask it here. [local] is the dashboard's LAN switch: while it is on,
+ * the answer is the LAN address rather than the domain.
+ */
+export function publicUrl(local: LocalTesting | null = null): string {
+  if (local) return localPublicUrl(local);
+  const domain = setting("RIFT_DOMAIN");
+  return setting("API_EXTERNAL_URL") ?? (domain ? `https://${domain}` : "");
+}
+
+/** LiveKit's port, when it is published rather than proxied. */
+function signallingPort(local: LocalTesting | null): number | undefined {
+  if (local) return SIGNALLING_PORT;
+  // A stack set up for local testing has always been in this arrangement.
+  return setting("RIFT_LOCAL_TESTING") === "true" ? SIGNALLING_PORT : undefined;
+}
+
+/**
  * Create a server, using the credentials this stack already holds.
  *
  * The operator supplies a name. Everything `create_server` actually checks —
@@ -80,18 +102,20 @@ export async function listInvites(target: PostgresTarget): Promise<ServerInvite[
  * domain, and LiveKit's key and secret — is read from the environment the
  * console was set up with.
  */
-export async function createServer(name: string): Promise<{
+export async function createServer(
+  name: string,
+  local: LocalTesting | null = null,
+): Promise<{
   serverId: string;
   name: string;
   inviteLink: string;
 }> {
-  const domain = setting("RIFT_DOMAIN");
-  const publicUrl = setting("API_EXTERNAL_URL") ?? (domain ? `https://${domain}` : null);
+  const url = publicUrl(local);
   const serviceKey = setting("SUPABASE_SECRET_KEY") ?? setting("SERVICE_ROLE_KEY");
   const livekitApiKey = setting("LIVEKIT_API_KEY");
   const livekitApiSecret = setting("LIVEKIT_API_SECRET");
 
-  if (!publicUrl || !serviceKey || !livekitApiKey || !livekitApiSecret) {
+  if (!url || !serviceKey || !livekitApiKey || !livekitApiSecret) {
     throw new Error(
       "This stack has not finished setup, so the credentials a server needs " +
         "are not all here yet.",
@@ -102,10 +126,10 @@ export async function createServer(name: string): Promise<{
   if (trimmed.length === 0) throw new Error("A server needs a name.");
 
   return await provisionServer({
-    publicUrl,
-    // Same arrangement setup chose. A local stack publishes LiveKit directly;
-    // a real one shares the domain through the proxy.
-    livekitSignallingPort: setting("RIFT_LOCAL_TESTING") === "true" ? 7880 : undefined,
+    publicUrl: url,
+    // Whatever arrangement is in force. LiveKit is published directly when
+    // nothing is proxying it; a real server shares the domain through Caddy.
+    livekitSignallingPort: signallingPort(local),
     // Container-to-container, so creating a server does not wait on DNS or on
     // a certificate that may not have been issued.
     internalUrl: "http://kong:8000",
@@ -154,18 +178,11 @@ export async function mintInvite(
 }
 
 /** The link an operator pastes into the app. */
-export function inviteLinkFor(code: string): string {
-  const publicUrl = setting("API_EXTERNAL_URL") ??
-    `https://${setting("RIFT_DOMAIN") ?? ""}`;
-  return `${publicUrl.replace(/\/$/, "")}#${code}`;
+export function inviteLinkFor(code: string, local: LocalTesting | null = null): string {
+  return `${publicUrl(local).replace(/\/$/, "")}#${code}`;
 }
 
 /** The voice URL this stack hands out, for the dashboard to show. */
-export function livekitUrl(): string {
-  const publicUrl = setting("API_EXTERNAL_URL") ??
-    `https://${setting("RIFT_DOMAIN") ?? ""}`;
-  return livekitUrlFor(
-    publicUrl,
-    setting("RIFT_LOCAL_TESTING") === "true" ? 7880 : undefined,
-  );
+export function livekitUrl(local: LocalTesting | null = null): string {
+  return livekitUrlFor(publicUrl(local), signallingPort(local));
 }

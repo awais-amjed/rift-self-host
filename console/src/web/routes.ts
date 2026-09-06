@@ -1,7 +1,7 @@
 /**
  * What the console answers.
  *
- * Nine routes. Everything but `/login` needs a session, and the check is at
+ * Ten routes. Everything but `/login` needs a session, and the check is at
  * the top of [handle] rather than per-route so a route added later cannot
  * forget it.
  */
@@ -14,8 +14,17 @@ import {
   inviteLinkFor,
   listInvites,
   listServers,
+  livekitUrl,
   mintInvite,
+  publicUrl,
 } from "../servers.ts";
+import {
+  DEFAULT_API_PORT,
+  type LocalTesting,
+  readLocalTesting,
+  turnOff,
+  turnOn,
+} from "../local_testing.ts";
 import { restartService, servicesIn, serviceStatuses, startStack } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
 import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
@@ -45,6 +54,33 @@ import { dashboardPage, exposedPage, loginPage, setupPage } from "./page.ts";
  */
 export function isConfigured(): boolean {
   return setting("JWT_SECRET") !== undefined;
+}
+
+/**
+ * Whether this stack was *set up* for local testing, as opposed to switched
+ * onto the LAN afterwards.
+ *
+ * The two look alike from the outside and are not the same thing. A stack set
+ * up this way has no domain and no certificate and never will; a real one with
+ * the switch thrown is still a real server, and everything goes back when the
+ * switch does.
+ */
+function setupWasLocal(): boolean {
+  return setting("RIFT_LOCAL_TESTING") === "true";
+}
+
+/** The LAN switch, as the dashboard draws it. */
+function describeLocal(local: LocalTesting | null) {
+  return {
+    on: local !== null,
+    address: local?.address ?? "",
+    port: local?.port ?? DEFAULT_API_PORT,
+    serverUrl: publicUrl(local),
+    livekitUrl: livekitUrl(local),
+    // Where switching back goes. Named on the button, so pressing it is not a
+    // guess about what "back" means.
+    home: publicUrl(null),
+  };
 }
 
 /**
@@ -137,14 +173,13 @@ export async function handle(request: Request): Promise<Response> {
   }
 
   if (path === "/") {
-    return isConfigured()
-      ? html(dashboardPage(
-        setting("RIFT_LOCAL_TESTING") === "true"
-          ? `${setting("RIFT_LOCAL_ADDRESS") ?? ""}:${setting("RIFT_LOCAL_PORT") ?? ""}`
-          : setting("RIFT_DOMAIN") ?? "Your server",
-        setting("RIFT_LOCAL_TESTING") === "true",
-      ))
-      : html(setupPage(fields, optionsFromEnv(paths.projectDir)));
+    if (!isConfigured()) return html(setupPage(fields, optionsFromEnv(paths.projectDir)));
+    return html(dashboardPage(
+      setupWasLocal()
+        ? `${setting("RIFT_LOCAL_ADDRESS") ?? ""}:${setting("RIFT_LOCAL_PORT") ?? ""}`
+        : setting("RIFT_DOMAIN") ?? "Your server",
+      setupWasLocal(),
+    ));
   }
 
   if (path === "/api/setup" && request.method === "POST") {
@@ -165,18 +200,53 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/api/status") {
     const target = targetFromEnv();
-    const [services, checks] = await Promise.all([
+    const [services, checks, local] = await Promise.all([
       serviceStatuses(),
       runChecks(target, paths.migrationsDir).catch(() => []),
+      readLocalTesting(target).catch(() => null),
     ]);
-    return json({ services, checks, secrets: visibleSecrets() });
+    return json({
+      services,
+      checks,
+      secrets: visibleSecrets(),
+      // Absent on a stack that was set up for local testing: the switch would
+      // be asking to move a LAN address onto a LAN address.
+      local: setupWasLocal() ? null : describeLocal(local),
+    });
+  }
+
+  if (path === "/api/local-testing" && request.method === "POST") {
+    if (setupWasLocal()) {
+      return json({
+        error: "This stack was set up for local testing, so it is already on " +
+          "your network.",
+      }, 409);
+    }
+    const { on, address, port } = await request.json();
+    try {
+      if (on) {
+        const local = await turnOn(
+          targetFromEnv(),
+          String(address ?? ""),
+          Number(port ?? DEFAULT_API_PORT),
+        );
+        return json(describeLocal(local));
+      }
+      // The URL a server would have been given had the switch never been
+      // thrown — where anything created while it was on ends up.
+      await turnOff(targetFromEnv(), livekitUrl());
+      return json(describeLocal(null));
+    } catch (error) {
+      return failure("local-testing", error);
+    }
   }
 
   if (path === "/api/servers") {
     const target = targetFromEnv();
-    const [servers, invites] = await Promise.all([
+    const [servers, invites, local] = await Promise.all([
       listServers(target).catch(() => []),
       listInvites(target).catch(() => []),
+      readLocalTesting(target).catch(() => null),
     ]);
     return json({
       servers,
@@ -184,7 +254,9 @@ export async function handle(request: Request): Promise<Response> {
       // outstanding code would be a list of ways into the server, on a page.
       invites: servers.map((server) => {
         const invite = invites.find((i) => i.serverId === server.id);
-        return invite ? { serverId: server.id, link: inviteLinkFor(invite.code) } : null;
+        return invite
+          ? { serverId: server.id, link: inviteLinkFor(invite.code, local) }
+          : null;
       }).filter((entry) => entry !== null),
     });
   }
@@ -192,7 +264,10 @@ export async function handle(request: Request): Promise<Response> {
   if (path === "/api/servers/create" && request.method === "POST") {
     const { name } = await request.json();
     try {
-      const created = await createServer(String(name ?? ""));
+      const created = await createServer(
+        String(name ?? ""),
+        await readLocalTesting(targetFromEnv()).catch(() => null),
+      );
       return json(created);
     } catch (error) {
       return failure("servers/create", error);
@@ -201,13 +276,15 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/api/servers/invite" && request.method === "POST") {
     const { serverId, maxUses } = await request.json();
+    const target = targetFromEnv();
     try {
       const code = await mintInvite(
-        targetFromEnv(),
+        target,
         String(serverId),
         Number(maxUses ?? 1),
       );
-      return json({ link: inviteLinkFor(code) });
+      const local = await readLocalTesting(target).catch(() => null);
+      return json({ link: inviteLinkFor(code, local) });
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
@@ -265,10 +342,14 @@ interface VisibleSecret {
 }
 
 function visibleSecrets(): VisibleSecret[] {
-  const domain = setting("RIFT_DOMAIN") ?? "";
   const entries: (VisibleSecret | null)[] = [
-    { name: "Server URL", value: `https://${domain}`, secret: false },
-    { name: "LiveKit URL", value: `wss://${domain}`, secret: false },
+    // The stack's own addresses, which the LAN switch deliberately does not
+    // change: this panel is what the server *is*, and the local-testing panel
+    // owns where it is temporarily pointed. Derived rather than written out as
+    // `https://<domain>`, so a stack set up for local testing does not claim a
+    // scheme and a name it has never had.
+    { name: "Server URL", value: publicUrl(), secret: false },
+    { name: "LiveKit URL", value: livekitUrl(), secret: false },
     // The publishable key, because that is what the server actually issues to
     // clients. Showing the legacy JWT beside it would invite somebody to paste
     // the one nothing hands out any more.

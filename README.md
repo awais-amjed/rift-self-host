@@ -157,7 +157,15 @@ why HTTPS on a name is the only supported way to run a server people use.
 Two consequences worth stating plainly:
 
 - **Local testing is disposable.** The console offers it, and says on every page
-  load that the stack cannot become a real server. Use it to try Rift.
+  load that the stack cannot become a real server. Use it to try Rift. A real
+  server has a switch of its own — *Local testing* on the dashboard — which
+  publishes the API and LiveKit on a LAN address and points every server's
+  `livekit_url` there until it is switched back. That column is the only
+  address a client takes from the server, so voice is the only thing that
+  moves; the domain keeps answering throughout, and members who joined through
+  it keep working. Anybody who joins through the local link does not: their
+  identity is derived from the LAN address, and they are stranded when it goes
+  back.
 - **No name, no server.** If a domain is impractical — CGNAT, a home
   connection — Tailscale issues real certificates for `*.ts.net`, which is a
   name and a certificate without a registrar. An air-gapped LAN with neither is

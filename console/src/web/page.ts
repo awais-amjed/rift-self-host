@@ -355,6 +355,30 @@ ${banner}
   </div>
 </div>
 
+<div id="localSection" style="display:none">
+<h2>Local testing</h2>
+<div class="panel">
+  <p id="localSummary"></p>
+  <div class="field" id="localFields">
+    <label for="localAddress">This machine's address on your network</label>
+    <div class="secret">
+      <input id="localAddress" placeholder="192.168.1.6" style="flex:1">
+      <input id="localPort" type="number" style="width:120px" aria-label="API port">
+    </div>
+    <p class="hint">The API is published on that port <em>beside</em> the
+      proxy, not instead of it — the domain keeps working throughout.</p>
+  </div>
+  <div id="localAddresses" style="display:none"></div>
+  <button id="localToggle">Switch voice to this network</button>
+  <p class="warn"><span>While this is on, voice points at your network for
+    <strong>everybody</strong>: a member connecting from anywhere else can still
+    read and send messages, but cannot join a call. And do not invite anyone
+    with the local link — a member's identity is derived from the address they
+    joined at, so they would be stranded the moment you switch it back.</span></p>
+  <p class="error" id="localError" style="display:none"></p>
+</div>
+</div>
+
 <h2>Credentials</h2>
 <div class="panel" id="secrets"></div>
 
@@ -387,6 +411,7 @@ async function load() {
 
   await loadVersion();
   await loadServers();
+  renderLocal(state.local);
 
   document.getElementById("secrets").innerHTML = state.secrets.map((entry, i) => {
     const shown = !entry.secret || revealed.has(entry.name);
@@ -535,6 +560,86 @@ document.getElementById("createServer").addEventListener("click", async (event) 
     error.textContent = body.error || "Could not create the server.";
     error.style.display = "block";
   }
+});
+
+/// Drawn from /api/status on every refresh, so a switch thrown from another
+/// tab shows up here rather than leaving two dashboards disagreeing.
+function renderLocal(local) {
+  const section = document.getElementById("localSection");
+  if (!local) { section.style.display = "none"; return; }
+  section.style.display = "block";
+
+  const address = document.getElementById("localAddress");
+  const port = document.getElementById("localPort");
+  const addresses = document.getElementById("localAddresses");
+  const button = document.getElementById("localToggle");
+
+  document.getElementById("localSummary").textContent = local.on
+    ? "Voice is pointed at your network. Everything else is unchanged — the " +
+      "domain still answers, and members who joined through it keep working."
+    : "Point voice at this machine's own address for a while, so a client on " +
+      "your network can join a call without going out to the internet and back.";
+
+  // Left alone while it is being typed into, because this runs every ten
+  // seconds and overwriting a half-typed address is maddening.
+  if (document.activeElement !== address && (local.on || !address.value)) {
+    address.value = local.address;
+  }
+  if (document.activeElement !== port && (local.on || !port.value)) {
+    port.value = local.port;
+  }
+  address.disabled = port.disabled = local.on;
+
+  addresses.style.display = local.on ? "block" : "none";
+  addresses.innerHTML = local.on
+    ? [["Server URL", local.serverUrl], ["LiveKit URL", local.livekitUrl]]
+      .map(([name, value]) =>
+        '<div class="field"><label>' + name + '</label>' +
+        '<div class="secret"><div class="mono">' + escapeHtml(value) + '</div>' +
+        '<button class="quiet" data-copy-local="' + escapeHtml(value) + '">Copy</button>' +
+        '</div></div>'
+      ).join("")
+    : "";
+
+  button.dataset.on = local.on ? "1" : "";
+  button.textContent = local.on
+    ? "Switch back to " + local.home.replace(/^\w+:\/\//, "")
+    : "Switch voice to this network";
+
+  for (const copy of document.querySelectorAll("[data-copy-local]")) {
+    copy.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(copy.dataset.copyLocal);
+      copy.textContent = "Copied";
+      setTimeout(() => (copy.textContent = "Copy"), 1500);
+    });
+  }
+}
+
+document.getElementById("localToggle").addEventListener("click", async (event) => {
+  const button = event.target;
+  const error = document.getElementById("localError");
+  const on = !button.dataset.on;
+  error.style.display = "none";
+  button.disabled = true;
+  button.textContent = "Recreating containers…";
+
+  const res = await fetch("/api/local-testing", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      on,
+      address: document.getElementById("localAddress").value.trim(),
+      port: Number(document.getElementById("localPort").value),
+    }),
+  });
+  const body = await res.json();
+
+  button.disabled = false;
+  if (body.error) {
+    error.textContent = body.error;
+    error.style.display = "block";
+  }
+  load();
 });
 
 document.getElementById("restart").addEventListener("click", async (event) => {

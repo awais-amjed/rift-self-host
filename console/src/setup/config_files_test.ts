@@ -202,12 +202,7 @@ Deno.test("a local stack is addressed over http, a real one over https", async (
 });
 
 Deno.test("the local override publishes what Caddy would have fronted", () => {
-  const yaml = renderLocalOverride({
-    ...defaults,
-    localTesting: true,
-    localAddress: "192.168.1.6",
-    localPort: 18000,
-  });
+  const yaml = renderLocalOverride("192.168.1.6", 18000);
   assertStringIncludes(yaml, '"0.0.0.0:18000:8000"');
   assertStringIncludes(yaml, '"0.0.0.0:7880:7880"');
   // Behind a router, STUN answers with the router's address and the call

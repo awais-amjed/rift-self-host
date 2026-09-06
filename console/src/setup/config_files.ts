@@ -204,7 +204,10 @@ export async function writeConfigFiles(
   // the whole arrangement.
   const overridePath = join(projectDir, "docker-compose.override.yml");
   if (context.localTesting) {
-    await Deno.writeTextFile(overridePath, renderLocalOverride(context));
+    await Deno.writeTextFile(
+      overridePath,
+      renderLocalOverride(context.localAddress, context.localPort),
+    );
     written.push("docker-compose.override.yml");
   } else {
     // A stack set up for real must not inherit a previous run's override — it
@@ -234,8 +237,7 @@ export async function writeConfigFiles(
  * clients on the same network send audio out to the internet expecting it back,
  * and the call connects with no sound.
  */
-export function renderLocalOverride(context: StackConfig): string {
-  const address = context.localAddress.trim();
+export function renderLocalOverride(address: string, port: number): string {
   return `# Written by the Rift console for a local-testing stack. Delete it and the
 # stack stops being reachable over plain HTTP.
 #
@@ -245,7 +247,7 @@ export function renderLocalOverride(context: StackConfig): string {
 services:
   kong:
     ports:
-      - "0.0.0.0:${context.localPort}:8000"
+      - "0.0.0.0:${port}:8000"
 
   livekit:
     ports:
