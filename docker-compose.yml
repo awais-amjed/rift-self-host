@@ -381,10 +381,10 @@ services:
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-}@db:5432/postgres
 
       # Must stay off. The functions verify JWTs themselves, locally against
-      # the JWKS, and three of them (login, resolve_invite, is_username_available)
-      # run *before* the caller has any token at all — that is the bootstrap
-      # window in which somebody joins a server. `webhook` has no caller
-      # identity by definition. A runtime-level gate would refuse all of them.
+      # the JWKS, and two of them (login and resolve_invite) run *before* the
+      # caller has any token at all — that is the bootstrap window in which
+      # somebody joins a server. `webhook` has no caller identity by
+      # definition. A runtime-level gate would refuse all of them.
       VERIFY_JWT: "false"
     command: ["start", "--main-service", "/home/deno/functions/main"]
 

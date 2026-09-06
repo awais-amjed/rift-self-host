@@ -165,17 +165,26 @@ LiveKit an API key named after the placeholder.
 ## What works, and what has not been proved
 
 Verified by running the whole thing end to end against a real Docker daemon:
-ten containers healthy, all 41 migrations applied and recorded, Realtime's
+ten containers healthy, all 16 migrations applied and recorded, Realtime's
 limits surviving a container recreate, `messages` refusing the anon key, and the
 invite the console minted resolving back through `resolve_invite` to the server
 it names.
 
-**Two real clients, end to end.** Against a stack built from this repo with
-nothing patched by hand, two members using the app's own `CryptoRepository`
-each signed in over SIWS, registered, exchanged the channel key wrapped for one
-another, and sent messages the other decrypted — with the sender's signature
-verified. The server held only ciphertext throughout, and the `@mention`
-resolved to the right member id.
+**Two real clients, end to end — the Flutter app itself.** Against a stack
+built from this repo with nothing patched by hand, two instances of the desktop
+client each signed in over SIWS, registered, exchanged the channel key wrapped
+for one another, and sent messages the other decrypted. The server held only
+ciphertext throughout. Both then joined a voice channel and saw each other in
+an end-to-end encrypted call, while a second call ran in another channel; a
+private channel stayed invisible to the member who was not in it; and a bot
+joined through the SDK, was summoned into that private channel, and opened the
+media key a member had sealed for it.
+
+**An upgrade, applied.** A stack built at one release was brought to the next
+by rebuilding the console image and restarting it: it installed the new
+endpoints, refused to touch the schema because a migration had been edited
+since it ran, said so in a sentence with the command to resolve it, and
+finished after `--accept-drift`. A withdrawn endpoint stopped answering.
 
 That is the check the earlier runs were missing. They exercised
 `resolve_invite`, which takes no token, and `create_server`, which compares a
@@ -192,14 +201,7 @@ Not yet proved, and worth doing before anyone else runs one:
 
 - **A real certificate.** The runs used a domain that does not exist, so Caddy
   never completed an ACME challenge; clients reached Kong directly over http.
-- **A real call.** LiveKit starts and is routed, but nobody has joined a voice
-  channel through it.
-- **The Flutter app itself.** The two clients were headless, sharing the app's
-  crypto and hitting the same endpoints and tables, but not its UI.
-- **A real call.** LiveKit starts and is routed, but no client has joined a
-  channel through it, so the single-UDP-port choice is reasoned rather than
-  measured.
-- **An upgrade.** The ledger is what makes one possible and it is tested, but
-  there has never been a second version to apply.
+- **Audio actually arriving.** Two clients hold an encrypted call and see each
+  other, but nobody has spoken into one and heard it come out the other side.
 - **The `studio` profile**, which has not been started once.
 - **Backups.** Nothing here dumps the database or the attachment volume.

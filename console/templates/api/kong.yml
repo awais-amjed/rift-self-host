@@ -211,10 +211,10 @@ services:
                   kong.service.request.clear_header("authorization")
                 end
 
-  ## The twenty endpoints that hold a secret or run before the caller is a
-  ## member. No key-auth on purpose: `login`, `resolve_invite` and
-  ## `is_username_available` are called with no key at all, and `webhook` is
-  ## called by things that cannot log in. Each verifies its own caller.
+  ## The endpoints that hold a secret or run before the caller is a member.
+  ## No key-auth on purpose: `login` and `resolve_invite` are called with no
+  ## key at all, and `webhook` is called by things that cannot log in. Each
+  ## verifies its own caller.
   - name: functions-v1
     _comment: "Edge Functions: /functions/v1/* -> http://functions:9000/*"
     url: http://functions:9000/
