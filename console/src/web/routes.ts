@@ -76,11 +76,15 @@ function setupWasLocal(): boolean {
  */
 function ownProxyRoutes(templateRoot: string) {
   if (setting("RIFT_OWN_PROXY") !== "true") return Promise.resolve(null);
-  const port = Number(setting("RIFT_PROXY_PORT"));
+  const port = (name: string, fallback: number) => {
+    const value = Number(setting(name));
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  };
   return proxyRoutes(
     templateRoot,
     setting("RIFT_DOMAIN") ?? "",
-    Number.isInteger(port) && port > 0 ? port : 8000,
+    port("RIFT_PROXY_PORT", 8000),
+    { udp: port("LIVEKIT_UDP_PORT", 7882), tcp: port("LIVEKIT_TCP_PORT", 7881) },
   );
 }
 

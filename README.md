@@ -163,7 +163,9 @@ Two consequences worth stating plainly:
   Caddyfile repointed at them. The domain is still required — it is what your
   proxy serves, and what every member's identity derives from. Route
   `/rtc /rtc/* /twirp/* /validate` to signalling and everything else to the
-  API, or messages will work and calls will not.
+  API, or messages will work and calls will not. Voice **media** is not the
+  proxy's to carry either way — it goes straight to UDP 7882, with TCP 7881 as
+  a fallback, and those have to be open whichever proxy you use.
 - **Local testing is disposable.** The console offers it, and says on every page
   load that the stack cannot become a real server. Use it to try Rift. A real
   server has a switch of its own — *Local testing* on the dashboard — which

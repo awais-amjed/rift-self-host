@@ -26,6 +26,17 @@ export interface ProxyRoutes {
   signallingUpstream: string;
   /** The paths that must reach LiveKit rather than the API. */
   signallingPaths: string[];
+  /**
+   * Where call audio goes, which is nowhere near the proxy.
+   *
+   * Media is published by the compose file on every interface and travels
+   * straight to these ports — a proxy cannot carry it, and routing both
+   * upstreams perfectly still leaves calls connecting with no sound if they
+   * are closed. Named here because this panel is the one place an operator
+   * doing their own routing will look.
+   */
+  mediaUdpPort: number;
+  mediaTcpPort: number;
   /** The stack's own Caddyfile, repointed at the published ports. */
   caddyfile: string;
 }
@@ -66,6 +77,7 @@ export async function proxyRoutes(
   templateRoot: string,
   domain: string,
   apiPort: number,
+  media: { udp: number; tcp: number } = { udp: 7882, tcp: 7881 },
 ): Promise<ProxyRoutes> {
   const template = await Deno.readTextFile(
     join(templateRoot, "caddy", "Caddyfile"),
@@ -81,6 +93,8 @@ export async function proxyRoutes(
     apiUpstream,
     signallingUpstream,
     signallingPaths: pathsIn(caddyfile),
+    mediaUdpPort: media.udp,
+    mediaTcpPort: media.tcp,
     caddyfile,
   };
 }

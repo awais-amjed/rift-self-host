@@ -365,8 +365,10 @@ ${banner}
 <h2>Your reverse proxy</h2>
 <div class="panel">
   <p>This stack does not run Caddy, so nothing is listening on 80 or 443 for
-    it. Point your proxy at the two upstreams below — <strong>both</strong>, or
-    messages will work and calls will not.</p>
+    it. Point your proxy at both upstreams below — routing everything to the
+    API is the mistake to avoid, because it leaves messages working and calls
+    failing. Voice media is the third row and does not pass through any proxy:
+    it needs those ports open, or a call connects with no sound.</p>
   <div id="proxyUpstreams"></div>
   <p class="hint">If your proxy runs in a container, attach it to this stack's
     compose network and use <code>kong:8000</code> and
@@ -597,6 +599,11 @@ function renderProxy(proxy) {
   const rows = [
     ["Signalling", proxy.signallingUpstream, proxy.signallingPaths.join("  ")],
     ["Everything else", proxy.apiUpstream, "all other paths"],
+    [
+      "Voice media",
+      "UDP " + proxy.mediaUdpPort + "  ·  TCP " + proxy.mediaTcpPort,
+      "straight to the host, not through your proxy — open these on the firewall",
+    ],
   ];
   document.getElementById("proxyUpstreams").innerHTML =
     '<table>' + rows.map(([name, upstream, paths]) =>

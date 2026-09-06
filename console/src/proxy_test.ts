@@ -48,3 +48,27 @@ Deno.test("the snippet opens with the site block, not with our ACME footnote", a
   // The comments that say which paths go where are the point, and stay.
   assertStringIncludes(routes.caddyfile, "LiveKit's signalling");
 });
+
+Deno.test("the media ports are named, because no proxy can carry them", async () => {
+  const routes = await proxyRoutes(templateRoot, "chat.example.com", 8000);
+  assertEquals(routes.mediaUdpPort, 7882);
+  assertEquals(routes.mediaTcpPort, 7881);
+
+  // A host that moved them says so, or the operator opens the wrong ports.
+  const moved = await proxyRoutes(templateRoot, "chat.example.com", 8000, {
+    udp: 8882,
+    tcp: 8881,
+  });
+  assertEquals(moved.mediaUdpPort, 8882);
+  assertEquals(moved.mediaTcpPort, 8881);
+
+  // And they are not something the proxy is asked to route. The Caddyfile
+  // names the media port once, in the comment explaining that it does *not*
+  // pass through — never as a directive, which is exactly why the panel has
+  // to say it somewhere an operator will read.
+  const directives = routes.caddyfile.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  assert(!directives.some((line) => line.includes(String(routes.mediaUdpPort))));
+  assert(!directives.some((line) => line.includes(String(routes.mediaTcpPort))));
+});
