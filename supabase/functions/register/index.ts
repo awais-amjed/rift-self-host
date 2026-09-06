@@ -19,7 +19,7 @@ const supabase = createClient(
  * The client first authenticates via Sign-in-with-Web3 (SIWS), which yields a
  * GoTrue JWT for a fresh `auth.users` row keyed by the caller's Ed25519 key.
  * register then binds a `users` profile to that identity: `users.id = auth.uid()`
- * (see auth.md / migration 007). No token is issued — the client already holds
+ * (see API.md / `002_limits.sql`). No token is issued — the client already holds
  * the JWT.
  */
 Deno.serve(async (req) => {

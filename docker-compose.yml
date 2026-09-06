@@ -171,7 +171,7 @@ services:
       #
       # Every Rift client signs a SIWS message naming a fixed `localhost`
       # domain and `http://localhost` URI, whatever server it is for — see the
-      # app's auth.md, "Why the SIWS domain is fixed". GoTrue's web3 grant runs
+      # API.md, "Why the SIWS domain is fixed". GoTrue's web3 grant runs
       # the URI through IsRedirectURLValid, which admits it only if it matches
       # SITE_URL's hostname or an entry in the allow list. Pointing SITE_URL at
       # the server's own domain therefore refuses every login on the server, with
@@ -204,7 +204,7 @@ services:
 
       # How members log in. Rift authenticates with a signature over a
       # per-server keypair (Sign-In With Solana), never a password — see the
-      # app's auth.md. Without this flag GoTrue rejects every login with an
+      # API.md. Without this flag GoTrue rejects every login with an
       # error that says nothing about SIWS, and the server looks simply broken.
       GOTRUE_EXTERNAL_WEB3_SOLANA_ENABLED: "true"
 

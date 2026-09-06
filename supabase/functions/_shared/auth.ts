@@ -27,7 +27,7 @@ export interface AuthenticatedToken {
  *
  * The ban + permission check hits the DB on every call, so revocation on the
  * edge-function path stays instant even though the JWT itself is stateless
- * (see auth.md — short-lived JWTs cover the RLS-only surfaces).
+ * (see API.md — short-lived JWTs cover the RLS-only surfaces).
  */
 export async function authenticateToken(
   supabase: SupabaseClient,

@@ -343,11 +343,38 @@ Apply migrations with `docker exec -i supabase-db psql -U postgres -v ON_ERROR_S
 Requirements for the stack's GoTrue config: enable the SIWS grant with
 `GOTRUE_EXTERNAL_WEB3_SOLANA_ENABLED=true` (dev keeps signup on so SIWS auto-creates the
 `auth.users` row; production sets `GOTRUE_DISABLE_SIGNUP=true` and provisions via `register`).
-Leave `SITE_URL` as a `localhost` URL, or add `http://localhost` to `ADDITIONAL_REDIRECT_URLS`:
-the SIWS message names a fixed `localhost` domain whatever address the server is reachable at,
-because GoTrue rejects IP domains outright and demands HTTPS plus an allow-list entry for any
-other name (see `auth.md`, "Why the SIWS domain is fixed"). The server's own URL is never
-required to appear in either setting.
+Leave `SITE_URL` as a `localhost` URL, or add `http://localhost` to `ADDITIONAL_REDIRECT_URLS`.
+The server's own URL is never required to appear in either setting, and pointing them at it is
+the mistake this section exists to prevent — see below.
+
+#### Why the SIWS domain is fixed
+
+Every Rift client signs a SIWS message naming `localhost` and `http://localhost`, whatever
+address the server is actually reachable at. That is a constant, not a placeholder somebody
+forgot to change.
+
+GoTrue's web3 grant (`internal/api/web3.go`, v2.189.0) puts four gates on the message's first
+line and its `URI`, and **exempts `localhost` from three of them**:
+
+| Gate | Rule |
+|---|---|
+| `siws.IsValidDomain` | `^(localhost\|<label>(.<label>)*.<tld≥2 letters>)(:port)?$` — a bare IP such as `192.168.1.6` never matches |
+| scheme | must be `https` unless the URI's hostname is `localhost` |
+| `IsRedirectURLValid` | must match `SITE_URL`'s hostname or `URI_ALLOW_LIST`; for an IP host it short-circuits to "loopback only", so **no allow-list entry can admit a LAN IP** |
+| domain ↔ URI | unless localhost, `URI.Host` (port included) must equal the domain, *and* `https://<domain>/` must also be allow-listed |
+
+Signing the real address would therefore mean a Rift server could only be reached over HTTPS,
+at a dotted name, that its operator had also configured GoTrue to expect — no LAN IP, no
+plain-http hostname, no testing across two machines.
+
+Nothing is given up by the constant. Those two fields exist so a *wallet* can tell you which
+site is asking; Rift has no wallet, the key is derived per `(host, server_id)`, and it is posted
+only to the host it was derived for. GoTrue never redirects anywhere here either — email and
+phone signup are off, there are no OAuth providers, and the web3 grant returns a token rather
+than a redirect, so the allow list exists solely so the signature verifies.
+
+**Setting `SITE_URL` to the server's own domain refuses every login**, with "message was signed
+for another app" — a sentence naming neither SIWS nor the setting that caused it.
 Keep `FUNCTIONS_VERIFY_JWT=false` — `login`, `register` and `resolve_invite` are invoked without
 the runtime's own JWT gate (each self-validates).
 

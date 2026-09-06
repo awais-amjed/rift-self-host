@@ -10,7 +10,7 @@ import * as EC from "../_shared/error_codes.ts";
  * here. We forward it to GoTrue's web3 grant server-side (the anon key lives in
  * this function's env), so the client authenticates through the normal
  * functions route without needing the server's anon key up front. Returns the
- * GoTrue session (access_token + refresh_token). See auth.md.
+ * GoTrue session (access_token + refresh_token). See API.md.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
