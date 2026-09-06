@@ -679,7 +679,7 @@ CREATE POLICY read_state_own ON read_state FOR ALL TO authenticated
 -- Everything else the client needs is a plain PostgREST call against 002's
 -- policies. Edge functions now exist only where a secret or a pre-membership
 -- bootstrap step is genuinely involved: login, register, resolve_invite,
--- create_server, get_channel_token, is_username_available.
+-- create_server, get_channel_token.
 
 -- ============================================================
 -- Registration (service role only — called by the `register` function)
