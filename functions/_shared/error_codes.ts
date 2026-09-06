@@ -10,13 +10,8 @@
 // ── Token / session ───────────────────────────────────────────────────────────
 export const TOKEN_MISSING   = "token_missing";   // token field absent in request
 export const TOKEN_INVALID   = "token_invalid";   // token not found in DB
-export const TOKEN_EXPIRED   = "token_expired";   // token TTL has passed
-export const TOKEN_UNLINKED  = "token_unlinked";  // token row has no user_id
-export const NO_SESSION      = "no_session";      // user exists but has no token row
 
-// ── Challenge / auth flow ─────────────────────────────────────────────────────
-export const CHALLENGE_INVALID = "challenge_invalid"; // nonce not found / already used
-export const CHALLENGE_EXPIRED = "challenge_expired"; // nonce TTL has passed
+// ── Auth flow ─────────────────────────────────────────────────────────────────
 export const SIGNATURE_INVALID = "signature_invalid"; // Ed25519 verification failed
 
 // ── User ──────────────────────────────────────────────────────────────────────
@@ -34,14 +29,11 @@ export const MESSAGE_NOT_FOUND     = "message_not_found";
 export const CHANNEL_NOT_FOUND     = "channel_not_found";
 export const CHANNEL_NAME_DUPLICATE = "channel_name_duplicate";
 export const CHANNEL_TYPE_INVALID  = "channel_type_invalid";
-export const CHANNEL_WRONG_SERVER  = "channel_wrong_server"; // channel belongs to a different server
 
 // ── Key rotation ──────────────────────────────────────────────────────────────
-export const KEY_SAME   = "key_same";   // new key identical to old key
 // A bot asked for a voice token before any member sealed it a media key.
 // Retryable, and it clears as soon as a member is in the channel.
 export const KEY_NOT_READY = "key_not_ready";
-export const KEY_IN_USE = "key_in_use"; // new key already registered to another user
 
 // ── Registration ──────────────────────────────────────────────────────────────
 export const INVITE_INVALID   = "invite_invalid";
