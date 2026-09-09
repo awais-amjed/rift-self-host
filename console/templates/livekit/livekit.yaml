@@ -17,6 +17,15 @@ rtc:
   # self-hosted call connects and then has no audio. One port is the difference
   # between a firewall rule somebody will actually write and one they will not.
   #
+  # This setting takes a range too, and that is the answer for a busy server
+  # rather than turning mux off. LiveKit's config-sample.yaml: "To maximize
+  # system performance, we recommend using a range of ports greater or equal
+  # to the number of vCPUs on the machine" — one socket is drained by one
+  # loop, so eight ports on eight vCPUs spread that work, while still being
+  # one firewall rule. `udp_port: 7882-7889` is accepted and logs
+  # {"Start":7882,"End":7889}; the compose file has to publish the same range.
+  # Documented for operators at docs.joinrift.app/reference/#media.
+  #
   # https://docs.livekit.io/transport/self-hosting/ports-firewall/
   udp_port: 7882
 
