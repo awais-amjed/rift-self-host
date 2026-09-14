@@ -652,16 +652,16 @@ const ROTATIONS = [
   {
     kind: "livekit",
     title: "Voice credentials",
-    cost: "Calls in progress drop for a moment and reconnect.",
+    cost: "Calls in progress drop and rejoin by themselves in under a minute.",
     confirm: "Replace the voice credentials? Calls in progress will drop and " +
-      "reconnect.",
+      "rejoin by themselves in under a minute.",
   },
   {
     kind: "database",
     title: "Database password",
-    cost: "The server is offline for about a minute while everything restarts.",
-    confirm: "Replace the database password? The server will be offline for " +
-      "about a minute.",
+    cost: "The server does not answer for a few seconds while services restart.",
+    confirm: "Replace the database password? The server will not answer for " +
+      "a few seconds.",
   },
 ];
 
