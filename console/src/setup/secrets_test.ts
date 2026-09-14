@@ -1,6 +1,12 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@1";
-import { decodeJwt, jwtVerify } from "npm:jose@5";
-import { generateSecrets, randomString, signApiKey } from "./secrets.ts";
+import { decodeJwt, importJWK, type JWK, jwtVerify } from "npm:jose@5";
+import {
+  generateSecrets,
+  generateSigningSecrets,
+  randomString,
+  signApiKey,
+  type SigningSecrets,
+} from "./secrets.ts";
 
 Deno.test("generated secrets are safe inside a connection URI", async () => {
   // postgres://supabase_auth_admin:PASSWORD@db:5432/postgres — one '@' or '/'
@@ -87,4 +93,59 @@ Deno.test("no character of the alphabet is starved or favoured", () => {
   // Expected 1000 each. A modulo bias would put the favoured characters
   // around 2x the starved ones, far outside this.
   assert(highest / lowest < 1.5, `spread ${lowest}..${highest} looks biased`);
+});
+
+Deno.test("new signing secrets keep the publishable key and replace the rest", async () => {
+  const before = await generateSecrets();
+  const after = await generateSigningSecrets(before.publishableKey);
+
+  // Every member's app logs in with it. Replacing it would sign them out with
+  // nothing to sign back in with.
+  assertEquals(after.publishableKey, before.publishableKey);
+
+  for (
+    const name of [
+      "jwtSecret",
+      "secretKey",
+      "anonKey",
+      "serviceRoleKey",
+      "anonKeyAsymmetric",
+      "serviceRoleKeyAsymmetric",
+    ] as const
+  ) {
+    assert(after[name] !== before[name], `${name} did not change`);
+  }
+  assert(after.signingKeys.kid !== before.signingKeys.kid);
+});
+
+/** Whether [token] verifies under [key]. */
+async function verifies(token: string, key: CryptoKey | Uint8Array): Promise<boolean> {
+  try {
+    await jwtVerify(token, key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The public EC key a generation publishes. */
+async function publicKey(secrets: SigningSecrets): Promise<CryptoKey | Uint8Array> {
+  const jwk = secrets.signingKeys.verifying.keys.find((key) => key.kty === "EC");
+  return await importJWK(jwk as unknown as JWK, "ES256");
+}
+
+Deno.test("a service key from the last generation does not verify against the next", async () => {
+  // The whole point of rotating. Kong passes a caller's own Authorization
+  // header through, so a leaked service-role JWT is refused only once nothing
+  // trusts the key that signed it — replacing the opaque key alone does not
+  // do it. Both flavours are checked because the stack accepts both.
+  const before = await generateSecrets();
+  const after = await generateSigningSecrets(before.publishableKey);
+  const secret = new TextEncoder().encode(after.jwtSecret);
+
+  assert(await verifies(after.serviceRoleKey, secret));
+  assert(!(await verifies(before.serviceRoleKey, secret)));
+
+  assert(await verifies(after.serviceRoleKeyAsymmetric, await publicKey(after)));
+  assert(!(await verifies(before.serviceRoleKeyAsymmetric, await publicKey(after))));
 });

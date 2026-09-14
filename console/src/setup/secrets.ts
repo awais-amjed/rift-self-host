@@ -137,28 +137,68 @@ export function opaqueKey(kind: "publishable" | "secret"): string {
   return `sb_${kind}_${randomString(32)}`;
 }
 
-/** Generate a fresh set. Called once, at setup. */
-export async function generateSecrets(): Promise<StackSecrets> {
+/** A signing key and every key signed by it — the values that change together. */
+export type SigningSecrets = Pick<
+  StackSecrets,
+  | "jwtSecret"
+  | "signingKeys"
+  | "publishableKey"
+  | "secretKey"
+  | "anonKey"
+  | "serviceRoleKey"
+  | "anonKeyAsymmetric"
+  | "serviceRoleKeyAsymmetric"
+>;
+
+/** LiveKit's key pair. */
+export type LivekitCredentials = Pick<StackSecrets, "livekitApiKey" | "livekitApiSecret">;
+
+/**
+ * A fresh signing key and every key derived from it.
+ *
+ * [publishableKey] is kept when one is given, and a rotation always gives the
+ * current one. It is what every member's app logs in with: replacing the
+ * signing key signs members out and the app signs them straight back in, but
+ * replacing this too would leave them nothing to sign back in *with*. It is
+ * also the one key here that was never a secret — every member holds a copy.
+ */
+export async function generateSigningSecrets(
+  publishableKey: string = opaqueKey("publishable"),
+): Promise<SigningSecrets> {
   const jwtSecret = randomString(64);
   const signingKeys = await generateSigningKeys(jwtSecret);
 
   return {
-    signingKeys,
-    publishableKey: opaqueKey("publishable"),
-    secretKey: opaqueKey("secret"),
-    anonKeyAsymmetric: await signAsymmetricApiKey(signingKeys, "anon"),
-    serviceRoleKeyAsymmetric: await signAsymmetricApiKey(signingKeys, "service_role"),
-    postgresPassword: randomString(32),
     jwtSecret,
+    signingKeys,
+    publishableKey,
+    secretKey: opaqueKey("secret"),
     anonKey: await signApiKey(jwtSecret, "anon"),
     serviceRoleKey: await signApiKey(jwtSecret, "service_role"),
+    anonKeyAsymmetric: await signAsymmetricApiKey(signingKeys, "anon"),
+    serviceRoleKeyAsymmetric: await signAsymmetricApiKey(signingKeys, "service_role"),
+  };
+}
+
+/** A fresh LiveKit key pair. */
+export function generateLivekitCredentials(): LivekitCredentials {
+  return {
+    // The "API" prefix is LiveKit's convention for identifying a key in logs.
+    livekitApiKey: `API${randomString(12)}`,
+    livekitApiSecret: randomString(48),
+  };
+}
+
+/** Generate a fresh set. Called once, at setup. */
+export async function generateSecrets(): Promise<StackSecrets> {
+  return {
+    ...(await generateSigningSecrets()),
+    ...generateLivekitCredentials(),
+    postgresPassword: randomString(32),
     secretKeyBase: randomString(64),
     // Exactly 16. Realtime uses it as an AES-128 key and refuses to boot
     // otherwise, with an Elixir stacktrace rather than a sentence.
     realtimeEncryptionKey: randomString(16),
-    // The "API" prefix is LiveKit's convention for identifying a key in logs.
-    livekitApiKey: `API${randomString(12)}`,
-    livekitApiSecret: randomString(48),
     consolePassword: randomString(24),
   };
 }

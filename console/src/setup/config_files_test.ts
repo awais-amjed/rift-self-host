@@ -4,13 +4,17 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@1";
+import { parseEnv } from "../env_file.ts";
 import {
   behindCaddy,
+  livekitSettings,
   placeholders,
   publishingFor,
   render,
   renderEnv,
   renderOverride,
+  secretsFromEnv,
+  signingSettings,
 } from "./config_files.ts";
 import { defaults } from "./options.ts";
 import { generateSecrets } from "./secrets.ts";
@@ -250,4 +254,30 @@ Deno.test("an own-proxy stack still records its domain and its port", async () =
   assertStringIncludes(env, "API_EXTERNAL_URL=https://chat.example.com");
   assertStringIncludes(env, "RIFT_OWN_PROXY=true");
   assertStringIncludes(env, "RIFT_PROXY_PORT=8001");
+});
+
+Deno.test("the secrets read back out of .env are the ones written into it", async () => {
+  // A rotation re-renders kong.yml from what .env says after changing some of
+  // it. A name changed in renderEnv and not in secretsFromEnv would render
+  // the template around a missing value, so each is checked by the other.
+  const ctx = await context();
+  assertEquals(secretsFromEnv(parseEnv(renderEnv(ctx))), ctx.secrets);
+});
+
+Deno.test("every value a rotation writes is a line setup writes", async () => {
+  const ctx = await context();
+  const lines = new Set(renderEnv(ctx).split("\n"));
+  const settings = { ...signingSettings(ctx.secrets), ...livekitSettings(ctx.secrets) };
+  for (const [name, value] of Object.entries(settings)) {
+    assert(
+      lines.has(`${name}=${value}`),
+      `${name} is not written the way renderEnv writes it`,
+    );
+  }
+});
+
+Deno.test("a .env missing a secret is refused by name", async () => {
+  const values = parseEnv(renderEnv(await context()));
+  delete values.JWT_KEYS;
+  assertThrows(() => secretsFromEnv(values), Error, "JWT_KEYS");
 });

@@ -76,27 +76,56 @@ export function setting(name: string): string | undefined {
 /**
  * Change one value in the stack's `.env`, in place.
  *
- * Used for exactly one thing: turning Realtime's seed off after it has created
- * the tenant row. Rewriting rather than appending, so re-running setup does
- * not leave two lines that disagree and let compose pick the later one.
+ * Rewriting rather than appending, so re-running setup does not leave two
+ * lines that disagree and let compose pick the later one.
  */
-export async function updateSetting(
+export function updateSetting(
   name: string,
   value: string,
+  directory: string = projectDir(),
+): Promise<void> {
+  return updateSettings({ [name]: value }, directory);
+}
+
+/**
+ * Change several values in `.env` with one write.
+ *
+ * A key rotation replaces up to eight values that only mean anything together
+ * — a JWT is worthless beside a secret that did not sign it — so writing them
+ * one at a time would leave a window, and after a crash a file, that is half
+ * one generation and half the next. The new file is written beside the old one
+ * and renamed over it, which is what makes the swap all or nothing.
+ *
+ * Every line naming a key is rewritten, not just the first: compose takes the
+ * last one, so a duplicate left behind is the one that wins.
+ */
+export async function updateSettings(
+  values: Record<string, string>,
   directory: string = projectDir(),
 ): Promise<void> {
   const path = join(directory, ".env");
   const text = await Deno.readTextFile(path);
 
-  let replaced = false;
+  const seen = new Set<string>();
   const lines = text.split("\n").map((line) => {
-    if (line.trim().startsWith(`${name}=`)) {
-      replaced = true;
-      return `${name}=${value}`;
-    }
-    return line;
+    const trimmed = line.trim();
+    const separator = trimmed.indexOf("=");
+    if (trimmed.startsWith("#") || separator === -1) return line;
+    const name = trimmed.slice(0, separator).trim();
+    if (!Object.hasOwn(values, name)) return line;
+    seen.add(name);
+    return `${name}=${values[name]}`;
   });
 
-  if (!replaced) lines.push(`${name}=${value}`);
-  await Deno.writeTextFile(path, lines.join("\n"), { mode: 0o600 });
+  // Before the final newline rather than after it, so the file still ends in one.
+  const missing = Object.keys(values).filter((name) => !seen.has(name));
+  const end = lines.at(-1) === "" ? lines.length - 1 : lines.length;
+  lines.splice(end, 0, ...missing.map((name) => `${name}=${values[name]}`));
+
+  const temporary = `${path}.writing`;
+  // A leftover from a crash would keep its own permissions, and the mode below
+  // only applies to a file this call creates.
+  await Deno.remove(temporary).catch(() => {});
+  await Deno.writeTextFile(temporary, lines.join("\n"), { mode: 0o600 });
+  await Deno.rename(temporary, path);
 }

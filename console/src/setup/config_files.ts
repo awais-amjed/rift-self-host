@@ -16,8 +16,10 @@
  * and to Docker, and anything cleverer would try to interpret them.
  */
 import { join } from "jsr:@std/path@1";
-import type { SetupOptions } from "./options.ts";
-import type { StackSecrets } from "./secrets.ts";
+import { readEnvFile } from "../env_file.ts";
+import { optionsFromEnv, type SetupOptions } from "./options.ts";
+import type { LivekitCredentials, SigningSecrets, StackSecrets } from "./secrets.ts";
+import type { Jwk } from "./signing_keys.ts";
 
 /** What the operator chose. */
 export type StackConfig = SetupOptions;
@@ -155,6 +157,77 @@ export function renderEnv(context: RenderContext): string {
   return lines.join("\n");
 }
 
+/**
+ * The signing half of [renderEnv], as settings a rotation can write.
+ *
+ * Duplicates eight of the names above, deliberately rather than carelessly:
+ * `.env` is commented section by section and a loop would lose that. A test
+ * checks every pair here is a line [renderEnv] writes, so the two cannot
+ * drift.
+ */
+export function signingSettings(secrets: SigningSecrets): Record<string, string> {
+  return {
+    JWT_KEYS: JSON.stringify(secrets.signingKeys.signing),
+    JWT_JWKS: JSON.stringify(secrets.signingKeys.verifying),
+    JWT_SECRET: secrets.jwtSecret,
+    SUPABASE_PUBLISHABLE_KEY: secrets.publishableKey,
+    SUPABASE_SECRET_KEY: secrets.secretKey,
+    ANON_KEY_ASYMMETRIC: secrets.anonKeyAsymmetric,
+    SERVICE_ROLE_KEY_ASYMMETRIC: secrets.serviceRoleKeyAsymmetric,
+    ANON_KEY: secrets.anonKey,
+    SERVICE_ROLE_KEY: secrets.serviceRoleKey,
+  };
+}
+
+/** LiveKit's pair, the same way. */
+export function livekitSettings(credentials: LivekitCredentials): Record<string, string> {
+  return {
+    LIVEKIT_API_KEY: credentials.livekitApiKey,
+    LIVEKIT_API_SECRET: credentials.livekitApiSecret,
+  };
+}
+
+/**
+ * The generated secrets, read back out of a `.env` that [renderEnv] wrote.
+ *
+ * Kept beside [renderEnv] because it is that function run backwards, and the
+ * names are defined there. A rotation needs it to re-render kong.yml after
+ * changing some of these values and not the others.
+ */
+export function secretsFromEnv(values: Record<string, string>): StackSecrets {
+  const required = (name: string): string => {
+    const value = values[name];
+    if (value === undefined || value.length === 0) {
+      throw new Error(
+        `.env has no ${name}, so this stack's secrets cannot be read back.`,
+      );
+    }
+    return value;
+  };
+
+  const signing = JSON.parse(required("JWT_KEYS")) as Jwk[];
+  const verifying = JSON.parse(required("JWT_JWKS")) as { keys: Jwk[] };
+  const kid = signing.find((key) => key.kty === "EC")?.kid;
+  if (typeof kid !== "string") throw new Error("JWT_KEYS in .env has no EC signing key.");
+
+  return {
+    postgresPassword: required("POSTGRES_PASSWORD"),
+    jwtSecret: required("JWT_SECRET"),
+    anonKey: required("ANON_KEY"),
+    serviceRoleKey: required("SERVICE_ROLE_KEY"),
+    secretKeyBase: required("SECRET_KEY_BASE"),
+    realtimeEncryptionKey: required("REALTIME_DB_ENC_KEY"),
+    livekitApiKey: required("LIVEKIT_API_KEY"),
+    livekitApiSecret: required("LIVEKIT_API_SECRET"),
+    consolePassword: required("CONSOLE_PASSWORD"),
+    signingKeys: { signing, verifying, kid },
+    publishableKey: required("SUPABASE_PUBLISHABLE_KEY"),
+    secretKey: required("SUPABASE_SECRET_KEY"),
+    anonKeyAsymmetric: required("ANON_KEY_ASYMMETRIC"),
+    serviceRoleKeyAsymmetric: required("SERVICE_ROLE_KEY_ASYMMETRIC"),
+  };
+}
+
 /** Where a rendered file goes, relative to the project directory. */
 const RENDERED = [
   { template: "api/kong.yml", destination: "volumes/api/kong.yml" },
@@ -219,6 +292,37 @@ export async function writeConfigFiles(
   written.push(".env");
 
   return written;
+}
+
+/** A file [writeConfigFiles] renders, named by where it lands. */
+export type RenderedFile = (typeof RENDERED)[number]["destination"];
+
+/**
+ * Render [files] again from what `.env` says now.
+ *
+ * For a rotation, which changes secrets in `.env` and then has to bring the
+ * files that bake them in along with it. Reads everything back rather than
+ * taking it as arguments, so what is written is exactly what the containers
+ * are about to be recreated against.
+ */
+export async function rerender(
+  files: RenderedFile[],
+  options: { templateRoot: string; projectDir: string },
+): Promise<void> {
+  const context: RenderContext = {
+    ...optionsFromEnv(options.projectDir),
+    secrets: secretsFromEnv(readEnvFile(options.projectDir)),
+  };
+  const values = placeholders(context);
+
+  for (const { template, destination } of RENDERED) {
+    if (!files.includes(destination)) continue;
+    const source = await Deno.readTextFile(join(options.templateRoot, template));
+    await Deno.writeTextFile(
+      join(options.projectDir, destination),
+      render(source, values),
+    );
+  }
 }
 
 /**
