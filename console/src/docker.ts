@@ -157,10 +157,27 @@ export function restartService(service: string): Promise<CommandResult> {
       stderr: `This stack does not run ${service}.`,
     });
   }
-  // `up -d --force-recreate`, not `restart`: a restarted container keeps the
-  // environment it was created with, so a changed .env would not reach it.
-  // This is the difference that makes a raised Realtime limit stick.
-  return compose(["--profile", "full", "up", "-d", "--force-recreate", service], 120_000);
+  return compose(recreateArgs(service), 120_000);
+}
+
+/**
+ * The compose arguments that recreate [service], and nothing else.
+ *
+ * `up -d --force-recreate`, not `restart`: a restarted container keeps the
+ * environment it was created with, so a changed .env would not reach it. This
+ * is the difference that makes a raised Realtime limit stick.
+ *
+ * `--no-deps` is the half that was missing, and it was expensive. Without it
+ * compose brings a service's dependencies into the same `up`, and
+ * `--force-recreate` recreates those too. Kong depends on auth and rest, and
+ * both on Postgres, so recreating Kong recreated the database and dropped every
+ * connection on the server — on every LAN switch, and on the first key
+ * rotation, which is where it showed: `rift-db` had been created two seconds
+ * into a rotation that was never meant to touch it. Nothing else reported it,
+ * because the stack came back healthy.
+ */
+export function recreateArgs(service: string): string[] {
+  return ["--profile", "full", "up", "-d", "--force-recreate", "--no-deps", service];
 }
 
 /**
