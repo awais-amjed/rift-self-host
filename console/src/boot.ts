@@ -43,23 +43,50 @@ import {
   waitUntilReachable,
 } from "./postgres.ts";
 import { applyUpgrade, pendingWork } from "./upgrade.ts";
+import { backupPresent, restoreFromBackup } from "./backup/restore.ts";
 import { adminTarget } from "./setup/realtime.ts";
 import { repairAttachmentMetadata } from "./storage_repair.ts";
 
 /** How long to wait for Postgres once the stack is up. Pulling images is slow. */
 const DATABASE_TIMEOUT_MS = 600_000;
 
-export async function prepareStack(paths: Paths): Promise<void> {
+/**
+ * A function that says [step] in the log and hands it to [report].
+ *
+ * Its own function, with a test, because the first version of this was an
+ * inline arrow whose `console.log` a find-and-replace had turned into a call to
+ * itself — and the console died with a stack overflow on the first line of the
+ * first restore anybody ran.
+ */
+export function stepReporter(
+  report: (step: string) => void,
+  log: (step: string) => void = console.log,
+): (step: string) => void {
+  return (step) => {
+    log(step);
+    report(step);
+  };
+}
+
+export async function prepareStack(
+  paths: Paths,
+  report: (step: string) => void = () => {},
+): Promise<void> {
+  // The log and, during a restore from the console page, the page itself.
+  const say = stepReporter(report);
+
   const written = await restoreMissingConfig(paths);
   if (written.length > 0) {
+    report("Writing the configuration");
     console.log(`Wrote missing configuration from .env: ${written.join(", ")}`);
   }
 
   const sources = functionSources(paths);
   const missing = await missingFunctions(sources, paths.functionsTarget);
   if (missing.length > 0) {
-    const report = await installFunctions(sources, paths.functionsTarget);
-    console.log(`Installed ${report.installed.length} endpoints that were missing.`);
+    const installed = await installFunctions(sources, paths.functionsTarget);
+    report("Installing the server's endpoints");
+    console.log(`Installed ${installed.installed.length} endpoints that were missing.`);
   }
 
   // Not while the compose run that started this container is still converging
@@ -68,6 +95,7 @@ export async function prepareStack(paths: Paths): Promise<void> {
 
   const statuses = await serviceStatuses();
   if (statuses.every((service) => service.name === "console")) {
+    report("Starting the server");
     console.log("Nothing but the console is here yet — bringing the stack up.");
     const started = await startStack(["full"]);
     if (!started.ok) {
@@ -92,13 +120,28 @@ export async function prepareStack(paths: Paths): Promise<void> {
     // dump reports it missing fourteen times and those tables change owner.
     const role = await runSql(adminTarget(target), REALTIME_ADMIN_ROLE);
     if (!role.ok) console.error("Could not create Realtime's admin role:", role.error);
-    console.log(
-      "This database has no Rift schema. If you are restoring a backup, load the dump now, " +
-        "restore the attachments, then run `docker compose --profile full restart`. " +
-        "Nothing has been written to the database.",
-    );
-    return;
+
+    if (!await backupPresent(paths.projectDir)) {
+      console.log(
+        "This database has no Rift schema. To restore a backup, extract the backup " +
+          "file so its contents sit beside the compose file, then restart the console. " +
+          "Nothing has been written to the database.",
+      );
+      return;
+    }
+
+    console.log("Found a backup beside the compose file — restoring it.");
+    const restored = await restoreFromBackup(paths.projectDir, say);
+    if (restored.databaseErrors.length > 0) {
+      console.error(
+        `Loading the database printed ${restored.databaseErrors.length} errors:`,
+        restored.databaseErrors.slice(0, 5).join("\n"),
+      );
+    }
+    console.log("The backup is restored.");
   }
+
+  report("Checking the attachments");
 
   // Before anything else reads the attachments: a restored volume can have
   // every file and none of the metadata storage keeps beside them.
@@ -108,7 +151,7 @@ export async function prepareStack(paths: Paths): Promise<void> {
       console.log(`Put back the file metadata on ${repair.repaired} attachments.`);
     }
     if (repair.absent > 0) {
-      console.log(`${repair.absent} attachments are in the database but not on disk.`);
+      say(`${repair.absent} attachments are in the database but not on disk.`);
     }
   } catch (error) {
     console.error("Could not check attachment metadata:", error);
@@ -117,20 +160,20 @@ export async function prepareStack(paths: Paths): Promise<void> {
   const work = await pendingWork(target, paths);
   if (!work.needed) return;
 
-  console.log(
+  say(
     `Applying ${work.imageVersion} (this stack is at ` +
       `${work.appliedVersion ?? "an unrecorded version"})`,
   );
   const result = await applyUpgrade(target, paths, (progress) => {
-    if (progress.done) console.log(`  ${progress.step}`);
+    if (progress.done) say(`  ${progress.step}`);
   });
   if (!result.endpointsRestarted) {
-    console.log(
+    say(
       "  Endpoints were installed but not reloaded — compose was still busy. " +
         "They take effect within a minute, or press Apply in the console.",
     );
   }
-  console.log(`Now at ${result.version}.`);
+  say(`Now at ${result.version}.`);
 }
 
 /**

@@ -95,3 +95,64 @@ export async function run(
     if (timer !== null) clearTimeout(timer);
   }
 }
+
+/**
+ * Run [command] with its standard output written straight to [path].
+ *
+ * For a database dump or an archive of every attachment, either of which can
+ * be larger than the console's memory: the output is never held, only piped.
+ */
+export async function runToFile(
+  command: string,
+  args: string[],
+  options: { cwd?: string; path: string },
+): Promise<{ code: number; stderr: string }> {
+  const file = await Deno.open(options.path, {
+    write: true,
+    create: true,
+    truncate: true,
+    mode: 0o600,
+  });
+  const child = new Deno.Command(command, {
+    args,
+    cwd: options.cwd,
+    clearEnv: true,
+    env: childEnv(),
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const [, stderr, status] = await Promise.all([
+    child.stdout.pipeTo(file.writable),
+    new Response(child.stderr).text(),
+    child.status,
+  ]);
+  return { code: status.code, stderr: stderr.trim() };
+}
+
+/** Run [command] with [path] as its standard input, without reading it into memory. */
+export async function runFromFile(
+  command: string,
+  args: string[],
+  options: { cwd?: string; path: string },
+): Promise<{ code: number; stderr: string }> {
+  const file = await Deno.open(options.path, { read: true });
+  const child = new Deno.Command(command, {
+    args,
+    cwd: options.cwd,
+    clearEnv: true,
+    env: childEnv(),
+    stdin: "piped",
+    stdout: "null",
+    stderr: "piped",
+  }).spawn();
+  const [piped, stderr, status] = await Promise.all([
+    // Settled rather than awaited: a command that exits early closes its end,
+    // and the reason worth reporting is its stderr, not a broken pipe.
+    file.readable.pipeTo(child.stdin).then(() => null, (error) => error),
+    new Response(child.stderr).text(),
+    child.status,
+  ]);
+  if (status.code === 0 && piped !== null) throw piped;
+  return { code: status.code, stderr: stderr.trim() };
+}

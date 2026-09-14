@@ -412,6 +412,28 @@ ${banner}
 <h2>Credentials</h2>
 <div class="panel" id="secrets"></div>
 
+<h2>Backups</h2>
+<div class="panel">
+  <p>Saves the database, the attachments and <code>.env</code> as one file in
+    <code>backups/</code>, next to the compose file. Copy it off this machine
+    afterwards — a backup on the same disk is lost with the disk.</p>
+  <div class="field">
+    <label for="backupPassphrase">Passphrase (optional)</label>
+    <input id="backupPassphrase" type="password" autocomplete="new-password">
+    <input id="backupPassphraseAgain" type="password" autocomplete="new-password"
+      placeholder="Type it again" style="margin-top:8px">
+    <p class="hint">Encrypts the file. Without one, anyone who has the file has
+      every key to this server. A lost passphrase cannot be recovered.</p>
+  </div>
+  <button id="backupButton">Create backup</button>
+  <p class="hint" id="backupProgress" style="display:none"></p>
+  <p class="error" id="backupError" style="display:none"></p>
+  <div id="backupList" style="margin-top:14px"></div>
+  <p class="hint">To restore: extract the file, then run
+    <code>docker compose up -d</code> in the folder it makes. The steps are
+    inside it too.</p>
+</div>
+
 <h2>Replace keys</h2>
 <div class="panel">
   <p>If a key or password may have leaked, replace it here. The old one stops
@@ -451,6 +473,7 @@ async function load() {
   renderLocal(state.local);
   renderProxy(state.proxy);
   renderRotations(state.rotations);
+  loadBackups();
 
   document.getElementById("secrets").innerHTML = state.secrets.map((entry, i) => {
     const shown = !entry.secret || revealed.has(entry.name);
@@ -692,6 +715,48 @@ function renderRotations(rotations) {
   }).join("");
 }
 
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
+}
+
+async function loadBackups() {
+  const state = await (await fetch("/api/backups")).json();
+  const button = document.getElementById("backupButton");
+  const progress = document.getElementById("backupProgress");
+  const error = document.getElementById("backupError");
+
+  button.disabled = !!state.running;
+  button.textContent = state.running ? "Working…" : "Create backup";
+  progress.style.display = state.running ? "block" : "none";
+  progress.textContent = state.running ? state.running + "…" : "";
+  if (!state.running && state.last && state.last.error) {
+    error.textContent = state.last.error;
+    error.style.display = "block";
+  } else if (!window._backupRefused) {
+    error.style.display = "none";
+  }
+
+  document.getElementById("backupList").innerHTML = state.files.map((file) =>
+    '<div class="rotation"><div>' +
+    '<strong class="mono">' + escapeHtml(file.name) + '</strong>' +
+    '<p class="hint">' + formatBytes(file.bytes) + " · " +
+    new Date(file.createdAt).toLocaleString() +
+    (file.encrypted ? " · encrypted" : "") + '</p>' +
+    '</div></div>'
+  ).join("");
+
+  // One poll at a time, however often the ten-second refresh calls this.
+  clearTimeout(window._backupPoll);
+  if (state.running) window._backupPoll = setTimeout(loadBackups, 2000);
+}
+
 function renderLocal(local) {
   const section = document.getElementById("localSection");
   if (!local) { section.style.display = "none"; return; }
@@ -799,6 +864,37 @@ document.getElementById("rotations").addEventListener("click", async (event) => 
   load();
 });
 
+document.getElementById("backupButton").addEventListener("click", async () => {
+  const passphrase = document.getElementById("backupPassphrase");
+  const again = document.getElementById("backupPassphraseAgain");
+  const error = document.getElementById("backupError");
+  window._backupRefused = false;
+
+  if (passphrase.value !== again.value) {
+    window._backupRefused = true;
+    error.textContent = "The two passphrases do not match.";
+    error.style.display = "block";
+    return;
+  }
+
+  const res = await fetch("/api/backup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase: passphrase.value }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (body.error) {
+    window._backupRefused = true;
+    error.textContent = body.error;
+    error.style.display = "block";
+    return;
+  }
+  passphrase.value = "";
+  again.value = "";
+  error.style.display = "none";
+  loadBackups();
+});
+
 document.getElementById("restart").addEventListener("click", async (event) => {
   event.target.disabled = true;
   event.target.textContent = "Restarting…";
@@ -810,6 +906,106 @@ document.getElementById("restart").addEventListener("click", async (event) => {
 
 load();
 setInterval(load, 10000);
+`,
+  );
+}
+
+/**
+ * Shown instead of setup when an encrypted backup sits beside the compose file.
+ *
+ * The folder a backup extracts to is a server waiting for exactly one thing,
+ * the passphrase, and everything after that is the same as an unencrypted
+ * restore: the console finds the payload and loads it.
+ */
+export function restorePage(): string {
+  return shell(
+    "Restore your Rift server",
+    `<h1>Restore your Rift server</h1>
+<p class="sub">An encrypted backup is next to the compose file.</p>
+
+<form id="form" class="panel">
+  <div class="field">
+    <label for="passphrase">Passphrase</label>
+    <input id="passphrase" type="password" autocomplete="off" autofocus>
+    <p class="hint">The one this backup was made with.</p>
+  </div>
+  <button type="submit" id="go">Restore</button>
+</form>
+
+<div class="panel" id="progress" style="display:none">
+  <ul class="steps" id="steps"></ul>
+  <p class="hint">Loading a large backup can take several minutes.</p>
+</div>
+
+<div class="panel" id="done" style="display:none">
+  <h2 style="margin-top:0">Your server is back</h2>
+  <p>Reload this page and sign in with the console password this server had
+    before the backup.</p>
+</div>
+
+<div class="panel" id="failed" style="display:none">
+  <h2 style="margin-top:0">Restore stopped</h2>
+  <p class="error" id="why"></p>
+</div>`,
+    `
+const form = document.getElementById("form");
+const steps = document.getElementById("steps");
+const seen = new Map();
+
+function mark(step, done) {
+  let li = seen.get(step);
+  if (!li) {
+    li = document.createElement("li");
+    li.textContent = step;
+    steps.appendChild(li);
+    seen.set(step, li);
+  }
+  for (const other of steps.children) {
+    if (other.className === "active") other.className = "done";
+  }
+  li.className = done ? "done" : "active";
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  document.getElementById("go").disabled = true;
+  document.getElementById("failed").style.display = "none";
+  document.getElementById("progress").style.display = "block";
+
+  const response = await fetch("/api/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase: document.getElementById("passphrase").value }),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\\n");
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      if (event.step) mark(event.step, event.done);
+      if (event.restored) {
+        for (const li of steps.children) li.className = "done";
+        form.style.display = "none";
+        document.getElementById("done").style.display = "block";
+      }
+      if (event.error) {
+        document.getElementById("failed").style.display = "block";
+        document.getElementById("why").textContent = event.error;
+        document.getElementById("go").disabled = false;
+      }
+    }
+  }
+});
 `,
   );
 }

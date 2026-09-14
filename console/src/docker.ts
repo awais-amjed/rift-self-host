@@ -11,7 +11,7 @@
  * directory at the path it has on the host — see the console service in
  * docker-compose.yml for why that path has to match.
  */
-import { run } from "./subprocess.ts";
+import { run, runFromFile, runToFile } from "./subprocess.ts";
 import { setting } from "./env_file.ts";
 
 /** One service, as compose sees it. */
@@ -67,6 +67,59 @@ export function execInService(
     timeoutMs,
     stdin,
   );
+}
+
+/** [command] inside [service], with its output written to [path] on this side. */
+export function execToFile(
+  service: string,
+  command: string[],
+  path: string,
+): Promise<{ code: number; stderr: string }> {
+  return runToFile("docker", [
+    "compose",
+    "--profile",
+    "full",
+    "exec",
+    "-T",
+    service,
+    ...command,
+  ], {
+    cwd: projectDir(),
+    path,
+  });
+}
+
+/** [command] inside [service], reading [path] from this side as its input. */
+export function execFromFile(
+  service: string,
+  command: string[],
+  path: string,
+): Promise<{ code: number; stderr: string }> {
+  return runFromFile("docker", [
+    "compose",
+    "--profile",
+    "full",
+    "exec",
+    "-T",
+    service,
+    ...command,
+  ], {
+    cwd: projectDir(),
+    path,
+  });
+}
+
+/**
+ * Restart every service this stack runs, except the console doing the asking.
+ *
+ * `restart` rather than `up`: nothing about the configuration changed, and
+ * `restart` never creates a container this stack does not run — Caddy, beside
+ * somebody else's proxy.
+ */
+export async function restartStackServices(): Promise<CommandResult> {
+  const skip = new Set([SELF, ...disabledServices()]);
+  const services = (await servicesIn(["full"])).filter((service) => !skip.has(service));
+  return compose(["--profile", "full", "restart", ...services], 300_000);
 }
 
 /**

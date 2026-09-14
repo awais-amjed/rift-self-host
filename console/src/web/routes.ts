@@ -30,7 +30,7 @@ import { isRotationKind, lastRotated, rotate } from "../rotation.ts";
 import { restartService, servicesIn, serviceStatuses, startStack } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
 import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
-import { defaultPaths, runSetup, type SetupProgress } from "../setup/run.ts";
+import { defaultPaths, type Paths, runSetup, type SetupProgress } from "../setup/run.ts";
 import {
   closeSession,
   configuredPassword,
@@ -40,7 +40,10 @@ import {
   sessionCookie,
   tokenFrom,
 } from "./auth.ts";
-import { dashboardPage, exposedPage, loginPage, setupPage } from "./page.ts";
+import { dashboardPage, exposedPage, loginPage, restorePage, setupPage } from "./page.ts";
+import { backupStatus, listBackups, startBackup } from "../backup/create.ts";
+import { openSealedBackup, sealedBackupPresent } from "../backup/restore.ts";
+import { prepareStack } from "../boot.ts";
 
 /**
  * True once setup has run, as distinct from a `.env` merely existing.
@@ -193,7 +196,12 @@ export async function handle(request: Request): Promise<Response> {
   }
 
   if (path === "/") {
-    if (!isConfigured()) return html(setupPage(fields, optionsFromEnv(paths.projectDir)));
+    if (!isConfigured()) {
+      // An encrypted backup extracted here is a server waiting for its
+      // passphrase, not one waiting to be set up from scratch.
+      if (await sealedBackupPresent(paths.projectDir)) return html(restorePage());
+      return html(setupPage(fields, optionsFromEnv(paths.projectDir)));
+    }
     return html(dashboardPage(
       setupWasLocal()
         ? `${setting("RIFT_LOCAL_ADDRESS") ?? ""}:${setting("RIFT_LOCAL_PORT") ?? ""}`
@@ -351,6 +359,39 @@ export async function handle(request: Request): Promise<Response> {
     }
   }
 
+  if (path === "/api/restore" && request.method === "POST") {
+    if (isConfigured()) {
+      return json({
+        error: "This server is already set up, so there is nothing to restore into.",
+      }, 409);
+    }
+    if (!await sealedBackupPresent(paths.projectDir)) {
+      return json(
+        { error: "There is no encrypted backup beside the compose file." },
+        404,
+      );
+    }
+    const { passphrase } = await request.json();
+    return restoreStream(String(passphrase ?? ""), paths);
+  }
+
+  if (path === "/api/backups") {
+    return json({ files: await listBackups(paths.projectDir), ...backupStatus() });
+  }
+
+  if (path === "/api/backup" && request.method === "POST") {
+    if (!isConfigured()) {
+      return json({ error: "Set the server up before backing it up." }, 409);
+    }
+    const { passphrase } = await request.json();
+    try {
+      startBackup(paths.projectDir, String(passphrase ?? ""));
+      return json({ started: true }, 202);
+    } catch (error) {
+      return failure("backup", error);
+    }
+  }
+
   if (path === "/api/restart" && request.method === "POST") {
     const result = await startStack(["full"]);
     return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
@@ -469,6 +510,40 @@ function setupStream(request: Partial<SetupOptions>): Response {
       "Cache-Control": "no-store",
       // Nothing buffers this today, but a reverse proxy in front of the console
       // would, and the stream is the only feedback during setup.
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+/**
+ * Open an encrypted backup and restore it, reporting each step as it lands.
+ *
+ * A wrong passphrase fails before anything is written, so the page can simply
+ * ask again.
+ */
+function restoreStream(passphrase: string, paths: Paths): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      const send = (value: unknown) =>
+        controller.enqueue(encoder.encode(JSON.stringify(value) + "\n"));
+      try {
+        send({ step: "Opening the backup", done: false });
+        await openSealedBackup(paths.projectDir, passphrase);
+        send({ step: "Opening the backup", done: true });
+        await prepareStack(paths, (step) => send({ step, done: false }));
+        send({ restored: true });
+      } catch (error) {
+        send({ error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(body, {
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Cache-Control": "no-store",
       "X-Accel-Buffering": "no",
     },
   });

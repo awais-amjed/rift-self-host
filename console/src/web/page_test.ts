@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { dashboardPage, loginPage, setupPage } from "./page.ts";
+import { dashboardPage, loginPage, restorePage, setupPage } from "./page.ts";
 import { defaults, fields } from "../setup/options.ts";
 
 /**
@@ -28,6 +28,7 @@ const pages: [string, string][] = [
   ["setup", setupPage(fields, defaults)],
   ["dashboard", dashboardPage("chat.example.com")],
   ["login", loginPage(false)],
+  ["restore", restorePage()],
 ];
 
 Deno.test("no page gives two elements the same id", () => {
@@ -107,6 +108,8 @@ Deno.test("advanced options are behind the fold, plain ones are not", () => {
 Deno.test("every page's inline script parses", () => {
   const pages: [string, string][] = [
     ["login", loginPage(false)],
+    ["restore", restorePage()],
+    ["restore", restorePage()],
     ["setup", setupPage(fields, defaults)],
     ["dashboard", dashboardPage("chat.example.com")],
   ];
