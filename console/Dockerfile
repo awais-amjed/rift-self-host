@@ -6,10 +6,22 @@
 #   docker build -f console/Dockerfile -t riftapp/rift-console:latest .
 FROM denoland/deno:alpine-2.1.4
 
-# psql parses the migrations (see src/postgres.ts for why not a driver), and
-# the docker CLI plus the compose plugin are how the console drives the rest of
-# the stack through the mounted socket.
-RUN apk add --no-cache postgresql-client docker-cli docker-cli-compose
+# psql parses the migrations (see src/postgres.ts for why not a driver).
+RUN apk add --no-cache postgresql-client
+
+# The docker CLI and the compose plugin are how the console drives the rest of
+# the stack through the mounted socket — copied from the official image rather
+# than installed from Alpine, whose compose lags years behind.
+#
+# The version is not cosmetic. Compose decides whether a container needs
+# recreating by hashing its configuration, and v2 and v5 hash a bind mount
+# differently. With Alpine's v2.31 in here and a current v5 on the host, every
+# container one side created looked changed to the other: an operator's
+# `docker compose up -d` recreated the database the console had started, and
+# the console's next start recreated it back. Found when starting Studio took
+# the API down. v5.5 here and v5.3 on the host compute the same hash.
+COPY --from=docker:29.8.0-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29.8.0-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
 WORKDIR /app
 
