@@ -65,6 +65,36 @@ Deno.test("every element the script reaches for exists on its page", () => {
   }
 });
 
+Deno.test("every tab and every (i) opens something that exists", () => {
+  // Found by attribute rather than getElementById, so the lookup test above
+  // cannot see them: a help id typed wrong gives a button that does nothing.
+  const html = dashboardPage("chat.example.com");
+  const ids = new Set(idsIn(html));
+  const tabs = [...html.matchAll(/data-tab="([^"]+)"/g)].map((m) => m[1]);
+  assert(tabs.length >= 5, "the dashboard has no tabs");
+  for (const tab of tabs) {
+    assert(ids.has(`tab-${tab}`), `tab ${tab} has no panel`);
+    assert(ids.has(`badge-${tab}`), `tab ${tab} has no badge`);
+  }
+  const helps = [...html.matchAll(/data-help="([^"]+)"/g)].map((m) => m[1]);
+  assert(helps.length > 0, "no panel has help");
+  for (const help of helps) {
+    assert(ids.has(help), `(i) opens #${help}, which is not there`);
+  }
+});
+
+Deno.test("every help box links to the docs", () => {
+  const html = dashboardPage("chat.example.com");
+  const boxes = html.split('class="help"').slice(1);
+  for (const box of boxes) {
+    const end = box.indexOf("</div>");
+    assert(
+      box.slice(0, end).includes('href="https://docs.joinrift.app/'),
+      `a help box has no docs link: ${box.slice(0, 80)}`,
+    );
+  }
+});
+
 Deno.test("the setup form renders an input for every option", () => {
   const html = setupPage(fields, defaults);
   for (const field of fields) {

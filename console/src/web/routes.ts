@@ -25,7 +25,7 @@ import {
   turnOff,
   turnOn,
 } from "../local_testing.ts";
-import { proxyRoutes } from "../proxy.ts";
+import { proxyRoutes, SIGNALLING_PORT } from "../proxy.ts";
 import { isRotationKind, lastRotated, rotate } from "../rotation.ts";
 import { restartService, restartStack, servicesIn, serviceStatuses } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
@@ -80,16 +80,42 @@ function setupWasLocal(): boolean {
  */
 function ownProxyRoutes(templateRoot: string) {
   if (setting("RIFT_OWN_PROXY") !== "true") return Promise.resolve(null);
-  const port = (name: string, fallback: number) => {
-    const value = Number(setting(name));
-    return Number.isInteger(value) && value > 0 ? value : fallback;
-  };
   return proxyRoutes(
     templateRoot,
     setting("RIFT_DOMAIN") ?? "",
-    port("RIFT_PROXY_PORT", 8000),
-    { udp: port("LIVEKIT_UDP_PORT", 7882), tcp: port("LIVEKIT_TCP_PORT", 7881) },
+    portSetting("RIFT_PROXY_PORT", 8000),
+    {
+      udp: portSetting("LIVEKIT_UDP_PORT", 7882),
+      tcp: portSetting("LIVEKIT_TCP_PORT", 7881),
+    },
   );
+}
+
+/** A port from `.env`, or [fallback] when it is missing or not a port. */
+function portSetting(name: string, fallback: number): number {
+  const value = Number(setting(name));
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * The ports people's apps connect to, for the Network tab's list of what to
+ * open. Which ones depends on who answers web traffic: this stack's Caddy, the
+ * operator's own proxy, or nobody, on a stack set up for local testing.
+ */
+function publishedPorts() {
+  return {
+    mode: setupWasLocal()
+      ? "local"
+      : setting("RIFT_OWN_PROXY") === "true"
+      ? "proxy"
+      : "caddy",
+    http: portSetting("HTTP_PORT", 80),
+    https: portSetting("HTTPS_PORT", 443),
+    api: portSetting("RIFT_LOCAL_PORT", DEFAULT_API_PORT),
+    signalling: SIGNALLING_PORT,
+    mediaUdp: portSetting("LIVEKIT_UDP_PORT", 7882),
+    mediaTcp: portSetting("LIVEKIT_TCP_PORT", 7881),
+  };
 }
 
 /** The LAN switch, as the dashboard draws it. */
@@ -248,6 +274,7 @@ export async function handle(request: Request): Promise<Response> {
       // When each secret was last replaced. Null when the state table could
       // not be read, which the page shows as nothing rather than as "never".
       rotations,
+      ports: publishedPorts(),
     });
   }
 
