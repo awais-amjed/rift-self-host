@@ -467,6 +467,10 @@ services:
       meta:
         condition: service_started
     environment:
+      # Next.js binds to the container's hostname unless told otherwise, and
+      # the image's own healthcheck fetches localhost — so without this Studio
+      # works and reports itself unhealthy forever.
+      HOSTNAME: "0.0.0.0"
       STUDIO_PG_META_URL: http://meta:8080
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       DEFAULT_ORGANIZATION_NAME: Rift
