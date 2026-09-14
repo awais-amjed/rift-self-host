@@ -37,7 +37,7 @@ import {
   runSql,
 } from "./postgres.ts";
 import { clearState, readState, writeState } from "./state.ts";
-import { projectDir, restartService } from "./docker.ts";
+import { projectDir, recreateServices } from "./docker.ts";
 import { setting } from "./env_file.ts";
 import { behindCaddy, type Publishing, writeOverride } from "./setup/config_files.ts";
 
@@ -208,22 +208,6 @@ async function restoreLivekitUrls(
 }
 
 /**
- * The one line of a compose failure worth showing.
- *
- * Compose narrates every container it touched on stderr and puts the reason
- * last, so handing the whole thing to the page produced twenty lines of
- * "Container rift-db Healthy" above the sentence that mattered.
- */
-export function composeProblem(stderr: string): string {
-  const lines = stderr.split("\n").map((line) => line.trim()).filter((line) =>
-    line.length > 0
-  );
-  const reason = lines.find((line) => /^Error( response from daemon)?:/i.test(line));
-  return (reason ?? lines[lines.length - 1] ?? "docker compose failed")
-    .replace(/^Error response from daemon:\s*/i, "");
-}
-
-/**
  * What this stack publishes when the switch is *not* on.
  *
  * Not always "nothing". A stack whose operator brought their own reverse proxy
@@ -250,13 +234,8 @@ function localPublishing(local: LocalTesting): Publishing {
 }
 
 /** Kong publishes the API; LiveKit publishes signalling. Both change here. */
-async function recreate(): Promise<void> {
-  for (const service of ["kong", "livekit"]) {
-    const result = await restartService(service);
-    if (!result.ok) {
-      throw new Error(`Could not start ${service}: ${composeProblem(result.stderr)}`);
-    }
-  }
+function recreate(): Promise<void> {
+  return recreateServices(["kong", "livekit"]);
 }
 
 /**

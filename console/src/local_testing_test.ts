@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
+import { composeProblem } from "./docker.ts";
 import {
-  composeProblem,
   localLivekitUrl,
   localPublicUrl,
   type LocalTesting,

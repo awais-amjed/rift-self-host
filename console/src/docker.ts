@@ -163,6 +163,39 @@ export function restartService(service: string): Promise<CommandResult> {
   return compose(["--profile", "full", "up", "-d", "--force-recreate", service], 120_000);
 }
 
+/**
+ * Recreate [services] one after another, stopping at the first that fails.
+ *
+ * Shared by everything that changes configuration under running containers —
+ * the LAN switch and key rotation — because each needs the same two things:
+ * `--force-recreate`, so a changed `.env` is actually read, and a failure that
+ * names the service and says why in one line.
+ */
+export async function recreateServices(services: readonly string[]): Promise<void> {
+  for (const service of services) {
+    const result = await restartService(service);
+    if (!result.ok) {
+      throw new Error(`Could not start ${service}: ${composeProblem(result.stderr)}`);
+    }
+  }
+}
+
+/**
+ * The one line of a compose failure worth showing.
+ *
+ * Compose narrates every container it touched on stderr and puts the reason
+ * last, so handing the whole thing to the page produced twenty lines of
+ * "Container rift-db Healthy" above the sentence that mattered.
+ */
+export function composeProblem(stderr: string): string {
+  const lines = stderr.split("\n").map((line) => line.trim()).filter((line) =>
+    line.length > 0
+  );
+  const reason = lines.find((line) => /^Error( response from daemon)?:/i.test(line));
+  return (reason ?? lines[lines.length - 1] ?? "docker compose failed")
+    .replace(/^Error response from daemon:\s*/i, "");
+}
+
 /** Stop everything except the console. */
 export async function stopStack(): Promise<CommandResult> {
   const services = (await servicesIn(["full", "studio"])).filter((s) => s !== SELF);
