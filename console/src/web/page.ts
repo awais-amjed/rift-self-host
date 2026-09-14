@@ -44,6 +44,11 @@ input {
 input:focus { outline: none; border-color: var(--accent); }
 .field { margin-bottom: 18px; }
 .hint { font-size: 13px; color: var(--faint); margin: 6px 0 0; }
+.rotation { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between;
+  padding: 14px 0; border-top: 1px solid var(--line); }
+.rotation:first-child { border-top: 0; padding-top: 0; }
+.rotation:last-child { padding-bottom: 0; }
+.rotation button { flex-shrink: 0; }
 button {
   background: linear-gradient(135deg, var(--accent), #A56BFA); color: #fff;
   border: 0; border-radius: 8px; padding: 11px 20px; font-size: 15px;
@@ -407,6 +412,13 @@ ${banner}
 <h2>Credentials</h2>
 <div class="panel" id="secrets"></div>
 
+<h2>Replace keys</h2>
+<div class="panel">
+  <p>If a key or password may have leaked, replace it here. The old one stops
+    working straight away, and members do not have to do anything.</p>
+  <div id="rotations"></div>
+</div>
+
 <h2>Actions</h2>
 <div class="panel">
   <button class="quiet" id="restart">Restart the stack</button>
@@ -438,6 +450,7 @@ async function load() {
   await loadServers();
   renderLocal(state.local);
   renderProxy(state.proxy);
+  renderRotations(state.rotations);
 
   document.getElementById("secrets").innerHTML = state.secrets.map((entry, i) => {
     const shown = !entry.secret || revealed.has(entry.name);
@@ -625,6 +638,57 @@ document.getElementById("copyCaddyfile").addEventListener("click", async (event)
 
 /// Drawn from /api/status on every refresh, so a switch thrown from another
 /// tab shows up here rather than leaving two dashboards disagreeing.
+// Most likely to be needed first, so first. Each says what it costs the people
+// on the server, because that is the thing an operator has to weigh.
+const ROTATIONS = [
+  {
+    kind: "signing",
+    title: "Signing keys",
+    cost: "Use this if a key has leaked. Everyone is signed out and signed " +
+      "straight back in, without noticing.",
+    confirm: "Replace the signing keys? Everyone is signed out and signed " +
+      "straight back in.",
+  },
+  {
+    kind: "livekit",
+    title: "Voice credentials",
+    cost: "Calls in progress drop for a moment and reconnect.",
+    confirm: "Replace the voice credentials? Calls in progress will drop and " +
+      "reconnect.",
+  },
+  {
+    kind: "database",
+    title: "Database password",
+    cost: "The server is offline for about a minute while everything restarts.",
+    confirm: "Replace the database password? The server will be offline for " +
+      "about a minute.",
+  },
+];
+
+// Kept across the ten-second refresh: a rotation takes longer than that, and a
+// button that snaps back to its label mid-rotation reads as one that finished.
+window._rotationErrors = window._rotationErrors || new Map();
+
+function renderRotations(rotations) {
+  window._lastRotations = rotations;
+  document.getElementById("rotations").innerHTML = ROTATIONS.map((rotation) => {
+    const busy = window._rotating === rotation.kind;
+    const when = rotations ? rotations[rotation.kind] : undefined;
+    const last = when === undefined ? ""
+      : when ? "Last replaced " + new Date(when).toLocaleString()
+      : "Never replaced";
+    const error = window._rotationErrors.get(rotation.kind);
+    return '<div class="rotation"><div>' +
+      '<strong>' + rotation.title + '</strong>' +
+      '<p class="hint">' + rotation.cost + '</p>' +
+      (last ? '<p class="hint">' + last + '</p>' : '') +
+      (error ? '<p class="error">' + escapeHtml(error) + '</p>' : '') +
+      '</div><button class="quiet" data-kind="' + rotation.kind + '"' +
+      (window._rotating ? ' disabled' : '') + '>' +
+      (busy ? "Replacing…" : "Replace") + '</button></div>';
+  }).join("");
+}
+
 function renderLocal(local) {
   const section = document.getElementById("localSection");
   if (!local) { section.style.display = "none"; return; }
@@ -703,6 +767,32 @@ document.getElementById("localToggle").addEventListener("click", async (event) =
     error.textContent = body.error;
     error.style.display = "block";
   }
+  load();
+});
+
+document.getElementById("rotations").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-kind]");
+  if (!button || window._rotating) return;
+  const rotation = ROTATIONS.find((r) => r.kind === button.dataset.kind);
+  if (!rotation || !confirm(rotation.confirm)) return;
+
+  window._rotating = rotation.kind;
+  window._rotationErrors.delete(rotation.kind);
+  renderRotations(window._lastRotations);
+
+  const res = await fetch("/api/rotate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: rotation.kind }),
+  }).catch(() => null);
+  // A database rotation restarts what the console talks to, so an answer that
+  // never arrives is not proof it failed.
+  const body = res ? await res.json().catch(() => ({})) : {
+    error: "No answer from the console. It may still be finishing — reload in a minute.",
+  };
+
+  window._rotating = null;
+  if (body.error) window._rotationErrors.set(rotation.kind, body.error);
   load();
 });
 

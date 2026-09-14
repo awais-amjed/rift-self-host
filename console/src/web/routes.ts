@@ -26,6 +26,7 @@ import {
   turnOn,
 } from "../local_testing.ts";
 import { proxyRoutes } from "../proxy.ts";
+import { isRotationKind, lastRotated, rotate } from "../rotation.ts";
 import { restartService, servicesIn, serviceStatuses, startStack } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
 import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
@@ -219,11 +220,12 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/api/status") {
     const target = targetFromEnv();
-    const [services, checks, local, proxy] = await Promise.all([
+    const [services, checks, local, proxy, rotations] = await Promise.all([
       serviceStatuses(),
       runChecks(target, paths.migrationsDir).catch(() => []),
       readLocalTesting(target).catch(() => null),
       ownProxyRoutes(paths.templateRoot).catch(() => null),
+      lastRotated(target).catch(() => null),
     ]);
     return json({
       services,
@@ -235,6 +237,9 @@ export async function handle(request: Request): Promise<Response> {
       // Present only when this stack does not run Caddy because somebody else
       // is terminating TLS for it. Nothing else needs the routing.
       proxy,
+      // When each secret was last replaced. Null when the state table could
+      // not be read, which the page shows as nothing rather than as "never".
+      rotations,
     });
   }
 
@@ -326,6 +331,23 @@ export async function handle(request: Request): Promise<Response> {
       return json(result);
     } catch (error) {
       return failure("upgrade", error);
+    }
+  }
+
+  if (path === "/api/rotate" && request.method === "POST") {
+    if (!isConfigured()) {
+      return json({
+        error: "This stack has not been set up, so there is nothing to replace.",
+      }, 409);
+    }
+    const { kind } = await request.json();
+    if (!isRotationKind(kind)) {
+      return json({ error: "Nothing by that name can be replaced." }, 400);
+    }
+    try {
+      return json({ kind, rotatedAt: await rotate(kind, paths) });
+    } catch (error) {
+      return failure(`rotate ${kind}`, error);
     }
   }
 
