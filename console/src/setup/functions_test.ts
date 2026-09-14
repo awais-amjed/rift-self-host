@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { join } from "jsr:@std/path@1";
-import { installFunctions } from "./functions.ts";
+import { installFunctions, missingFunctions } from "./functions.ts";
 
 /** Build a directory of `name/index.ts` files and return its path. */
 async function sourceWith(names: string[]): Promise<string> {
@@ -71,4 +71,26 @@ Deno.test("installing into nothing creates it", async () => {
   assertEquals(report.installed, ["main"]);
   assertEquals(await names(target), ["main"]);
   await Deno.remove(root, { recursive: true });
+});
+
+Deno.test("an empty functions volume reports every endpoint missing", async () => {
+  // A restored server starts with an empty volume and a database that already
+  // says it is at this release, so nothing else notices the endpoints are gone.
+  const app = await sourceWith(["login", "register"]);
+  const runtime = await sourceWith(["main"]);
+  const target = await Deno.makeTempDir();
+
+  assertEquals(await missingFunctions([app, runtime], target), [
+    "login",
+    "main",
+    "register",
+  ]);
+  await installFunctions([app, runtime], target);
+  assertEquals(await missingFunctions([app, runtime], target), []);
+  await Deno.remove(target, { recursive: true });
+});
+
+Deno.test("a functions volume that was never created counts as empty", async () => {
+  const target = join(await Deno.makeTempDir(), "not-there");
+  assertEquals(await missingFunctions([await sourceWith(["login"])], target), ["login"]);
 });

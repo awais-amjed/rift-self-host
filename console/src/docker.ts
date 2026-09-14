@@ -37,12 +37,36 @@ export function projectDir(): string {
   return Deno.env.get("RIFT_PROJECT_DIR") ?? Deno.cwd();
 }
 
-async function compose(args: string[], timeoutMs = 600_000): Promise<CommandResult> {
+async function compose(
+  args: string[],
+  timeoutMs = 600_000,
+  stdin?: string,
+): Promise<CommandResult> {
   const result = await run("docker", ["compose", ...args], {
     cwd: projectDir(),
     timeoutMs,
+    stdin,
   });
   return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+}
+
+/**
+ * Run [command] inside the running [service] container, with [stdin] piped in.
+ *
+ * `-T` because there is no terminal here, and a TTY allocated over a pipe
+ * mangles whatever the command writes to stdout.
+ */
+export function execInService(
+  service: string,
+  command: string[],
+  stdin?: string,
+  timeoutMs = 120_000,
+): Promise<CommandResult> {
+  return compose(
+    ["--profile", "full", "exec", "-T", service, ...command],
+    timeoutMs,
+    stdin,
+  );
 }
 
 /**

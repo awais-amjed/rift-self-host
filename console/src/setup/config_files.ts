@@ -326,6 +326,77 @@ export async function rerender(
 }
 
 /**
+ * Write whichever generated files are missing, from what `.env` says.
+ *
+ * A backup is `.env` and a database dump. Everything under `volumes/` is
+ * derived from `.env`, and so is the compose override for a stack without
+ * Caddy. Restoring one by the docs brought the database up with
+ * `volumes/db/roles.sql` absent — and Docker, asked to bind-mount a file that
+ * does not exist, creates an empty *directory* in its place. Postgres
+ * initialised with no role passwords set, and auth, rest, realtime and storage
+ * all failed authentication against a database reporting itself healthy.
+ *
+ * Never overwrites a file that exists: livekit.yaml is one operators are told
+ * to edit. An empty directory Docker left where a file belongs is replaced.
+ */
+export async function restoreMissingConfig(
+  options: { templateRoot: string; projectDir: string },
+): Promise<string[]> {
+  const { templateRoot, projectDir } = options;
+  const context: RenderContext = {
+    ...optionsFromEnv(projectDir),
+    secrets: secretsFromEnv(readEnvFile(projectDir)),
+  };
+  const values = placeholders(context);
+  const written: string[] = [];
+
+  for (const { template, destination } of RENDERED) {
+    const path = join(projectDir, destination);
+    if (!await vacant(path)) continue;
+    await Deno.mkdir(join(path, ".."), { recursive: true });
+    const source = await Deno.readTextFile(join(templateRoot, template));
+    await Deno.writeTextFile(path, render(source, values));
+    written.push(destination);
+  }
+
+  for (const script of DB_SCRIPTS) {
+    const destination = `volumes/db/${script}`;
+    const path = join(projectDir, destination);
+    if (!await vacant(path)) continue;
+    await Deno.mkdir(join(projectDir, "volumes/db"), { recursive: true });
+    await Deno.copyFile(join(templateRoot, "db", script), path);
+    written.push(destination);
+  }
+
+  if (
+    await vacant(join(projectDir, OVERRIDE_FILE)) &&
+    await writeOverride(projectDir, publishingFor(context))
+  ) {
+    written.push(OVERRIDE_FILE);
+  }
+
+  return written;
+}
+
+/**
+ * Whether [path] holds nothing worth keeping: nothing at all, or the empty
+ * directory Docker makes when told to mount a file that is not there — which
+ * is removed here so the file can take its place.
+ */
+async function vacant(path: string): Promise<boolean> {
+  try {
+    const info = await Deno.stat(path);
+    if (!info.isDirectory) return false;
+    for await (const _entry of Deno.readDir(path)) return false;
+    await Deno.remove(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return true;
+    throw error;
+  }
+}
+
+/**
  * What this stack publishes on the host, beyond the ports the compose file
  * already names.
  *

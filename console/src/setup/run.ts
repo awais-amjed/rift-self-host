@@ -15,14 +15,13 @@
  * happening. Pulling the images alone can take minutes on a small VPS, and a
  * blank screen for that long reads as a hang.
  */
-import { join } from "jsr:@std/path@1";
 import { setting, updateSetting } from "../env_file.ts";
-import { isReachable, type PostgresTarget } from "../postgres.ts";
+import { type PostgresTarget, waitUntilReachable } from "../postgres.ts";
 import { restartService, startStack } from "../docker.ts";
 import { applyPlan, planMigrations } from "../migrations/runner.ts";
 import { publicUrlFor, type StackConfig, writeConfigFiles } from "./config_files.ts";
 import { envHasPassword, problemsWith } from "./options.ts";
-import { installFunctions } from "./functions.ts";
+import { functionSources, installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
 import { applyLimits } from "./realtime.ts";
 import { generateSecrets, type StackSecrets } from "./secrets.ts";
@@ -71,11 +70,7 @@ export function defaultPaths(): Paths {
 const DATABASE_TIMEOUT_MS = 120_000;
 
 async function waitForDatabase(target: PostgresTarget): Promise<void> {
-  const deadline = Date.now() + DATABASE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (await isReachable(target)) return;
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
+  if (await waitUntilReachable(target, DATABASE_TIMEOUT_MS)) return;
   throw new Error("Postgres did not come up. `docker compose logs db` will say why.");
 }
 
@@ -123,7 +118,7 @@ export async function runSetup(
 
   await step("Installing server endpoints", async () => {
     const installed = await installFunctions(
-      [paths.functionsDir, join(paths.templateRoot, "functions-main")],
+      functionSources(paths),
       paths.functionsTarget,
     );
     report({

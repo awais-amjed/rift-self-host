@@ -32,10 +32,13 @@
 import { restartService, waitForSettled } from "./docker.ts";
 import { applyPlan, planMigrations } from "./migrations/runner.ts";
 import { isReachable, type PostgresTarget } from "./postgres.ts";
-import { installFunctions } from "./setup/functions.ts";
+import {
+  functionSources,
+  installFunctions,
+  missingFunctions,
+} from "./setup/functions.ts";
 import { type Paths } from "./setup/run.ts";
 import { APPLIED_VERSION, imageVersion, readState, writeState } from "./state.ts";
-import { join } from "jsr:@std/path@1";
 
 /** What this stack still needs. */
 export interface PendingWork {
@@ -47,6 +50,12 @@ export interface PendingWork {
   pendingMigrations: string[];
   /** Migrations that ran here and have since been edited — always a problem. */
   driftedMigrations: string[];
+  /**
+   * Endpoints this image carries that the functions volume does not have. A
+   * restored server starts with none and a database already at this release,
+   * so before this nothing counted as outstanding and every endpoint was gone.
+   */
+  missingEndpoints: string[];
   /**
    * Whether anything at all is outstanding.
    *
@@ -84,14 +93,20 @@ export async function pendingWork(
 
   const pendingMigrations = plan.pending.map((m) => m.name);
   const driftedMigrations = plan.drifted.map((m) => m.name);
+  const missingEndpoints = await missingFunctions(
+    functionSources(paths),
+    paths.functionsTarget,
+  );
 
   return {
     appliedVersion: applied,
     imageVersion: image,
     pendingMigrations,
     driftedMigrations,
+    missingEndpoints,
     needed: pendingMigrations.length > 0 ||
       driftedMigrations.length > 0 ||
+      missingEndpoints.length > 0 ||
       applied !== image,
   };
 }
@@ -121,7 +136,7 @@ export async function applyUpgrade(
 
   const installed = await step("Installing server endpoints", () =>
     installFunctions(
-      [paths.functionsDir, join(paths.templateRoot, "functions-main")],
+      functionSources(paths),
       paths.functionsTarget,
     ));
 

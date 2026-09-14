@@ -8,11 +8,14 @@ import { parseEnv } from "../env_file.ts";
 import {
   behindCaddy,
   livekitSettings,
+  OVERRIDE_FILE,
   placeholders,
   publishingFor,
   render,
+  type RenderContext,
   renderEnv,
   renderOverride,
+  restoreMissingConfig,
   secretsFromEnv,
   signingSettings,
 } from "./config_files.ts";
@@ -280,4 +283,78 @@ Deno.test("a .env missing a secret is refused by name", async () => {
   const values = parseEnv(renderEnv(await context()));
   delete values.JWT_KEYS;
   assertThrows(() => secretsFromEnv(values), Error, "JWT_KEYS");
+});
+
+const templateRoot = new URL("../../templates/", import.meta.url).pathname;
+
+/** A project directory holding nothing but the `.env` setup would have written. */
+async function projectWith(ctx: RenderContext): Promise<string> {
+  const directory = await Deno.makeTempDir({ prefix: "rift-restore-" });
+  await Deno.writeTextFile(`${directory}/.env`, renderEnv(ctx));
+  return directory;
+}
+
+Deno.test("a directory holding only .env gets every generated file back", async () => {
+  // A backup is .env and a dump. Without these, Docker mounts empty
+  // directories where roles.sql and jwt.sql belong, and Postgres comes up with
+  // no role passwords.
+  const ctx = await context();
+  const project = await projectWith(ctx);
+
+  const written = await restoreMissingConfig({ templateRoot, projectDir: project });
+
+  assertEquals(written.sort(), [
+    "volumes/api/kong.yml",
+    "volumes/caddy/Caddyfile",
+    "volumes/db/_supabase.sql",
+    "volumes/db/jwt.sql",
+    "volumes/db/realtime.sql",
+    "volumes/db/roles.sql",
+    "volumes/db/webhooks.sql",
+    "volumes/livekit/livekit.yaml",
+  ]);
+  assertStringIncludes(
+    await Deno.readTextFile(`${project}/volumes/api/kong.yml`),
+    ctx.secrets.secretKey,
+  );
+  assertStringIncludes(
+    await Deno.readTextFile(`${project}/volumes/livekit/livekit.yaml`),
+    ctx.secrets.livekitApiKey,
+  );
+  await Deno.remove(project, { recursive: true });
+});
+
+Deno.test("a stack behind somebody else's proxy gets its override back too", async () => {
+  const ctx = { ...(await context()), ownProxy: true, proxyPort: 8001 };
+  const project = await projectWith(ctx);
+
+  const written = await restoreMissingConfig({ templateRoot, projectDir: project });
+
+  assert(written.includes(OVERRIDE_FILE));
+  assertStringIncludes(
+    await Deno.readTextFile(`${project}/${OVERRIDE_FILE}`),
+    "127.0.0.1:8001:8000",
+  );
+  await Deno.remove(project, { recursive: true });
+});
+
+Deno.test("an edited file is kept, and a directory Docker left in a file's place is not", async () => {
+  const ctx = await context();
+  const project = await projectWith(ctx);
+  const edited = "rtc:\n  udp_port: 7882-7889\n";
+  await Deno.mkdir(`${project}/volumes/livekit`, { recursive: true });
+  await Deno.writeTextFile(`${project}/volumes/livekit/livekit.yaml`, edited);
+  // What a failed first start leaves behind.
+  await Deno.mkdir(`${project}/volumes/db/roles.sql`, { recursive: true });
+
+  const written = await restoreMissingConfig({ templateRoot, projectDir: project });
+
+  assert(!written.includes("volumes/livekit/livekit.yaml"));
+  assertEquals(
+    await Deno.readTextFile(`${project}/volumes/livekit/livekit.yaml`),
+    edited,
+  );
+  assert(written.includes("volumes/db/roles.sql"));
+  assert((await Deno.stat(`${project}/volumes/db/roles.sql`)).isFile);
+  await Deno.remove(project, { recursive: true });
 });

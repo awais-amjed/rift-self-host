@@ -135,6 +135,26 @@ export async function isReachable(target: PostgresTarget): Promise<boolean> {
   }
 }
 
+/**
+ * Wait for Postgres to accept connections, or give up after [timeoutMs].
+ *
+ * Returns rather than throws, so each caller decides what a database that
+ * never came up means: setup stops, while the console's own start logs it and
+ * carries on serving the dashboard.
+ */
+export async function waitUntilReachable(
+  target: PostgresTarget,
+  timeoutMs = 120_000,
+  pollMs = 2000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isReachable(target)) return true;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return false;
+}
+
 /** A SQL string literal, quoted and escaped. */
 export function literal(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;

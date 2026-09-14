@@ -505,6 +505,9 @@ async function loadVersion() {
     if (v.driftedMigrations.length) {
       rows.push(["Changed after running", escapeHtml(v.driftedMigrations.join(", "))]);
     }
+    if (v.missingEndpoints && v.missingEndpoints.length) {
+      rows.push(["Endpoints missing", v.missingEndpoints.length + " to install"]);
+    }
   }
   document.getElementById("version").innerHTML = rows
     .map(([k, val]) => '<tr><td class="name">' + k + "</td><td>" + val + "</td></tr>")

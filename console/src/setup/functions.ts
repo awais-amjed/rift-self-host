@@ -69,6 +69,42 @@ export async function installFunctions(
   return { installed, removed };
 }
 
+/**
+ * Where a server's endpoints come from: the app's own functions, and the edge
+ * runtime's `main` router, which ships with the console's templates.
+ */
+export function functionSources(
+  paths: { functionsDir: string; templateRoot: string },
+): string[] {
+  return [paths.functionsDir, join(paths.templateRoot, "functions-main")];
+}
+
+/**
+ * The functions [sources] would install that [target] does not have.
+ *
+ * Asked on every start, because a server brought back from a backup has an
+ * empty functions volume and nothing else noticed: the release recorded in the
+ * restored database matches the image, so there was no upgrade to apply, and
+ * every endpoint — `login` included — answered "could not find an appropriate
+ * entrypoint". Found by restoring a real backup the way the docs said.
+ *
+ * By name only. An endpoint that is present but out of date is an upgrade's
+ * business, and upgrades compare releases rather than directories.
+ */
+export async function missingFunctions(
+  sources: string[],
+  target: string,
+): Promise<string[]> {
+  const present = await entryNames(target);
+  const missing: string[] = [];
+  for (const source of sources) {
+    for (const name of await entryNames(source)) {
+      if (!present.has(name)) missing.push(name);
+    }
+  }
+  return missing.sort();
+}
+
 /** Recursive copy. `Deno.copyFile` does not do directories. */
 async function copyTree(from: string, to: string): Promise<void> {
   const info = await Deno.stat(from);
