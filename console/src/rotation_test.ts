@@ -11,6 +11,7 @@ import {
   jwtSettingStatement,
   livekitStatement,
   passwordStatements,
+  realtimeDatabaseTenant,
   servicesToRecreate,
   withLivekitKey,
 } from "./rotation.ts";
@@ -106,4 +107,26 @@ Deno.test("only the three rotations are accepted", () => {
   assert(!isRotationKind("everything"));
   assert(!isRotationKind(undefined));
   assert(!isRotationKind("constructor"));
+});
+
+Deno.test("Realtime is sent its database login exactly as its seed wrote it", async () => {
+  // Realtime merges an update into defaults, not into what it has stored, so
+  // anything left out goes back to a default that points elsewhere. The seed
+  // took these from the realtime service's environment, so they are checked
+  // against the compose file rather than trusted.
+  const compose = await Deno.readTextFile(
+    new URL("../../docker-compose.yml", import.meta.url),
+  );
+  const service =
+    compose.split("\n  realtime:\n")[1].split(/\n {2}[a-z][a-z0-9-]*:\n/)[0];
+  const environment = (name: string) =>
+    service.match(new RegExp(`^\\s+${name}: (.+)$`, "m"))?.[1].trim();
+
+  const [extension] = realtimeDatabaseTenant("the-password").extensions;
+  assertEquals(extension.type, "postgres_cdc_rls");
+  assertEquals(extension.settings.db_host, environment("DB_HOST"));
+  assertEquals(extension.settings.db_name, environment("DB_NAME"));
+  assertEquals(extension.settings.db_port, environment("DB_PORT"));
+  assertEquals(extension.settings.db_user, environment("DB_USER"));
+  assertEquals(extension.settings.db_password, "the-password");
 });

@@ -10,8 +10,9 @@
  *
  * - **Voice credentials.** Held by LiveKit and by `server_secrets`, nowhere a
  *   client can see. Calls in progress drop and reconnect.
- * - **The database password.** Seven roles, and every service that connects
- *   as one of them. The server is unreachable while those restart.
+ * - **The database password.** Seven roles, every service that connects as
+ *   one of them, and Realtime's own copy of the login. The server is
+ *   unreachable while those restart.
  * - **Signing keys.** Everything a token is checked against, and every key
  *   signed with it. Members are signed out and straight back in — the app and
  *   the bot SDK both log in again on a rejected token — because the
@@ -184,6 +185,44 @@ export function jwtSettingStatement(secret: string): string {
   return `ALTER DATABASE postgres SET "app.settings.jwt_secret" TO ${literal(secret)};`;
 }
 
+/**
+ * The tenant fields that tell Realtime how to reach the project database.
+ *
+ * Realtime keeps a second copy of the database login inside its tenant row —
+ * the `postgres_cdc_rls` extension it reads changes through — and with the seed
+ * off nothing refreshes it. The first database rotation on a running stack left
+ * every member unable to join a channel ("UnableToConnectToProject") while
+ * everything else worked, which is how it was found.
+ *
+ * Sent whole, because Realtime merges an update into the extension's defaults
+ * rather than into what is stored: a password on its own would put every other
+ * field back to a default that points somewhere else. These are the values the
+ * seed read from the realtime service's environment in docker-compose.yml, and
+ * a test holds them to that file. Checked on a running stack too: the stored
+ * ciphertexts for host, name, port and user came back identical, and only the
+ * password's changed.
+ */
+export function realtimeDatabaseTenant(password: string): {
+  extensions: { type: string; settings: Record<string, unknown> }[];
+} {
+  return {
+    extensions: [{
+      type: "postgres_cdc_rls",
+      settings: {
+        db_host: "db",
+        db_name: "postgres",
+        db_port: "5432",
+        db_user: "supabase_admin",
+        db_password: password,
+        region: "us-east-1",
+        poll_interval_ms: 100,
+        poll_max_record_bytes: 1_048_576,
+        ssl_enforced: false,
+      },
+    }],
+  };
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Against the running stack
 // ────────────────────────────────────────────────────────────────────────────
@@ -192,7 +231,8 @@ export function jwtSettingStatement(secret: string): string {
 const REALTIME_TENANT_API = `http://realtime:4000/api/tenants/${TENANT}`;
 
 /**
- * Give Realtime's tenant row a new secret and key set.
+ * Change fields on Realtime's tenant row: its signing secret and key set, or
+ * the database login it reads changes with.
  *
  * Realtime keeps both in its own table, not only in its environment, and with
  * the seed off (see realtime.ts) nothing copies a changed `.env` into that
@@ -205,10 +245,10 @@ const REALTIME_TENANT_API = `http://realtime:4000/api/tenants/${TENANT}`;
  * the running container was started with. The update does not clear
  * Realtime's cache, so the container still has to be recreated afterwards.
  */
-async function updateRealtimeTenant(
+async function putRealtimeTenant(
   apiSecret: string,
-  jwtSecret: string,
-  jwks: { keys: Jwk[] },
+  tenant: Record<string, unknown>,
+  what: string,
 ): Promise<void> {
   const issuedAt = Math.floor(Date.now() / 1000);
   const token = await new SignJWT({ role: "service_role" })
@@ -220,15 +260,26 @@ async function updateRealtimeTenant(
   const response = await fetch(REALTIME_TENANT_API, {
     method: "PUT",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ tenant: { jwt_secret: jwtSecret, jwt_jwks: jwks } }),
+    body: JSON.stringify({ tenant }),
     signal: AbortSignal.timeout(15_000),
   });
   await response.body?.cancel();
   if (!response.ok) {
-    throw new Error(
-      `Realtime would not take the new signing keys (HTTP ${response.status}).`,
-    );
+    throw new Error(`Realtime would not take ${what} (HTTP ${response.status}).`);
   }
+}
+
+/** Realtime's signing secret and key set. */
+function updateRealtimeTenant(
+  apiSecret: string,
+  jwtSecret: string,
+  jwks: { keys: Jwk[] },
+): Promise<void> {
+  return putRealtimeTenant(
+    apiSecret,
+    { jwt_secret: jwtSecret, jwt_jwks: jwks },
+    "the new signing keys",
+  );
 }
 
 /**
@@ -320,10 +371,18 @@ async function rotateDatabase(
   const next = randomString(32);
   const admin = adminTarget(target);
   const hidden = [current, next];
+  // Realtime's API checks tokens against the signing secret, which this
+  // rotation leaves alone, so one value serves both directions.
+  const apiSecret = secretsFromEnv(readEnvFile(paths.projectDir)).jwtSecret;
 
   await runSecretSql(admin, passwordStatements(next), hidden, "the new password");
 
   try {
+    await putRealtimeTenant(
+      apiSecret,
+      realtimeDatabaseTenant(next),
+      "the new database password",
+    );
     await updateSettings({ POSTGRES_PASSWORD: next }, paths.projectDir);
     await recreateFor("database");
   } catch (error) {
@@ -332,6 +391,11 @@ async function rotateDatabase(
       passwordStatements(current),
       hidden,
       "the old password",
+    ).catch(() => {});
+    await putRealtimeTenant(
+      apiSecret,
+      realtimeDatabaseTenant(current),
+      "the old database password",
     )
       .catch(() => {});
     await updateSettings({ POSTGRES_PASSWORD: current }, paths.projectDir).catch(
