@@ -23,6 +23,8 @@ export interface ServiceStatus {
   health: string;
   /** What compose prints as the status, e.g. "Up 4 minutes (healthy)". */
   status: string;
+  /** The image the container was made from, as named: `kong/kong:3.9.1`. */
+  image: string;
 }
 
 /** The result of running a compose command. */
@@ -148,6 +150,7 @@ export async function serviceStatuses(): Promise<ServiceStatus[]> {
     state: row.State ?? "",
     health: row.Health ?? "",
     status: row.Status ?? "",
+    image: row.Image ?? "",
   }));
 }
 
@@ -213,10 +216,107 @@ export async function startStack(
     };
   }
 
-  const flags = profiles.flatMap((profile) => ["--profile", profile]);
   // No --remove-orphans: it is scoped to services the compose file no longer
   // defines, but the blast radius if that ever changed is this container.
-  return compose([...flags, "up", "-d", "--wait", ...services]);
+  return compose(upArgs(profiles, services));
+}
+
+/**
+ * The compose arguments that bring [services] up without recreating anything.
+ *
+ * `--no-recreate` because compose's own judgement of "this container is out of
+ * date" depends on the compose version that made it. It compares a config hash
+ * and labels recording the image digest and the dependencies, and different
+ * versions write those differently — so a container an operator started with
+ * the host's compose looked changed to the console's, and the console's next
+ * start recreated it, database included, and the reverse. The things that do
+ * need a container recreated — a new image, a rotated key, the LAN switch —
+ * each recreate exactly their own service instead.
+ */
+export function upArgs(profiles: string[], services: string[]): string[] {
+  return [
+    ...profiles.flatMap((profile) => ["--profile", profile]),
+    "up",
+    "-d",
+    "--no-recreate",
+    "--wait",
+    ...services,
+  ];
+}
+
+/**
+ * Services whose container was made from a different image than the compose
+ * file names now.
+ *
+ * Compared by the image *name*, `kong/kong:3.9.1`, which reads the same to
+ * every compose version — unlike the digest compose records, which is what made
+ * its own recreate decision unreliable across versions. The console's own
+ * container is left out: replacing it is the operator's `docker compose up -d`.
+ */
+export function outdatedServices(
+  wanted: Record<string, string>,
+  running: ServiceStatus[],
+): string[] {
+  return running
+    .filter((container) =>
+      container.name !== SELF &&
+      wanted[container.name] !== undefined &&
+      container.image !== wanted[container.name]
+    )
+    .map((container) => container.name)
+    .sort();
+}
+
+/** The image each service in [profiles] names, as the compose file says now. */
+async function serviceImages(profiles: string[]): Promise<Record<string, string>> {
+  const flags = profiles.flatMap((profile) => ["--profile", profile]);
+  const result = await compose([...flags, "config", "--format", "json"], 30_000);
+  if (!result.ok) return {};
+  const services = (JSON.parse(result.stdout).services ?? {}) as Record<
+    string,
+    { image?: string }
+  >;
+  return Object.fromEntries(
+    Object.entries(services).map(([name, service]) => [name, service.image ?? ""]),
+  );
+}
+
+/**
+ * Bring every service running an out-of-date image onto the one the compose
+ * file names, one service at a time. Returns the services it recreated.
+ *
+ * This is how a `docker compose pull` takes effect. The documented update is
+ * `pull` and then `up -d`, and `up -d` without a profile only replaces the
+ * console — so without this, a release that moved Postgres or Kong to a new
+ * version pulled the image and never ran it.
+ */
+export async function recreateOutdated(): Promise<string[]> {
+  const [wanted, running] = await Promise.all([
+    serviceImages(["full"]),
+    serviceStatuses(),
+  ]);
+  const disabled = new Set(disabledServices());
+  const outdated = outdatedServices(wanted, running).filter((name) =>
+    !disabled.has(name)
+  );
+  await recreateServices(outdated);
+  return outdated;
+}
+
+/**
+ * The dashboard's Restart the stack: start whatever is stopped or missing,
+ * bring any service onto a newer image, and restart everything else.
+ *
+ * It no longer recreates every container. A restart picks up nothing a
+ * container reads only when it is created, so a hand-edited `.env` still needs
+ * that one service recreated — which is what the key rotations and the LAN
+ * switch already do for the settings they change.
+ */
+export async function restartStack(): Promise<CommandResult> {
+  const started = await startStack(["full"]);
+  if (!started.ok) return started;
+  await recreateOutdated();
+  return await restartStackServices();
 }
 
 /**

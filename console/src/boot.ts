@@ -30,6 +30,7 @@ import {
 import type { Paths } from "./setup/run.ts";
 import {
   composeProblem,
+  recreateOutdated,
   restartService,
   serviceStatuses,
   startStack,
@@ -105,6 +106,16 @@ export async function prepareStack(
     // A functions container that started before its endpoints existed keeps
     // failing to find them until it is recreated.
     await restartService("functions");
+  }
+
+  // A `docker compose pull` delivers new images, and the documented
+  // `docker compose up -d` after it only replaces the console. Everything else
+  // is brought onto its new image here, one service at a time, and nothing is
+  // recreated that has not actually changed.
+  const updated = await recreateOutdated();
+  if (updated.length > 0) {
+    report("Updating services");
+    console.log(`Updated to the images the compose file names: ${updated.join(", ")}`);
   }
 
   const target = targetFromEnv();

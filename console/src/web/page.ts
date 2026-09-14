@@ -444,7 +444,7 @@ ${banner}
 <h2>Actions</h2>
 <div class="panel">
   <button class="quiet" id="restart">Restart the stack</button>
-  <p class="hint">Recreates every container, picking up any configuration change.</p>
+  <p class="hint">Starts anything that has stopped, moves any service onto the version the compose file names, and restarts the rest.</p>
 </div>`,
     `
 async function load() {

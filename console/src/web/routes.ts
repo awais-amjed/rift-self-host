@@ -27,7 +27,7 @@ import {
 } from "../local_testing.ts";
 import { proxyRoutes } from "../proxy.ts";
 import { isRotationKind, lastRotated, rotate } from "../rotation.ts";
-import { restartService, servicesIn, serviceStatuses, startStack } from "../docker.ts";
+import { restartService, restartStack, servicesIn, serviceStatuses } from "../docker.ts";
 import { targetFromEnv } from "../postgres.ts";
 import { fields, optionsFromEnv, type SetupOptions } from "../setup/options.ts";
 import { defaultPaths, type Paths, runSetup, type SetupProgress } from "../setup/run.ts";
@@ -393,8 +393,12 @@ export async function handle(request: Request): Promise<Response> {
   }
 
   if (path === "/api/restart" && request.method === "POST") {
-    const result = await startStack(["full"]);
-    return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
+    try {
+      const result = await restartStack();
+      return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
+    } catch (error) {
+      return failure("restart", error);
+    }
   }
 
   if (path === "/api/restart-service" && request.method === "POST") {
