@@ -30,10 +30,11 @@ rtc:
   udp_port: 7882
 
   # ICE/TCP, for clients on networks that block UDP outright. Slower, but
-  # connected — and the only fallback there is, because no embedded TURN server
-  # is configured. Turning one on would add UDP 3478 and TLS 5349 to the list
-  # of ports an operator has to open, for the networks TCP 7881 does not
-  # already reach.
+  # connected — and the only fallback there is by default, because no TURN
+  # server is configured. The embedded one is not used: its TLS listener needs
+  # 443, which Caddy holds. For networks that allow nothing but 443, operators
+  # add a coturn relay on a second machine and list it here as `turn_servers`
+  # (LiveKit hands the list to every client) — docs.joinrift.app/turn/.
   tcp_port: 7881
 
   # The server has to advertise the address clients can actually reach, which

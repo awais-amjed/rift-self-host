@@ -20,8 +20,11 @@ const PORTS_HELP = `
   <li><strong>A call connects but nobody hears anything</strong> — the call
     audio ports are blocked. Open both the UDP and the TCP one.</li>
 </ul>
-<p>Some strict networks (offices, schools) block everything but web traffic.
-  People on them can chat but may not be able to join calls.</p>`;
+<p>Some strict networks (offices, schools, hotels) block everything but web
+  traffic. People on them can chat but cannot join calls, while calls work for
+  everyone else. A TURN relay on a small second server fixes that; it is
+  optional, and <a href="${"https://docs.joinrift.app"}/turn/" target="_blank"
+  rel="noopener">the guide</a> has every step.</p>`;
 
 const PROXY_HELP = `
 <p>This stack has no web server of its own, because it was set up to sit behind
