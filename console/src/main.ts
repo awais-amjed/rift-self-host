@@ -6,6 +6,7 @@
  * and it is what creates the conditions for the rest.
  */
 import { announce, consolePort } from "./banner.ts";
+import { startScheduler } from "./backup/scheduler.ts";
 import { isDockerReachable } from "./docker.ts";
 import { configuredPassword } from "./web/auth.ts";
 import { prepareStack } from "./boot.ts";
@@ -36,6 +37,9 @@ async function main(): Promise<void> {
       console.error("Could not prepare the stack:", error)
     );
   }
+
+  // Started either way: each check asks whether setup has finished since.
+  startScheduler(defaultPaths().projectDir, isConfigured);
 
   Deno.serve({
     port: PORT,

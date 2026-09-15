@@ -265,7 +265,7 @@ Not yet proved, and worth doing before anyone else runs one:
 - **Audio actually arriving.** Two clients hold an encrypted call and see each
   other, but nobody has spoken into one and heard it come out the other side.
 - **The `studio` profile**, which has not been started once.
-- **Backups.** Nothing here dumps the database or the attachment volume.
+- **Backups stay on the same disk.** The console makes them daily and keeps the newest few in `backups/`; copying them off the machine is up to the operator.
 
 ## Where this sits
 

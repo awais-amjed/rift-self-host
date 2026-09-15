@@ -41,7 +41,9 @@ import {
   tokenFrom,
 } from "./auth.ts";
 import { dashboardPage, exposedPage, loginPage, restorePage, setupPage } from "./page.ts";
-import { backupStatus, listBackups, openBackup, startBackup } from "../backup/create.ts";
+import { backupStatus, startBackup } from "../backup/create.ts";
+import { deleteBackup, listBackups, openBackup } from "../backup/files.ts";
+import { saveSchedule, scheduleStatus } from "../backup/scheduler.ts";
 import { openSealedBackup, sealedBackupPresent } from "../backup/restore.ts";
 import { prepareStack } from "../boot.ts";
 
@@ -403,7 +405,30 @@ export async function handle(request: Request): Promise<Response> {
   }
 
   if (path === "/api/backups") {
-    return json({ files: await listBackups(paths.projectDir), ...backupStatus() });
+    return json({
+      files: await listBackups(paths.projectDir),
+      schedule: await scheduleStatus(paths.projectDir),
+      ...backupStatus(),
+    });
+  }
+
+  if (path === "/api/backups/schedule" && request.method === "POST") {
+    if (!isConfigured()) {
+      return json({ error: "Set the server up before scheduling backups." }, 409);
+    }
+    const problem = await saveSchedule(paths.projectDir, await request.json());
+    if (problem !== null) return json({ error: problem }, 400);
+    return json({ schedule: await scheduleStatus(paths.projectDir) });
+  }
+
+  if (path === "/api/backups/delete" && request.method === "POST") {
+    const { name } = await request.json();
+    if (!await deleteBackup(paths.projectDir, String(name ?? ""))) {
+      return json({
+        error: "There is no backup by that name. It may already be deleted.",
+      }, 404);
+    }
+    return json({ deleted: name });
   }
 
   if (path === "/api/backups/download") {

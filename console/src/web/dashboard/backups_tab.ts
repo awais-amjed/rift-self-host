@@ -1,4 +1,5 @@
 import { heading, resultBox, type Tab } from "./help.ts";
+import { SCHEDULE_SCRIPT, schedulePanel } from "./schedule_panel.ts";
 
 const BACKUP_HELP = `
 <h3>What a backup holds</h3>
@@ -43,10 +44,15 @@ const BACKUP_HELP = `
   the file belongs to root: on the server run
   <code>sudo chown $USER backups/*</code> first.</p>
 <h3>How often</h3>
-<p>Before every update, after replacing keys, and regularly — daily or weekly
-  depending on how busy the server is. Old files are never deleted for you;
-  delete them from the <code>backups</code> folder when you no longer need
-  them.</p>`;
+<p>Scheduled backups already run by themselves (see <strong>Scheduled
+  backups</strong> below). Make one by hand as well before every update and
+  after replacing keys.</p>
+<h3>Old backups</h3>
+<p>Only the newest few are kept — 5 unless you change it under Scheduled
+  backups — and that includes backups made here. When a new one would delete
+  an old one, a yellow note under the button names it. Download a backup you
+  want to keep for longer. To delete one yourself, press
+  <strong>Delete</strong> beside it in the list.</p>`;
 
 const RESTORE_HELP = `
 <p>Restoring builds this server again from a backup file, on a machine that is
@@ -96,11 +102,15 @@ ${heading("Create a backup", "backup", BACKUP_HELP, "/backups/#dashboard")}
   </div>
   <button id="backupButton">Create backup</button>
   <p class="hint" id="backupProgress" hidden></p>
+  <p class="warn" id="backupPruneHint" hidden></p>
   ${resultBox("backupResult")}
 </div>
 
+${schedulePanel()}
+
 <h2>Backups on this machine</h2>
-<div class="panel" id="backupList"><p class="hint" style="margin:0">Loading…</p></div>
+<div class="panel"><div id="backupList"><p class="hint" style="margin:0">Loading…</p></div>
+  ${resultBox("listResult")}</div>
 
 ${heading("Restore a backup", "restore", RESTORE_HELP, "/backups/#restore")}
 <div class="panel">
@@ -109,7 +119,7 @@ ${heading("Restore a backup", "restore", RESTORE_HELP, "/backups/#restore")}
     <strong>i</strong> above for every step. The steps are also inside the
     file, in <code>RESTORE.txt</code>.</p>
 </div>`,
-    script: BACKUPS_SCRIPT,
+    script: BACKUPS_SCRIPT + SCHEDULE_SCRIPT,
   };
 }
 
@@ -133,13 +143,31 @@ async function loadBackups() {
     reportBackup(state.last);
   }
 
-  document.getElementById("backupList").innerHTML = state.files.map((file) =>
+  window._backupFiles = state.files;
+  renderSchedule(state.schedule);
+
+  // The next backup keeps itself and keep − 1 of these, so everything from
+  // index keep − 1 on goes when it finishes.
+  const keep = state.schedule.problem ? 0 : state.schedule.keep;
+  const doomed = keep > 0 ? state.files.slice(keep - 1) : [];
+  const hint = document.getElementById("backupPruneHint");
+  hint.hidden = doomed.length === 0 || !!state.running;
+  hint.textContent = doomed.length === 0 ? "" : "Keeping the newest " + keep +
+    ": the next backup deletes " + doomed.map((file) => file.name).join(", ") +
+    ". Download " + (doomed.length === 1 ? "it" : "them") + " first to keep a copy.";
+
+  document.getElementById("backupList").innerHTML = state.files.map((file, index) =>
     '<div class="rotation"><div>' +
     '<strong class="mono">' + escapeHtml(file.name) + "</strong>" +
     '<p class="hint">' + formatBytes(file.bytes) + " · " +
     new Date(file.createdAt).toLocaleString() +
-    (file.encrypted ? " · encrypted" : " · not encrypted") + "</p>" +
-    "</div>" + downloadLink(file.name) + "</div>"
+    (file.encrypted ? " · encrypted" : " · not encrypted") +
+    (keep > 0 && index >= keep - 1
+      ? ' · <span class="doomed">deleted by the next backup</span>'
+      : "") + "</p>" +
+    '</div><div class="actions">' + downloadLink(file.name) +
+    '<button type="button" class="quiet small" data-delete="' + escapeHtml(file.name) +
+    '">Delete</button></div></div>'
   ).join("") || '<p class="hint" style="margin:0">No backups yet.</p>';
 
   // One poll at a time, however often the ten-second refresh calls this.
@@ -173,8 +201,40 @@ function reportBackup(last) {
       ? "<li>Keep the passphrase in a password manager. Without it this file cannot be opened.</li>"
       : "<li>This file is not encrypted and holds every key to the server. Keep it " +
         "somewhere private.</li>") +
-    "<li>To restore it later, open the <strong>i</strong> beside Restore a backup.</li></ol>");
+    (last.pruned.length
+      ? "<li>To keep the newest backups only, " + last.pruned.length + " older " +
+        (last.pruned.length === 1 ? "one was" : "ones were") + " deleted: " +
+        last.pruned.map((pruned) => "<code>" + escapeHtml(pruned) + "</code>").join(", ") +
+        ". Change how many are kept under Scheduled backups.</li>"
+      : "") +
+    "<li>To restore it later, open the <strong>i</strong> beside Restore a backup.</li></ol>" +
+    (last.pruneError
+      ? '<p class="error">Older backups could not be deleted: ' + escapeHtml(last.pruneError) +
+        "</p>"
+      : ""));
 }
+
+document.getElementById("backupList").addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-delete]");
+  if (!button) return;
+  const name = button.dataset.delete;
+  hideResult("listResult");
+  if (!confirm("Delete " + name + "?\\n\\nThe file is removed from this server for good. " +
+    "Copies you downloaded or copied elsewhere are not affected.")) return;
+
+  button.disabled = true;
+  const body = await postJson("/api/backups/delete", { name });
+  if (body.error) {
+    button.disabled = false;
+    showResult("listResult", "The backup was not deleted", errorBody(body.error,
+      "If the file belongs to root, delete it on the server: " +
+      "<code>sudo rm backups/" + escapeHtml(name) + "</code>"), true);
+    return;
+  }
+  showResult("listResult", "Backup deleted",
+    "<p><code>" + escapeHtml(name) + "</code> is gone from <code>backups/</code>.</p>");
+  loadBackups();
+});
 
 document.getElementById("backupButton").addEventListener("click", async () => {
   const passphrase = document.getElementById("backupPassphrase");

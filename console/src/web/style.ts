@@ -32,7 +32,19 @@ input {
   border: 1px solid var(--line); border-radius: 8px; font-size: 15px;
   font-family: inherit;
 }
-input:focus { outline: none; border-color: var(--accent); }
+select {
+  width: 100%; padding: 10px 12px; background: var(--inset); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; font-size: 15px; font-family: inherit;
+}
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0 14px; }
+label.check { display: flex; gap: 10px; align-items: center; text-transform: none;
+  letter-spacing: 0; font-size: 15px; color: var(--text); cursor: pointer; margin: 0; }
+label.check input { width: auto; margin: 0; accent-color: var(--accent); }
+.rotation .actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+button.small { padding: 8px 14px; font-size: 14px; font-weight: 500; }
+.rotation .doomed { color: var(--warn); }
 .field { margin-bottom: 18px; }
 .hint { font-size: 13px; color: var(--faint); margin: 6px 0 0; }
 .rotation { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between;

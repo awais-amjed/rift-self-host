@@ -28,50 +28,79 @@ import {
   STORAGE_ARCHIVE,
   writeArchive,
 } from "./archive.ts";
+import { BACKUPS_DIR, listBackups, pruneBackups } from "./files.ts";
+import { parseSchedule } from "./schedule.ts";
 
-/** Where backups are written, relative to the project directory. */
-export const BACKUPS_DIR = "backups";
-
-/** A finished backup, as the dashboard lists it. */
-export interface BackupFile {
-  name: string;
-  bytes: number;
-  createdAt: string;
-  encrypted: boolean;
+/** How one backup ended. */
+export interface BackupOutcome {
+  file?: string;
+  bytes?: number;
+  error?: string;
+  scheduled: boolean;
+  /** Older backups deleted afterwards, to keep the number set. */
+  pruned: string[];
+  /** Why deleting older backups failed. The backup itself is still good. */
+  pruneError?: string;
+  finishedAt: string;
 }
 
 /** What the dashboard polls. */
 export interface BackupStatus {
   /** The step running now, or null when nothing is. */
   running: string | null;
-  last: { file?: string; bytes?: number; error?: string; finishedAt: string } | null;
+  last: BackupOutcome | null;
+  lastScheduled: BackupOutcome | null;
 }
 
 let running: string | null = null;
-let last: BackupStatus["last"] = null;
+let last: BackupOutcome | null = null;
+let lastScheduled: BackupOutcome | null = null;
 
 export function backupStatus(): BackupStatus {
-  return { running, last };
+  return { running, last, lastScheduled };
 }
 
-/** Start a backup in the background. Throws if one is already running. */
-export function startBackup(projectDir: string, passphrase: string): void {
+/**
+ * Start a backup in the background. Throws if one is already running.
+ *
+ * Once it is safely written, older backups beyond the number to keep are
+ * deleted — only then, so a server whose backups have started failing keeps
+ * the last good ones instead of trading them for nothing.
+ */
+export function startBackup(
+  projectDir: string,
+  passphrase: string,
+  scheduled = false,
+): void {
   if (running !== null) throw new Error("A backup is already being made.");
   running = "Starting";
+  const finish = (outcome: Omit<BackupOutcome, "scheduled" | "finishedAt">) => {
+    last = { ...outcome, scheduled, finishedAt: new Date().toISOString() };
+    if (scheduled) lastScheduled = last;
+  };
   void makeBackup(projectDir, passphrase.length > 0 ? passphrase : undefined)
-    .then((result) => {
-      last = { ...result, finishedAt: new Date().toISOString() };
+    .then(async (result) => {
+      running = "Deleting older backups";
+      const { schedule, problem } = parseSchedule(readEnvFile(projectDir));
+      try {
+        if (problem !== null) throw new Error(problem);
+        finish({ ...result, pruned: await pruneBackups(projectDir, schedule.keep) });
+      } catch (error) {
+        console.error("[backup] deleting older backups:", error);
+        finish({ ...result, pruned: [], pruneError: messageOf(error) });
+      }
     })
     .catch((error) => {
       console.error("[backup]", error);
-      last = {
-        error: error instanceof Error ? error.message : String(error),
-        finishedAt: new Date().toISOString(),
-      };
+      finish({ error: messageOf(error), pruned: [] });
     })
     .finally(() => {
       running = null;
     });
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function dump(service: string, command: string[], path: string, what: string) {
@@ -165,41 +194,4 @@ async function makeBackup(
     await Deno.remove(work, { recursive: true }).catch(() => {});
     await Deno.remove(partial).catch(() => {});
   }
-}
-
-/** The backups in `backups/`, newest first. */
-export async function listBackups(projectDir: string): Promise<BackupFile[]> {
-  const directory = join(projectDir, BACKUPS_DIR);
-  const found: BackupFile[] = [];
-  try {
-    for await (const entry of Deno.readDir(directory)) {
-      if (!entry.isFile || !entry.name.startsWith("rift-backup-")) continue;
-      if (!entry.name.endsWith(ARCHIVE_EXTENSION)) continue;
-      const info = await Deno.stat(join(directory, entry.name));
-      found.push({
-        name: entry.name,
-        bytes: info.size,
-        createdAt: (info.mtime ?? new Date(0)).toISOString(),
-        encrypted: entry.name.endsWith(`-encrypted${ARCHIVE_EXTENSION}`),
-      });
-    }
-  } catch (error) {
-    if (!(error instanceof Deno.errors.NotFound)) throw error;
-  }
-  return found.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-/**
- * One backup from `backups/`, opened for download, or null when [name] is not
- * one. Matched against the listing rather than joined onto the directory, so a
- * name like `../.env` can never reach a file the list would not show.
- */
-export async function openBackup(
-  projectDir: string,
-  name: string,
-): Promise<{ file: Deno.FsFile; bytes: number } | null> {
-  const found = (await listBackups(projectDir)).find((backup) => backup.name === name);
-  if (!found) return null;
-  const file = await Deno.open(join(projectDir, BACKUPS_DIR, found.name));
-  return { file, bytes: (await file.stat()).size };
 }
