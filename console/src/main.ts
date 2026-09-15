@@ -11,7 +11,8 @@ import { isDockerReachable } from "./docker.ts";
 import { configuredPassword } from "./web/auth.ts";
 import { prepareStack } from "./boot.ts";
 import { defaultPaths } from "./setup/run.ts";
-import { handle, isConfigured } from "./web/routes.ts";
+import { handle } from "./web/routes.ts";
+import { isConfigured } from "./web/stack_state.ts";
 
 const PORT = consolePort();
 
