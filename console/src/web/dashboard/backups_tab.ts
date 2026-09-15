@@ -21,7 +21,7 @@ const BACKUP_HELP = `
   <li>When it finishes, the file appears in the list. It is in the
     <code>backups</code> folder next to <code>docker-compose.yml</code>.</li>
   <li>Copy the file off this machine. A backup on the same disk is lost with
-    the disk.</li>
+    the disk. The quickest way is its <strong>Download</strong> button.</li>
 </ol>
 <h3>Passphrase</h3>
 <p>Without one, anyone who gets the file has every key to this server. With
@@ -31,8 +31,13 @@ const BACKUP_HELP = `
 <p><strong>A lost passphrase cannot be recovered</strong>, and nobody can open
   the backup without it. Keep it in a password manager.</p>
 <h3>Copy it off this machine</h3>
-<p>From your own computer — this works in a Linux or macOS terminal and in
-  Windows PowerShell:</p>
+<p><strong>Download:</strong> press <strong>Download</strong> beside the file.
+  Your browser saves it to this computer's Downloads folder; the copy in
+  <code>backups/</code> stays where it is. The download travels through the
+  browser and your SSH tunnel, so it stops if either closes — for a file of
+  several gigabytes, scp is more reliable.</p>
+<p><strong>scp:</strong> from your own computer — this works in a Linux or
+  macOS terminal and in Windows PowerShell:</p>
 <p><code>scp you@your-server:/path/to/rift/backups/FILE.tar.gz .</code></p>
 <p>WinSCP and FileZilla (SFTP) do the same in a window. If the copy is refused,
   the file belongs to root: on the server run
@@ -134,12 +139,17 @@ async function loadBackups() {
     '<p class="hint">' + formatBytes(file.bytes) + " · " +
     new Date(file.createdAt).toLocaleString() +
     (file.encrypted ? " · encrypted" : " · not encrypted") + "</p>" +
-    "</div></div>"
+    "</div>" + downloadLink(file.name) + "</div>"
   ).join("") || '<p class="hint" style="margin:0">No backups yet.</p>';
 
   // One poll at a time, however often the ten-second refresh calls this.
   clearTimeout(window._backupPoll);
   if (state.running) window._backupPoll = setTimeout(loadBackups, 2000);
+}
+
+function downloadLink(name) {
+  return '<a class="button" download href="/api/backups/download?name=' +
+    encodeURIComponent(name) + '">Download</a>';
 }
 
 function reportBackup(last) {
@@ -151,11 +161,14 @@ function reportBackup(last) {
     return;
   }
   const file = escapeHtml(last.file || "");
+  const name = (last.file || "").split("/").pop();
   showResult("backupResult", "Backup saved",
     "<p><code>" + file + "</code>" + (last.bytes ? " · " + formatBytes(last.bytes) : "") +
-    "</p><ol>" +
-    "<li>Copy it off this machine, for example from your own computer: " +
-    "<code>scp you@your-server:/path/to/rift/" + file + " .</code></li>" +
+    "</p><p>" + downloadLink(name) + "</p><ol>" +
+    "<li>Copy it off this machine: press <strong>Download</strong> to save it to this " +
+    "computer's Downloads folder, or from your own computer run " +
+    "<code>scp you@your-server:/path/to/rift/" + file + " .</code> — better for a large " +
+    "file, because a download stops if the browser or SSH tunnel closes.</li>" +
     (window._backupEncrypted
       ? "<li>Keep the passphrase in a password manager. Without it this file cannot be opened.</li>"
       : "<li>This file is not encrypted and holds every key to the server. Keep it " +

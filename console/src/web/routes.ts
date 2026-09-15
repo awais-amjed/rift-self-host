@@ -41,7 +41,7 @@ import {
   tokenFrom,
 } from "./auth.ts";
 import { dashboardPage, exposedPage, loginPage, restorePage, setupPage } from "./page.ts";
-import { backupStatus, listBackups, startBackup } from "../backup/create.ts";
+import { backupStatus, listBackups, openBackup, startBackup } from "../backup/create.ts";
 import { openSealedBackup, sealedBackupPresent } from "../backup/restore.ts";
 import { prepareStack } from "../boot.ts";
 
@@ -404,6 +404,22 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/api/backups") {
     return json({ files: await listBackups(paths.projectDir), ...backupStatus() });
+  }
+
+  if (path === "/api/backups/download") {
+    const name = url.searchParams.get("name") ?? "";
+    const opened = await openBackup(paths.projectDir, name);
+    if (!opened) return json({ error: "There is no backup by that name." }, 404);
+    // Streamed from disk: a backup with many attachments is larger than the
+    // console should ever hold in memory.
+    return new Response(opened.file.readable, {
+      headers: {
+        "Content-Type": "application/gzip",
+        "Content-Length": String(opened.bytes),
+        "Content-Disposition": `attachment; filename="${name}"`,
+        "Cache-Control": "no-store",
+      },
+    });
   }
 
   if (path === "/api/backup" && request.method === "POST") {

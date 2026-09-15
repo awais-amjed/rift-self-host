@@ -46,7 +46,10 @@ button {
   font-weight: 600; font-family: inherit; cursor: pointer;
 }
 button:disabled { opacity: 0.5; cursor: default; }
-button.quiet { background: var(--inset); color: var(--dim); border: 1px solid var(--line); }
+button.quiet, a.button { background: var(--inset); color: var(--dim); border: 1px solid var(--line); }
+a.button { display: inline-block; border-radius: 8px; padding: 8px 14px; font-size: 14px;
+  font-weight: 500; text-decoration: none; flex-shrink: 0; }
+a.button:hover { color: var(--text); border-color: var(--accent); }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 td { padding: 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }

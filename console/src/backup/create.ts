@@ -1,10 +1,11 @@
 /**
  * Making a backup from the dashboard.
  *
- * Written to `backups/` beside the compose file rather than downloaded: a
- * download goes through the SSH tunnel and a browser tab, and stops when
- * either does. The trade is that the file starts on the same disk as the
- * server, which the dashboard says out loud.
+ * Written to `backups/` beside the compose file first, and downloadable from
+ * there afterwards: a download goes through the SSH tunnel and a browser tab,
+ * and stops when either does, so it is never the only copy being made. The
+ * trade is that the file starts on the same disk as the server, which the
+ * dashboard says out loud.
  *
  * The database is dumped inside its own container and the attachments are
  * packed inside theirs, both streamed straight to disk, so neither is ever
@@ -186,4 +187,19 @@ export async function listBackups(projectDir: string): Promise<BackupFile[]> {
     if (!(error instanceof Deno.errors.NotFound)) throw error;
   }
   return found.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/**
+ * One backup from `backups/`, opened for download, or null when [name] is not
+ * one. Matched against the listing rather than joined onto the directory, so a
+ * name like `../.env` can never reach a file the list would not show.
+ */
+export async function openBackup(
+  projectDir: string,
+  name: string,
+): Promise<{ file: Deno.FsFile; bytes: number } | null> {
+  const found = (await listBackups(projectDir)).find((backup) => backup.name === name);
+  if (!found) return null;
+  const file = await Deno.open(join(projectDir, BACKUPS_DIR, found.name));
+  return { file, bytes: (await file.stat()).size };
 }
