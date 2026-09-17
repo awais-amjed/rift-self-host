@@ -58,13 +58,14 @@ export function normaliseHost(livekitUrl: string): string {
 /**
  * The user behind a LiveKit identity, or null when the connection isn't one.
  *
- * Identities are `<userId>~<deviceId>`, with a `_screenshare` suffix for that
- * device's share. A share is a second connection held by the same person, so
- * anything counting *people* has to drop it — it would double them up in a
- * roster, and telling a screen share to join a channel means nothing.
+ * Identities are `<userId>~<deviceId>`, with a `_screenshare` or `_soundshare`
+ * suffix for that device's screen or sound share. A share is a second
+ * connection held by the same person, so anything counting *people* has to
+ * drop it — it would double them up in a roster, and telling a screen share to
+ * join a channel means nothing.
  */
 export function voiceUserId(identity: string): string | null {
-  if (identity.endsWith("_screenshare")) return null;
+  if (identity.endsWith("_screenshare") || identity.endsWith("_soundshare")) return null;
   const userId = identity.split("~")[0];
   return userId.length > 0 ? userId : null;
 }

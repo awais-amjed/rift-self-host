@@ -21,7 +21,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { channel_id, screen_share, device_id } = await req.json();
+    const { channel_id, screen_share, sound_share, device_id } = await req.json();
     const token = extractBearerToken(req);
 
     const auth = await authenticateToken(supabase, token);
@@ -67,13 +67,17 @@ Deno.serve(async (req) => {
     if (mayConnect !== true) {
       return CustomResponse.error("You cannot join voice channels", EC.PERMISSION_DENIED);
     }
-    if (screen_share === true) {
+    // Sharing sound is the same capability as sharing a screen — a screen
+    // share already carries the app's audio, so a separate permission would
+    // only let a member be denied the quieter half of what they can already
+    // do. One permission, two kinds of share.
+    if (screen_share === true || sound_share === true) {
       const { data: mayShare } = await supabase.rpc("user_has_permission", {
         p_user: auth.userId,
         p_name: "SCREEN_SHARE",
       });
       if (mayShare !== true) {
-        return CustomResponse.error("You cannot share your screen here", EC.PERMISSION_DENIED);
+        return CustomResponse.error("You cannot share here", EC.PERMISSION_DENIED);
       }
     }
 
@@ -96,7 +100,10 @@ Deno.serve(async (req) => {
     const userRecord = userData as Record<string, any>;
 
     // Identity = "<userId>~<deviceId>" (+ "_screenshare" for the screen-share
-    // connection). The device segment lets the same user join from multiple
+    // connection, or "_soundshare" for the sound-share one — a separate suffix
+    // so one member can do both at once; two connections claiming the same
+    // identity would kick each other). The device segment lets the same user
+    // join from multiple
     // devices without a LiveKit identity collision — without it, a second
     // device joining the same room kicks the first one out. The userId prefix
     // is always server-controlled (from auth), so a client-supplied device_id
@@ -109,6 +116,8 @@ Deno.serve(async (req) => {
 
     if (screen_share === true) {
       identity = `${identity}_screenshare`;
+    } else if (sound_share === true) {
+      identity = `${identity}_soundshare`;
     }
 
     const displayName = userRecord[DBSchema.users.displayName];
