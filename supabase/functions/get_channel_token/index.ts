@@ -215,6 +215,19 @@ Deno.serve(async (req) => {
       // undefined = all sources. Deafened denies the mic as well as the ears.
       canPublishSources: grantSources(isMuted, isDeafened),
       canSubscribe: !isDeafened && mayListen,
+      // Lets a client publish its own state as participant attributes — today
+      // just "deafened", which nothing else broadcasts: a muted microphone is
+      // visible as an unpublished track, but deafening is a decision made
+      // entirely inside the listener's client, and the roster has no way to
+      // show it otherwise.
+      //
+      // It also lets a client rewrite its own metadata, which is where the
+      // moderation flags ride. That is cosmetic and it is the only thing it
+      // is: what a muted member may actually publish is `canPublishSources`
+      // above, which is minted here and cannot be touched from the client. The
+      // worst case is somebody hiding their own "muted by a moderator" badge
+      // from other people's rosters.
+      canUpdateOwnMetadata: true,
       // A bot is never a room admin. `isChannelManager` is a cached boolean a
       // bot could hold if somebody handed it a moderator role, and roomAdmin is
       // the power to mute and remove people in a call — a thing a bot should be
