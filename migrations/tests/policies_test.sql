@@ -3972,6 +3972,66 @@ BEGIN
   RAISE NOTICE 'ok  each write is told once, to exactly the topic that may hear it';
 END $$;
 
+-- ---------- and a seat at a private table is news to whoever got it (023) ----------
+-- 017 announces `channels` when the `channels` row moves. Handing somebody a
+-- seat moves no such row — it writes `channel_members` — so before 023 the
+-- new member's sidebar did not know until the app was restarted. Verified
+-- that way before this was written: fifteen seconds, nothing, then it
+-- appeared on the next launch.
+
+RESET ROLE;
+
+DO $$
+DECLARE
+  v_chan UUID := 'aaaa1111-0000-4000-8000-0000000000ff';  -- the private one
+  v_them UUID := '11111111-aaaa-4aaa-8aaa-000000000003';
+  v_since BIGINT;
+  v_told  INTEGER;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_members
+              WHERE channel_id = v_chan AND user_id = v_them) THEN
+    RAISE EXCEPTION 'FAIL: they already hold the seat; this proves nothing';
+  END IF;
+
+  SELECT count(*) INTO v_since FROM realtime.messages
+   WHERE topic = 'user:' || v_them AND event = 'me';
+
+  INSERT INTO channel_members (channel_id, user_id) VALUES (v_chan, v_them);
+
+  SELECT count(*) - v_since INTO v_told FROM realtime.messages
+   WHERE topic = 'user:' || v_them AND event = 'me';
+  IF v_told <> 1 THEN
+    RAISE EXCEPTION 'FAIL: gaining a seat told them % times, expected once', v_told;
+  END IF;
+
+  -- `me` is what the client already re-reads the whole server on, so a seat
+  -- gained arrives the same way a ban does. It must not go to the server's
+  -- topic: this is one person's news, and the one person it is for is
+  -- precisely the one whose last read could not see the channel.
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE topic = 'server:aaaa0000-0000-4000-8000-000000000001'
+                AND event = 'me') THEN
+    RAISE EXCEPTION 'FAIL: one member''s seat was announced to the whole server';
+  END IF;
+
+  -- Losing it is the half worth more: a private channel still in the sidebar
+  -- after access was taken away is the mistake with consequences.
+  SELECT count(*) INTO v_since FROM realtime.messages
+   WHERE topic = 'user:' || v_them AND event = 'me';
+  DELETE FROM channel_members WHERE channel_id = v_chan AND user_id = v_them;
+  SELECT count(*) - v_since INTO v_told FROM realtime.messages
+   WHERE topic = 'user:' || v_them AND event = 'me';
+  IF v_told <> 1 THEN
+    RAISE EXCEPTION 'FAIL: losing a seat told them % times, expected once', v_told;
+  END IF;
+
+  RAISE NOTICE 'ok  a seat at a private table, gained or lost, reaches the one it is for';
+END $$;
+
 -- ---------- and a bot is told on its own topic (018) ----------
 -- A bot is in none of the audiences a member is in: it does not join the
 -- server's topic, and a grant is not membership. Everything it may hear has
