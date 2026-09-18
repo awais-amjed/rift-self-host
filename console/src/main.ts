@@ -7,6 +7,7 @@
  */
 import { announce, consolePort } from "./banner.ts";
 import { startScheduler } from "./backup/scheduler.ts";
+import { startTopicRuleWatch } from "./setup/topic_rules.ts";
 import { isDockerReachable } from "./docker.ts";
 import { configuredPassword } from "./web/auth.ts";
 import { prepareStack } from "./boot.ts";
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
 
   // Started either way: each check asks whether setup has finished since.
   startScheduler(defaultPaths().projectDir, isConfigured);
+  startTopicRuleWatch(isConfigured);
 
   Deno.serve({
     port: PORT,

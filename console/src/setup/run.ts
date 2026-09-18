@@ -24,6 +24,7 @@ import { envHasPassword, problemsWith } from "./options.ts";
 import { functionSources, installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
 import { applyLimits } from "./realtime.ts";
+import { installTopicRules } from "./topic_rules.ts";
 import { generateSecrets, type StackSecrets } from "./secrets.ts";
 import { APPLIED_VERSION, imageVersion, writeState } from "../state.ts";
 
@@ -181,6 +182,11 @@ export async function runSetup(
     // not see REALTIME_SEED change; and the tenant config is cached in the
     // running process, so the UPDATE alone changes nothing either way.
     await restartService("realtime");
+
+    // Usually too early — Realtime makes the table these attach to when its
+    // first client connects — in which case the console's watch installs them
+    // the moment it exists. See topic_rules.ts.
+    await installTopicRules(database);
   });
 
   const server = await step("Creating your server", () =>

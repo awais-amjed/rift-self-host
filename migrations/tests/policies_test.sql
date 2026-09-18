@@ -3499,6 +3499,186 @@ BEGIN
 END $$;
 
 -- ============================================================
+-- 18c. Realtime topics (017)
+-- ============================================================
+-- Every topic is private: a join is admitted by `app.can_use_topic`, through
+-- the policies the console puts on `realtime.messages`. A topic that admits
+-- too much is a leak nobody sees; one that admits too little is a feature that
+-- silently stops updating. Both directions are asserted.
+
+-- A private channel in Alpha that only alice is in.
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000ff', 'aaaa0000-0000-4000-8000-000000000001', 'staff', 'text', true);
+INSERT INTO channel_members (channel_id, user_id) VALUES ('aaaa1111-0000-4000-8000-0000000000ff', '11111111-aaaa-4aaa-8aaa-000000000001');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT app.can_use_topic('server:aaaa0000-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member could not join their own server''s topic';
+  END IF;
+  IF app.can_use_topic('server:bbbb0000-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member joined another server''s topic';
+  END IF;
+  IF NOT app.can_use_topic('presence:aaaa0000-0000-4000-8000-000000000001', true)
+     OR NOT app.can_use_topic('voice:aaaa0000-0000-4000-8000-000000000001', true) THEN
+    RAISE EXCEPTION 'FAIL: a member could not announce presence or a voice location';
+  END IF;
+  IF NOT app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000002', false) THEN
+    RAISE EXCEPTION 'FAIL: a member could not join their own topic';
+  END IF;
+  IF app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member joined somebody else''s topic';
+  END IF;
+  IF NOT app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000001', true) THEN
+    RAISE EXCEPTION 'FAIL: a member could not ring a co-member (a DM typing indicator)';
+  END IF;
+  IF app.can_use_topic('user:22222222-bbbb-4bbb-8bbb-000000000001', true) THEN
+    RAISE EXCEPTION 'FAIL: a member rang somebody on another server';
+  END IF;
+  IF NOT app.can_use_topic('chat:aaaa1111-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member could not join an open channel''s topic';
+  END IF;
+  IF app.can_use_topic('chat:aaaa1111-0000-4000-8000-0000000000ff', false) THEN
+    RAISE EXCEPTION 'FAIL: a member joined a private channel''s topic they are not in';
+  END IF;
+  IF app.can_use_topic('chat:bbbb1111-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member joined a channel topic on another server';
+  END IF;
+  IF app.can_use_topic('chat:not-a-uuid', false) OR app.can_use_topic('keysweep:aaaa0000-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a malformed or unknown topic was admitted';
+  END IF;
+  RAISE NOTICE 'ok  a member joins their server''s topics and their own, and nothing else';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT app.can_use_topic('chat:aaaa1111-0000-4000-8000-0000000000ff', false) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s member could not join its topic';
+  END IF;
+  RAISE NOTICE 'ok  a private channel''s topic admits its members';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '{}', true); END $$;
+
+DO $$
+BEGIN
+  IF app.can_use_topic('server:aaaa0000-0000-4000-8000-000000000001', false) OR app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000002', false) THEN
+    RAISE EXCEPTION 'FAIL: a topic admitted somebody with no session';
+  END IF;
+  RAISE NOTICE 'ok  no session, no topic';
+END $$;
+
+RESET ROLE;
+UPDATE users SET is_banned = true WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003';
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF app.can_use_topic('server:aaaa0000-0000-4000-8000-000000000001', false) OR app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000001', true) THEN
+    RAISE EXCEPTION 'FAIL: a banned member still reached the server';
+  END IF;
+  IF NOT app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000003', false) THEN
+    RAISE EXCEPTION 'FAIL: a banned member lost their own topic, and with it the unban';
+  END IF;
+  RAISE NOTICE 'ok  a ban closes the server''s topics but leaves the member their own';
+END $$;
+
+RESET ROLE;
+UPDATE users SET is_banned = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000003';
+
+-- ---------- what the database says, and to whom ----------
+-- Read straight out of `realtime.messages`, which is what Realtime delivers
+-- from. Skipped where Realtime has never run against this database: there is no
+-- `realtime.send` to call, and the triggers correctly say nothing.
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9101, 'aaaa1111-0000-4000-8000-000000000001', 'open-from-bob', 'n', 's', 1);
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, ephemeral_for)
+  VALUES (9103, 'aaaa1111-0000-4000-8000-000000000001', 'just-for-alice', 'n', 's', 1, '11111111-aaaa-4aaa-8aaa-000000000001');
+INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version) VALUES
+  (8101, '11111111-aaaa-4aaa-8aaa-000000000001', 'dm-for-alice', 'n', 's', 1);
+UPDATE messages SET ciphertext = 'open-from-bob-edited', edited_at = now() WHERE id = 9101;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9102, 'aaaa1111-0000-4000-8000-0000000000ff', 'staff-only', 'n', 's', 1);
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '{}', true); END $$;
+
+DO $$
+DECLARE
+  v_heard INTEGER;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'server:aaaa0000-0000-4000-8000-000000000001' AND event = 'message' AND private
+                    AND payload->>'id' = '9101' AND payload->>'channel_id' = 'aaaa1111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: an open channel''s message was not told to its server';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'server:aaaa0000-0000-4000-8000-000000000001' AND event = 'message_changed'
+                    AND payload->>'message_id' = '9101') THEN
+    RAISE EXCEPTION 'FAIL: an edit was not told to the server';
+  END IF;
+
+  -- Its members are alice and whoever the owner-seeding trigger added; the
+  -- rule is the same `app.in_channel` the channel's own policies use.
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE event = 'message' AND payload->>'id' = '9102'
+                AND (topic NOT LIKE 'user:%'
+                     OR NOT app.in_channel('aaaa1111-0000-4000-8000-0000000000ff',
+                                           substr(topic, 6)::uuid))) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s message reached somebody outside it';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000001'
+                    AND payload->>'id' = '9102') THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s member was not told of its message';
+  END IF;
+
+  SELECT count(*) INTO v_heard FROM realtime.messages
+   WHERE event = 'message' AND payload->>'id' = '9103';
+  IF v_heard <> 1 OR NOT EXISTS (SELECT 1 FROM realtime.messages
+                                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000001' AND payload->>'id' = '9103') THEN
+    RAISE EXCEPTION 'FAIL: an ephemeral reply reached % topics, not just its recipient''s', v_heard;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000001' AND event = 'dm'
+                    AND payload->>'id' = '8101' AND payload->>'sender_id' = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: a DM was not told to its recipient';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE payload ? 'ciphertext' AND payload->>'id' IN ('9101', '9102', '9103', '8101')) THEN
+    RAISE EXCEPTION 'FAIL: a broadcast carried a message body';
+  END IF;
+  RAISE NOTICE 'ok  each write is told once, to exactly the topic that may hear it';
+END $$;
+
+
+RESET ROLE;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

@@ -13,9 +13,10 @@
  *
  * - The limit is a sixty-second rolling average, so bursts sail past and only
  *   sustained traffic trips it. A short test proves nothing.
- * - `postgres_changes` spends the same budget. The unread-badge subscriptions
- *   are server-wide, so they scale with members × messages and are usually the
- *   larger cost — not chat broadcasts, which is where anyone would look first.
+ * - Every delivery spends it, database broadcasts included. A message in an
+ *   open channel goes to the whole server's topic (migration 017), so the
+ *   unread badges scale with members × messages and are usually the larger
+ *   cost — not typing indicators, which is where anyone would look first.
  *
  * `SEED_SELF_HOST: "false"` in docker-compose.yml is the other half. Without
  * it the tenant row is deleted and reinserted on every boot with no `max_*`
