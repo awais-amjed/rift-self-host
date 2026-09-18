@@ -533,6 +533,112 @@ BEGIN
   RAISE NOTICE 'ok  read cursors are private to their owner';
 END $$;
 
+-- ---------- 020: a badge that stops counting ----------
+-- The count is capped because the badge is: "99+" is what a member sees above
+-- ninety-nine either way, and an uncapped count is a walk of every message in
+-- a channel nobody has opened — eleven seconds of it at two hundred thousand.
+
+DO $$
+DECLARE v_n INT; v_cap INT := unread_cap();
+BEGIN
+  RESET ROLE;
+  INSERT INTO read_state (user_id, scope, scope_id, last_read_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000001', 'channel',
+          'aaaa1111-0000-4000-8000-000000000001', 0)
+  ON CONFLICT (user_id, scope, scope_id) DO UPDATE SET last_read_id = 0;
+
+  -- `attest_message` stamps the sender from the JWT whenever there is one, so
+  -- writing "from bob" while claiming to be alice quietly produces alice's own
+  -- messages — which an unread count is right to ignore. No claim, no stamp.
+  PERFORM set_config('request.jwt.claims', '', true);
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+  SELECT 'aaaa1111-0000-4000-8000-000000000001',
+         '11111111-aaaa-4aaa-8aaa-000000000002', 'over-the-cap', 'n', 's', 1
+    FROM generate_series(1, v_cap + 5);
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+
+  v_n := (unread_counts()->'channels'->>'aaaa1111-0000-4000-8000-000000000001')::INT;
+  IF v_n <> v_cap THEN
+    RAISE EXCEPTION 'FAIL: expected the count to stop at %, got %', v_cap, v_n;
+  END IF;
+  RAISE NOTICE 'ok  an unread count stops at the cap instead of at the table';
+END $$;
+
+-- ---------- 020: the levels come back with the counts ----------
+-- 009 dropped the `prefs` key while rewriting this function, and nothing
+-- failed: the client read null and fell back to the defaults, so a muted
+-- channel un-muted itself on the next re-seed, on every device.
+
+DO $$
+DECLARE v_prefs JSONB;
+BEGIN
+  INSERT INTO notification_prefs (user_id, scope, scope_id, level)
+  VALUES (auth.uid(), 'channel', 'aaaa1111-0000-4000-8000-000000000001', 'none')
+  ON CONFLICT (user_id, scope, scope_id) DO UPDATE SET level = 'none';
+
+  v_prefs := unread_counts()->'prefs';
+  IF v_prefs IS NULL THEN
+    RAISE EXCEPTION 'FAIL: unread_counts() answered without any prefs at all';
+  END IF;
+  IF v_prefs->'channels'->>'aaaa1111-0000-4000-8000-000000000001' <> 'none' THEN
+    RAISE EXCEPTION 'FAIL: a channel muted on one device is not read back, got %',
+      v_prefs->'channels';
+  END IF;
+  RAISE NOTICE 'ok  a notification level set here comes back with the badges';
+END $$;
+
+-- ---------- 020: no push, no roster walk ----------
+-- The whole point of the reorder. `has_unread_before` is swapped for one that
+-- raises: nothing but the two doorbells calls it, so reaching it at all means
+-- the roster was priced for a push nobody asked for. The savepoint puts the
+-- real one back whatever happens.
+
+DO $$
+DECLARE v_server UUID := 'aaaa0000-0000-4000-8000-000000000001';
+BEGIN
+  RESET ROLE;
+  IF app.push_enabled(v_server) THEN
+    RAISE EXCEPTION 'FAIL: the test server has push configured; this proves nothing';
+  END IF;
+END $$;
+
+SAVEPOINT before_tripwire;
+
+CREATE OR REPLACE FUNCTION has_unread_before(
+  p_user_id UUID, p_scope read_scope, p_scope_id UUID, p_before BIGINT
+) RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  RAISE EXCEPTION 'tripwire: the roster was walked with push turned off';
+END $$;
+
+DO $$
+DECLARE v_ctx TEXT;
+BEGIN
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-000000000001',
+          '11111111-aaaa-4aaa-8aaa-000000000002', 'no-push-here', 'n', 's', 1);
+  RAISE NOTICE 'ok  a message on a server without push never prices the doorbell';
+EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM LIKE 'tripwire:%' THEN
+    GET STACKED DIAGNOSTICS v_ctx = PG_EXCEPTION_CONTEXT;
+    RAISE EXCEPTION 'FAIL: % / %', SQLERRM, v_ctx;
+  END IF;
+  RAISE;
+END $$;
+
+ROLLBACK TO SAVEPOINT before_tripwire;
+
+DO $$ BEGIN
+  IF has_unread_before('11111111-aaaa-4aaa-8aaa-000000000001', 'channel',
+                       'aaaa1111-0000-4000-8000-000000000001', 1) IS NULL THEN
+    RAISE EXCEPTION 'FAIL: the real has_unread_before did not come back';
+  END IF;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+END $$;
+
 -- ============================================================
 -- 9. Moderation and permission RPCs
 -- ============================================================
