@@ -753,6 +753,31 @@ BEGIN
   END;
   RAISE NOTICE 'ok  a ban applies from the next statement, not the next token';
 END $$;
+
+-- 022: and the one call the client makes says so, rather than saying the
+-- server is gone. `app.server_id()` is null once banned, so the `servers` row
+-- is invisible too — read as "not found" the client would drop the rail chip
+-- and the member would have no way to see they were banned at all.
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := get_server_details();
+  IF v IS NULL THEN
+    RAISE EXCEPTION 'FAIL: a banned member reads their server as gone';
+  END IF;
+  IF (v->'user'->>'is_banned')::BOOLEAN IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: the answer does not carry the ban: %', v;
+  END IF;
+  IF v->'channels' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a banned member is still handed channels: %', v->'channels';
+  END IF;
+  -- What the client tests to tell this reply from a whole one. Sending the
+  -- limits here would reset an operator's caps to the defaults.
+  IF v ? 'max_attachment_bytes' THEN
+    RAISE EXCEPTION 'FAIL: the banned reply carries limits it cannot have read';
+  END IF;
+  RAISE NOTICE 'ok  and the one call says "banned", not "no such server"';
+END $$;
 -- ============================================================
 -- 11. Operator limits
 -- ============================================================
@@ -2076,6 +2101,91 @@ UPDATE channels SET is_private = true
 SET LOCAL ROLE authenticated;
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+-- ---------- 022: the whole server, in one question ----------
+-- Five selects run one after another became one RPC. It answers under the
+-- same policies, so what is asserted here is that nothing was dropped on the
+-- way — including the two columns the old select never listed.
+
+DO $$
+DECLARE v JSONB; v_chan JSONB;
+BEGIN
+  RESET ROLE;
+  UPDATE servers SET dm_retention_days = 7, dm_history_cap = 40
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  EXECUTE 'SET LOCAL ROLE authenticated';
+
+  v := get_server_details();
+
+  IF v->>'server_id' <> 'aaaa0000-0000-4000-8000-000000000001'
+     OR v->>'name' IS NULL THEN
+    RAISE EXCEPTION 'FAIL: the answer does not identify the server: %', v;
+  END IF;
+
+  -- The caller's own row, with the bits `my_permissions()` used to be a
+  -- separate round trip for.
+  IF v->'user'->>'id' <> '11111111-aaaa-4aaa-8aaa-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: the answer carries somebody else''s row: %', v->'user';
+  END IF;
+  IF NOT (v->'user'->'permissions' ? 'permission_bits') THEN
+    RAISE EXCEPTION 'FAIL: the permission bits did not come with the row';
+  END IF;
+  IF (v->'user'->'permissions'->>'permission_bits')::BIGINT
+       IS DISTINCT FROM my_permissions() THEN
+    RAISE EXCEPTION 'FAIL: the bits in the answer are not the caller''s';
+  END IF;
+
+  -- The two the old select never asked for. The DM settings dialog writes
+  -- them through update_server and read them back as null every time, so an
+  -- operator who capped DMs watched the dialog forget it on every refresh.
+  IF (v->>'dm_retention_days')::INT <> 7 OR (v->>'dm_history_cap')::INT <> 40 THEN
+    RAISE EXCEPTION 'FAIL: the DM limits are missing from the answer: %', v;
+  END IF;
+  IF NOT (v ? 'max_attachment_bytes') THEN
+    RAISE EXCEPTION 'FAIL: the operator limits are missing from the answer';
+  END IF;
+
+  -- The manage seat, which used to be a sixth read of `channel_members`.
+  -- Alice holds it on the private `shed` and on nothing else.
+  SELECT c INTO v_chan FROM jsonb_array_elements(v->'channels') c
+   WHERE c->>'id' = 'aaaa1111-0000-4000-8000-0000000000c2';
+  IF v_chan IS NULL OR (v_chan->>'can_manage')::BOOLEAN IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: the private channel alice manages says %', v_chan;
+  END IF;
+  SELECT c INTO v_chan FROM jsonb_array_elements(v->'channels') c
+   WHERE c->>'id' = 'aaaa1111-0000-4000-8000-0000000000c1';
+  IF (v_chan->>'can_manage')::BOOLEAN IS NOT FALSE THEN
+    RAISE EXCEPTION 'FAIL: a public channel came back as managed: %', v_chan;
+  END IF;
+
+  -- Whatever `channels_select` allows, and nothing besides.
+  IF jsonb_array_length(v->'channels') <> (SELECT count(*) FROM channels) THEN
+    RAISE EXCEPTION 'FAIL: the answer lists % channels where the policy allows %',
+      jsonb_array_length(v->'channels'), (SELECT count(*) FROM channels);
+  END IF;
+
+  RESET ROLE;
+  UPDATE servers SET dm_retention_days = NULL, dm_history_cap = NULL
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  one call carries the server, its limits, its channels and you';
+END $$;
+
+-- Nobody's row, nothing to refresh. The client turns this into dropping the
+-- server rather than showing an empty one.
+DO $$
+DECLARE v JSONB;
+BEGIN
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"99999999-9999-4999-8999-999999999999","role":"authenticated"}', true);
+  v := get_server_details();
+  IF v IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a stranger was answered with %', v;
+  END IF;
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  RAISE NOTICE 'ok  and answers nothing at all to somebody with no row here';
+END $$;
 
 DO $$
 DECLARE v_result JSONB;
