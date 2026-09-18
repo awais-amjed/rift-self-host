@@ -3675,6 +3675,79 @@ BEGIN
   RAISE NOTICE 'ok  each write is told once, to exactly the topic that may hear it';
 END $$;
 
+-- ---------- and a bot is told on its own topic (018) ----------
+-- A bot is in none of the audiences a member is in: it does not join the
+-- server's topic, and a grant is not membership. Everything it may hear has
+-- to reach `user:<bot id>` or it goes back to polling for it.
+
+RESET ROLE;
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+VALUES ('aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-0000000000b0', '11111111-aaaa-4aaa-8aaa-000000000002', 1)
+ON CONFLICT DO NOTHING;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+-- Ordinary, addressed, and a button press.
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version)
+  VALUES (9201, 'aaaa1111-0000-4000-8000-000000000001', 'watched', 'n', 's', 1);
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, to_bot)
+  VALUES (9202, 'aaaa1111-0000-4000-8000-000000000001', 'modbot: hello', 'n', 's', 1, '11111111-aaaa-4aaa-8aaa-0000000000b0');
+-- A press carries an action and no key: `messages_action_shape` says so.
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version,
+                      to_bot, is_interaction, action_id)
+  VALUES (9203, 'aaaa1111-0000-4000-8000-000000000001', 'pressed', 'n', 's', 0,
+          '11111111-aaaa-4aaa-8aaa-0000000000b0', true, 'confirm');
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '{}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-0000000000b0' AND payload->>'id' = '9201') THEN
+    RAISE EXCEPTION 'FAIL: a granted bot was not told of a message in the channel it watches';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-0000000000b0' AND payload->>'id' = '9202') THEN
+    RAISE EXCEPTION 'FAIL: a bot was not told of a message addressed to it';
+  END IF;
+
+  -- The press is between the presser and the bot, and `messages_select` shows
+  -- it to nobody else.
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE payload->>'id' = '9203' AND topic <> 'user:11111111-aaaa-4aaa-8aaa-0000000000b0') THEN
+    RAISE EXCEPTION 'FAIL: a button press was announced beyond the bot it was for';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-0000000000b0' AND payload->>'id' = '9203') THEN
+    RAISE EXCEPTION 'FAIL: a bot was not told of a press meant for it';
+  END IF;
+  RAISE NOTICE 'ok  a bot hears what it watches, what it is asked and what it is pressed';
+END $$;
+
+-- 019: `to_bot` is ON DELETE SET NULL, and the press's own row must survive
+-- that. Undone immediately — the bot is wanted by the sections below.
+DO $$
+BEGIN
+  BEGIN
+    DELETE FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-0000000000b0';
+    RAISE EXCEPTION 'undo';
+  EXCEPTION
+    WHEN raise_exception THEN
+      IF SQLERRM <> 'undo' THEN
+        RAISE EXCEPTION 'FAIL: removing a bot that was pressed: %', SQLERRM;
+      END IF;
+    WHEN OTHERS THEN
+      RAISE EXCEPTION 'FAIL: removing a bot that was pressed: %', SQLERRM;
+  END;
+  RAISE NOTICE 'ok  a bot that somebody pressed a button on can still be removed';
+END $$;
+
 
 RESET ROLE;
 
