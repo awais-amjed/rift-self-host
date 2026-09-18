@@ -3582,6 +3582,87 @@ BEGIN
   RAISE NOTICE 'ok  a page is a page, and it is only ever your own';
 END $$;
 
+-- ---------- 021: the head the list is read from ----------
+-- The list used to find each peer's newest message by reading every DM the
+-- caller had. `dm_conversation_heads` is that answer, kept as it is written.
+-- Pager's four conversations are the fixture: pal1 sits above pal3 and pal2
+-- on the strength of 9504, and 9501 is what is underneath it.
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"33333333-cccc-4ccc-8ccc-000000000000","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_mine INT; v_head BIGINT;
+BEGIN
+  SELECT count(*) INTO v_mine FROM dm_conversation_heads;
+  IF v_mine <> 4 THEN
+    RAISE EXCEPTION 'FAIL: pager sees % heads rather than their four conversations', v_mine;
+  END IF;
+  IF EXISTS (SELECT 1 FROM dm_conversation_heads WHERE user_id <> auth.uid()) THEN
+    RAISE EXCEPTION 'FAIL: a member can read who somebody else talks to';
+  END IF;
+
+  -- Read-only from every session: a member who could write this could move a
+  -- conversation to the top of somebody else's list.
+  BEGIN
+    UPDATE dm_conversation_heads SET last_message_id = 99999 WHERE user_id = auth.uid();
+    RAISE EXCEPTION 'FAIL: a member can rewrite their own conversation order';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  SELECT last_message_id INTO v_head FROM dm_conversation_heads
+   WHERE user_id = auth.uid() AND peer_id = '33333333-cccc-4ccc-8ccc-000000000001';
+  IF v_head <> 9504 THEN
+    RAISE EXCEPTION 'FAIL: the head of pal1''s conversation is % rather than 9504', v_head;
+  END IF;
+  RAISE NOTICE 'ok  a conversation head is yours to read, nobody''s to write';
+END $$;
+
+-- Deleting the newest message is the only delete that moves a head — and the
+-- one retention never performs, because it takes the oldest.
+DO $$
+DECLARE v_all TEXT[]; v_head BIGINT;
+BEGIN
+  DELETE FROM dm_messages WHERE id = 9504;   -- pager's own, so the policy allows it
+
+  SELECT last_message_id INTO v_head FROM dm_conversation_heads
+   WHERE user_id = auth.uid() AND peer_id = '33333333-cccc-4ccc-8ccc-000000000001';
+  IF v_head <> 9501 THEN
+    RAISE EXCEPTION 'FAIL: the head is % after its message was deleted', v_head;
+  END IF;
+
+  SELECT array_agg(e->>'peer_username')
+    INTO v_all FROM jsonb_array_elements(dm_conversations()->'conversations') e;
+  IF v_all <> ARRAY['pal4', 'pal3', 'pal2', 'pal1'] THEN
+    RAISE EXCEPTION 'FAIL: the list did not follow the head back down: %', v_all;
+  END IF;
+  RAISE NOTICE 'ok  deleting the newest message walks the head back, and the list with it';
+END $$;
+
+-- And an emptied conversation is not a conversation. Without this the list
+-- carries a peer whose last message cannot be joined.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"33333333-cccc-4ccc-8ccc-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_all TEXT[];
+BEGIN
+  DELETE FROM dm_messages WHERE id = 9501;   -- pal1's own, the last one left
+
+  IF EXISTS (SELECT 1 FROM dm_conversation_heads) THEN
+    RAISE EXCEPTION 'FAIL: pal1 kept a head for a conversation with nothing in it';
+  END IF;
+
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"33333333-cccc-4ccc-8ccc-000000000000","role":"authenticated"}', true);
+  SELECT array_agg(e->>'peer_username')
+    INTO v_all FROM jsonb_array_elements(dm_conversations()->'conversations') e;
+  IF v_all <> ARRAY['pal4', 'pal3', 'pal2'] THEN
+    RAISE EXCEPTION 'FAIL: an emptied conversation is still listed: %', v_all;
+  END IF;
+  RAISE NOTICE 'ok  and an emptied conversation leaves both sides'' lists';
+END $$;
+
 
 -- ============================================================
 -- 18b. Where the private-channel bit lands by default (014)
