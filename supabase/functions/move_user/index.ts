@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService, voiceUserId } from "../_shared/livekit.ts";
+import { livekitRoomService, roomParticipants, voiceUserId } from "../_shared/livekit.ts";
 
 /**
  * Pull a member from the voice channel they're in into another one.
@@ -120,21 +120,25 @@ Deno.serve(async (req) => {
       }),
     );
 
-    for (const room of rooms) {
-      const participants = await roomService.listParticipants(room.name);
-      const identities = voiceConnectionsOf(participants, target_user_id);
-      if (identities.length === 0) continue;
+    const found = (await roomParticipants(roomService, rooms))
+      .map(({ room, participants }) => ({
+        room,
+        identities: voiceConnectionsOf(participants, target_user_id),
+      }))
+      .filter(({ identities }) => identities.length > 0);
 
-      foundAnywhere = true;
-      // Already where they're being sent — nothing to say to them.
-      if (room.name === channel_id) continue;
-
-      await roomService.sendData(room.name, payload, DataPacket_Kind.RELIABLE, {
-        destinationIdentities: identities,
-        topic: MOVE_TOPIC,
-      });
-      moved += identities.length;
-    }
+    foundAnywhere = found.length > 0;
+    // Already where they're being sent — nothing to say to them.
+    const toMove = found.filter(({ room }) => room !== channel_id);
+    await Promise.all(
+      toMove.map(({ room, identities }) =>
+        roomService.sendData(room, payload, DataPacket_Kind.RELIABLE, {
+          destinationIdentities: identities,
+          topic: MOVE_TOPIC,
+        })
+      ),
+    );
+    moved = toMove.reduce((n, { identities }) => n + identities.length, 0);
 
     if (!foundAnywhere) {
       return CustomResponse.error(

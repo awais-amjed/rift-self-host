@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService } from "../_shared/livekit.ts";
+import { livekitRoomService, roomParticipants } from "../_shared/livekit.ts";
 import { livePermissions, micDenied, moderationMetadata } from "../_shared/moderation.ts";
 
 /**
@@ -161,41 +161,47 @@ async function applyToLiveRooms(
 
     const metadata = moderationMetadata(isMuted, isDeafened);
     const permission = livePermissions(isMuted, isDeafened);
-    let updated = 0;
 
-    for (const room of rooms) {
-      const participants = await roomService.listParticipants(room.name);
-      // The identity is "<userId>~<device>", with a "_screenshare" suffix for
-      // that device's share. Match on the user id so every device they are on
-      // is covered, not just the one a moderator happened to click.
-      const mine = participants.filter((p) => p.identity.split("~")[0] === targetUserId);
+    // The identity is "<userId>~<device>", with a "_screenshare" suffix for
+    // that device's share. Match on the user id so every device they are on
+    // is covered, not just the one a moderator happened to click.
+    const mine = (await roomParticipants(roomService, rooms)).flatMap(({ room, participants }) =>
+      participants
+        .filter((p) => p.identity.split("~")[0] === targetUserId)
+        .map((participant) => ({ room, participant }))
+    );
 
-      for (const participant of mine) {
+    // Across connections at once — they are different rooms or different
+    // devices, and a moderator is waiting on this. *Within* one connection the
+    // order still holds: the permission change has to land before the mute,
+    // because the first stops the next publish and the second stops the audio
+    // already flowing. Reversed, a track muted first can be raised again by
+    // the client before its permission is gone.
+    await Promise.all(
+      mine.map(async ({ room, participant }) => {
         if (isBanned) {
-          await roomService.removeParticipant(room.name, participant.identity);
-          updated++;
-          continue;
+          await roomService.removeParticipant(room, participant.identity);
+          return;
         }
 
-        await roomService.updateParticipant(room.name, participant.identity, {
+        await roomService.updateParticipant(room, participant.identity, {
           metadata,
           permission,
         });
 
         if (micDenied(isMuted, isDeafened)) {
-          // Revoking the source stops future publishes; this stops the audio
-          // already flowing.
-          for (const track of participant.tracks ?? []) {
-            if (track.source === TrackSource.MICROPHONE && !track.muted) {
-              await roomService.mutePublishedTrack(room.name, participant.identity, track.sid, true);
-            }
-          }
+          await Promise.all(
+            (participant.tracks ?? [])
+              .filter((track) => track.source === TrackSource.MICROPHONE && !track.muted)
+              .map((track) =>
+                roomService.mutePublishedTrack(room, participant.identity, track.sid, true)
+              ),
+          );
         }
-        updated++;
-      }
-    }
+      }),
+    );
 
-    return { updated, error: null };
+    return { updated: mine.length, error: null };
   } catch (err) {
     return { updated: 0, error: String(err) };
   }

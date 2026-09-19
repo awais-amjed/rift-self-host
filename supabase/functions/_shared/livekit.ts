@@ -1,5 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
-import { RoomServiceClient } from "livekit-server-sdk";
+import { ParticipantInfo, RoomServiceClient } from "livekit-server-sdk";
 import DBSchema from "./schema.ts";
 
 /**
@@ -68,6 +68,41 @@ export function voiceUserId(identity: string): string | null {
   if (identity.endsWith("_screenshare") || identity.endsWith("_soundshare")) return null;
   const userId = identity.split("~")[0];
   return userId.length > 0 ? userId : null;
+}
+
+/** One room's live participants, as [roomParticipants] returns them. */
+export interface RoomRoster {
+  room: string;
+  participants: ParticipantInfo[];
+}
+
+/**
+ * Who is in each of [rooms], asked all at once.
+ *
+ * LiveKit has no "participants in these rooms" call, so there is one request
+ * per room either way — but awaiting them in a loop makes the answer as slow
+ * as the sum of them, and every caller here is either a member opening a
+ * server or a moderator waiting on a click. A server with twenty busy voice
+ * channels paid twenty round trips in series; it now pays the slowest one.
+ *
+ * A room that fails to answer comes back empty rather than throwing. The
+ * rooms are independent: one unreachable channel should not blank a whole
+ * roster, and for a kick or a move it means one place not searched rather
+ * than a refusal the moderator has to interpret.
+ */
+export async function roomParticipants(
+  roomService: RoomServiceClient,
+  rooms: { name: string }[],
+): Promise<RoomRoster[]> {
+  return await Promise.all(
+    rooms.map(async (room) => {
+      try {
+        return { room: room.name, participants: await roomService.listParticipants(room.name) };
+      } catch {
+        return { room: room.name, participants: [] };
+      }
+    }),
+  );
 }
 
 /** A [RoomServiceClient] for [serverId], or null when it has no credentials. */

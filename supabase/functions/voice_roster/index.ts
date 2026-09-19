@@ -4,7 +4,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService, voiceUserId } from "../_shared/livekit.ts";
+import { livekitRoomService, roomParticipants, voiceUserId } from "../_shared/livekit.ts";
 
 /**
  * Who is in which voice channel on this server, right now: `{userId: channelId}`.
@@ -65,15 +65,16 @@ Deno.serve(async (req) => {
     // an idle server costs one call, not one per channel.
     const rooms = await roomService.listRooms(channelIds);
 
+    const rosters = await roomParticipants(roomService, rooms);
+
     const roster: Record<string, string> = {};
-    for (const room of rooms) {
-      const participants = await roomService.listParticipants(room.name);
+    for (const { room, participants } of rosters) {
       for (const participant of participants) {
         const userId = voiceUserId(participant.identity);
         // Someone joined from two devices in different channels lands here
         // twice; the last room wins, and their own client is the only one that
         // could say which is "theirs". Rare enough to leave alone.
-        if (userId) roster[userId] = room.name;
+        if (userId) roster[userId] = room;
       }
     }
 
