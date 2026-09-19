@@ -93,7 +93,7 @@ services:
   # and is invisible to every phone.
   caddy:
     container_name: rift-caddy
-    image: caddy:2.10-alpine
+    image: caddy:2.11-alpine
     profiles: [full]
     restart: unless-stopped
     ports:
@@ -112,7 +112,7 @@ services:
 
   kong:
     container_name: rift-kong
-    image: kong/kong:3.9.1
+    image: kong/kong:3.9.3
     profiles: [full]
     restart: unless-stopped
     networks:
@@ -377,7 +377,7 @@ services:
 
   functions:
     container_name: rift-functions
-    image: supabase/edge-runtime:v1.74.0
+    image: supabase/edge-runtime:v1.76.2
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -421,7 +421,7 @@ services:
 
   db:
     container_name: rift-db
-    image: supabase/postgres:17.6.1.136
+    image: supabase/postgres:17.6.1.173
     profiles: [full]
     restart: unless-stopped
     volumes:
