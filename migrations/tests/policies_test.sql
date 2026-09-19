@@ -85,6 +85,22 @@ SELECT app.sync_permission_cache(id) FROM users
  WHERE server_id IN ('aaaa0000-0000-4000-8000-000000000001',
                      'bbbb0000-0000-4000-8000-000000000001');
 
+-- Put the sequences out of the fixtures' way, permanently.
+--
+-- The fixtures below name message ids by hand, in the 9000s, so later tests
+-- can refer to them. Other tests insert without an id — one of them a whole
+-- page over the unread cap — and a sequence is not rolled back with the
+-- transaction it was used in. So every run of this suite walked the sequence
+-- about a hundred values closer to the hard-coded ids, and after enough runs
+-- it arrived: `duplicate key value violates unique constraint
+-- "messages_pkey", Key (id)=(9001)`, on a fixture that had not changed in
+-- months and a machine where it had always passed before.
+--
+-- Raising it here rather than lowering the fixtures, because the fixtures
+-- are readable and the sequence is not: nothing reads an id out of it.
+SELECT setval('messages_id_seq',    GREATEST((SELECT last_value FROM messages_id_seq),    100000));
+SELECT setval('dm_messages_id_seq', GREATEST((SELECT last_value FROM dm_messages_id_seq), 100000));
+
 -- `attest_message` stamps `sender_id := auth.uid()` on every insert, so a
 -- fixture written as the superuser — who has no claim — came out with no sender
 -- at all, and 013's `messages_one_origin` refuses a row that is neither a
@@ -3773,6 +3789,286 @@ BEGIN
   RAISE NOTICE 'ok  and an emptied conversation leaves both sides'' lists';
 END $$;
 
+
+
+-- ============================================================
+-- 26. Who the doorbell wakes (024)
+-- ============================================================
+-- The doorbell used to walk the whole membership and ask each member, one
+-- query at a time, whether they already had unread mail here. It now reads
+-- two message ids and drives from `read_state` instead. The two must agree,
+-- and the cases that decide it are the awkward ones: a member with no cursor
+-- at all, and a member who wrote everything before this.
+--
+-- `ring_devices` is swapped for a recorder so the decision can be read
+-- directly. It is restored at the end of the section; the transaction rolls
+-- back regardless.
+
+RESET ROLE;
+
+CREATE TEMP TABLE rung (server_id UUID, user_ids UUID[]);
+
+CREATE OR REPLACE FUNCTION ring_devices(p_server_id UUID, p_user_ids UUID[])
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $recorder$
+BEGIN
+  INSERT INTO rung VALUES (p_server_id, COALESCE(p_user_ids, '{}'::uuid[]));
+END $recorder$;
+
+-- Push on for Alpha, which is what makes the doorbell run at all.
+INSERT INTO push_config (server_id, endpoint, secret, relay_id)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', 'http://relay.invalid/push',
+        'push-secret', gen_random_uuid())
+ON CONFLICT (server_id) DO NOTHING;
+
+-- A channel of its own, so the history is exactly what these tests wrote.
+INSERT INTO channels (id, server_id, name, channel_type)
+VALUES ('aaaa1111-0000-4000-8000-0000000000b7',
+        'aaaa0000-0000-4000-8000-000000000001', 'doorbell', 'text');
+
+-- Bob opens it and says something.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version)
+VALUES (9501, 'aaaa1111-0000-4000-8000-0000000000b7', 'first', 'n', 's', 1);
+
+-- Nobody has a cursor in this channel yet, so nobody is caught up, so the
+-- only person the second message can wake is the one who wrote the first.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_targets UUID[];
+BEGIN
+  DELETE FROM rung;
+  INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version)
+  VALUES (9502, 'aaaa1111-0000-4000-8000-0000000000b7', 'second', 'n', 's', 1);
+
+  SELECT user_ids INTO v_targets FROM rung;
+  -- Bob wrote everything before this one, so there is nothing of anybody
+  -- else's for him to have missed — caught up with no `read_state` row at
+  -- all. This is the case the whole `o_newest_other IS NULL` branch exists
+  -- for, and the one a naive rewrite silently drops.
+  IF NOT ('11111111-aaaa-4aaa-8aaa-000000000002' = ANY (v_targets)) THEN
+    RAISE EXCEPTION 'FAIL: the only prior writer was not woken: %', v_targets;
+  END IF;
+  -- Carol has read nothing here, so message 9501 is unread mail and she has
+  -- already been told about it once.
+  IF '11111111-aaaa-4aaa-8aaa-000000000003' = ANY (v_targets) THEN
+    RAISE EXCEPTION 'FAIL: a member with unread mail was woken again: %', v_targets;
+  END IF;
+  -- And never the sender.
+  IF '11111111-aaaa-4aaa-8aaa-000000000001' = ANY (v_targets) THEN
+    RAISE EXCEPTION 'FAIL: the sender woke their own phone: %', v_targets;
+  END IF;
+  RAISE NOTICE 'ok  the doorbell wakes whoever was caught up, and nobody else';
+END $$;
+
+-- Carol catches up. Now she is the one to wake, and Bob — who has read
+-- nothing since his own message — is not.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+INSERT INTO read_state (user_id, scope, scope_id, last_read_id)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000003', 'channel',
+        'aaaa1111-0000-4000-8000-0000000000b7', 9502)
+ON CONFLICT (user_id, scope, scope_id) DO UPDATE SET last_read_id = 9502;
+RESET ROLE;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_targets UUID[];
+BEGIN
+  DELETE FROM rung;
+  INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version)
+  VALUES (9503, 'aaaa1111-0000-4000-8000-0000000000b7', 'third', 'n', 's', 1);
+
+  SELECT user_ids INTO v_targets FROM rung;
+  IF NOT ('11111111-aaaa-4aaa-8aaa-000000000003' = ANY (v_targets)) THEN
+    RAISE EXCEPTION 'FAIL: a member who had caught up was not woken: %', v_targets;
+  END IF;
+  IF '11111111-aaaa-4aaa-8aaa-000000000002' = ANY (v_targets) THEN
+    RAISE EXCEPTION 'FAIL: bob was woken though 9502 is still unread to him: %', v_targets;
+  END IF;
+  RAISE NOTICE 'ok  catching up is what puts a member back in the queue';
+END $$;
+
+-- The old rule, spelled out, against the new one — over every member and a
+-- range of cursors. This is the check that the two-scalar reformulation is
+-- an identity and not an approximation that happens to hold for the cases
+-- above.
+DO $$
+DECLARE
+  v_ch  UUID := 'aaaa1111-0000-4000-8000-0000000000b7';
+  v_x   BIGINT := 9504;
+  v_t   RECORD;
+  v_bad INT;
+  v_n   INT;
+BEGIN
+  v_t := app.unread_thresholds(v_ch, v_x);
+  SELECT count(*), count(*) FILTER (WHERE old_says IS DISTINCT FROM new_says)
+    INTO v_n, v_bad
+    FROM (
+      SELECT
+        EXISTS (SELECT 1 FROM messages m
+                 WHERE m.channel_id = v_ch AND m.id < v_x
+                   AND NOT m.is_interaction
+                   AND m.sender_id IS DISTINCT FROM u.id
+                   AND m.id > COALESCE(c.cursor_at, 0)) AS old_says,
+        COALESCE(c.cursor_at, 0) < CASE
+          WHEN v_t.o_newest_by IS DISTINCT FROM u.id THEN COALESCE(v_t.o_newest, 0)
+          ELSE COALESCE(v_t.o_newest_other, 0) END AS new_says
+      FROM users u
+      -- Every cursor worth having: none, and each message in the channel.
+      CROSS JOIN LATERAL (
+        SELECT NULL::BIGINT AS cursor_at
+        UNION ALL SELECT m.id FROM messages m WHERE m.channel_id = v_ch) c
+     WHERE u.server_id = 'aaaa0000-0000-4000-8000-000000000001') t;
+
+  IF v_n = 0 THEN
+    RAISE EXCEPTION 'FAIL: the comparison compared nothing';
+  END IF;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'FAIL: % of % member/cursor pairs disagree with the old rule',
+      v_bad, v_n;
+  END IF;
+  RAISE NOTICE 'ok  and it answers exactly what asking each member one at a time did';
+END $$;
+
+-- Put the real one back, so nothing after this section is measuring a stub.
+RESET ROLE;
+CREATE OR REPLACE FUNCTION ring_devices(p_server_id UUID, p_user_ids UUID[])
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public, extensions AS $real$
+DECLARE
+  v_cfg    push_config;
+  v_tokens TEXT[];
+BEGIN
+  IF p_user_ids IS NULL OR cardinality(p_user_ids) = 0 THEN RETURN; END IF;
+  SELECT * INTO v_cfg FROM push_config WHERE server_id = p_server_id;
+  IF v_cfg IS NULL THEN RETURN; END IF;
+  SELECT array_agg(token) INTO v_tokens
+    FROM device_tokens WHERE user_id = ANY (p_user_ids);
+  IF v_tokens IS NULL THEN RETURN; END IF;
+  PERFORM net.http_post(
+    url     := v_cfg.endpoint,
+    headers := jsonb_build_object('Content-Type', 'application/json',
+                                  'x-push-secret', v_cfg.secret),
+    body    := jsonb_build_object('relay_id', v_cfg.relay_id,
+                                  'tokens',   to_jsonb(v_tokens)));
+END $real$;
+DELETE FROM push_config WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
+
+-- ============================================================
+-- 27. The member list carries its own scope (026)
+-- ============================================================
+-- These five became SECURITY DEFINER so the planner would stop tripping over
+-- the `users` policies, which means RLS is no longer the thing keeping one
+-- server's roster out of another's. They enforce it themselves now, and
+-- these are the tests that say so — the whole point of the change is that
+-- the rule moved, so the rule needs checking where it landed.
+--
+-- `member_roles_for` is the one that never had a scope of its own at all:
+-- `member_roles_select` was doing it. Bypassing that policy without adding
+-- the scope back would have handed every server's role assignments to
+-- anybody who could guess a user id.
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE
+  v_alpha UUID[] := ARRAY['11111111-aaaa-4aaa-8aaa-000000000001',
+                          '11111111-aaaa-4aaa-8aaa-000000000002',
+                          '11111111-aaaa-4aaa-8aaa-000000000003']::UUID[];
+  v_n BIGINT;
+BEGIN
+  IF EXISTS (SELECT 1 FROM list_members() WHERE server_id
+             <> 'bbbb0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: list_members reached outside the caller''s server';
+  END IF;
+  IF EXISTS (SELECT 1 FROM search_members('') WHERE server_id
+             <> 'bbbb0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: an empty search reached outside the caller''s server';
+  END IF;
+  -- By name, which is the query a directory scrape would use.
+  IF EXISTS (SELECT 1 FROM search_members('alice')) THEN
+    RAISE EXCEPTION 'FAIL: search_members found a member of another server';
+  END IF;
+  IF EXISTS (SELECT 1 FROM search_members('lic')) THEN
+    RAISE EXCEPTION 'FAIL: the infix half of search_members crossed servers';
+  END IF;
+  -- By id, which is the query somebody holding a stolen id would use.
+  IF EXISTS (SELECT 1 FROM members_by_ids(v_alpha)) THEN
+    RAISE EXCEPTION 'FAIL: members_by_ids resolved ids from another server';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles_for(v_alpha)) THEN
+    RAISE EXCEPTION 'FAIL: member_roles_for returned another server''s roles';
+  END IF;
+  v_n := (member_counts() ->> 'people')::BIGINT;
+  IF v_n <> (SELECT count(*) FROM users
+              WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001'
+                AND NOT is_bot AND NOT is_banned) THEN
+    RAISE EXCEPTION 'FAIL: member_counts counted % across servers', v_n;
+  END IF;
+  RAISE NOTICE 'ok  the member list answers about one server, whoever asks';
+END $$;
+
+-- And a member still sees their own server, or the scope check has simply
+-- broken everything rather than secured it.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM search_members('alice')) THEN
+    RAISE EXCEPTION 'FAIL: a member cannot find their own server''s members';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM members_by_ids(
+       ARRAY['11111111-aaaa-4aaa-8aaa-000000000001']::UUID[])) THEN
+    RAISE EXCEPTION 'FAIL: a member cannot resolve an id from their own server';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM member_roles_for(
+       ARRAY['11111111-aaaa-4aaa-8aaa-000000000001']::UUID[])) THEN
+    RAISE EXCEPTION 'FAIL: a member cannot see their own server''s role chips';
+  END IF;
+  -- The space-stripped prefix, which is the pattern the new index serves.
+  IF NOT EXISTS (SELECT 1 FROM search_members('ali')) THEN
+    RAISE EXCEPTION 'FAIL: a prefix search found nobody';
+  END IF;
+  RAISE NOTICE 'ok  and it still answers about the server the caller is in';
+END $$;
+
+-- A session with no account behind it gets nothing at all, rather than an
+-- error or — the failure that matters — everybody.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"99999999-9999-4999-8999-000000000009","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM list_members()) THEN
+    RAISE EXCEPTION 'FAIL: a stranger listed members';
+  END IF;
+  IF EXISTS (SELECT 1 FROM search_members('a')) THEN
+    RAISE EXCEPTION 'FAIL: a stranger searched members';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles_for(
+       ARRAY['11111111-aaaa-4aaa-8aaa-000000000001']::UUID[])) THEN
+    RAISE EXCEPTION 'FAIL: a stranger read role assignments';
+  END IF;
+  IF (member_counts() ->> 'people')::BIGINT <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a stranger was told how many members there are';
+  END IF;
+  RAISE NOTICE 'ok  no account, no roster';
+END $$;
+
+-- Hand the session back exactly as this section found it. The claim above
+-- belongs to nobody, and what follows creates channels whose trigger seats
+-- their creator — which a caller with no `users` row cannot be.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"33333333-cccc-4ccc-8ccc-000000000000","role":"authenticated"}', true); END $$;
 
 -- ============================================================
 -- 18b. Where the private-channel bit lands by default (014)
