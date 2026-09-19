@@ -142,8 +142,24 @@ BEGIN
   END IF;
 
   v_size := COALESCE((NEW.metadata->>'size')::BIGINT, 0);
+
+  -- Locked, not just read. Two uploads landing together would otherwise both
+  -- measure themselves against the same figure, both fit, and together not:
+  -- 950 KB used under a 1 MB cap admits two 40 KB files and finishes at
+  -- 1,030 KB. Demonstrated, not theorised.
+  --
+  -- The row has to exist before it can be locked, hence the insert — a bucket
+  -- nobody has uploaded to yet has no row, and `FOR UPDATE` over nothing locks
+  -- nothing.
+  --
+  -- This costs no contention. `app.track_bucket_usage` below already takes the
+  -- same exclusive row lock, on the same row, and holds it to commit — so
+  -- uploads to one server already serialise here. All this does is take that
+  -- lock a few statements earlier, where the answer is still worth something.
+  INSERT INTO app.bucket_usage (bucket_id, bytes) VALUES (NEW.bucket_id, 0)
+    ON CONFLICT (bucket_id) DO NOTHING;
   SELECT COALESCE(u.bytes, 0) INTO v_used
-    FROM app.bucket_usage u WHERE u.bucket_id = NEW.bucket_id;
+    FROM app.bucket_usage u WHERE u.bucket_id = NEW.bucket_id FOR UPDATE;
 
   IF COALESCE(v_used, 0) + v_size > v_cap THEN
     -- A named condition rather than a bare string: Storage passes the

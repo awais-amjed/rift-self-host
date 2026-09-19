@@ -1545,6 +1545,27 @@ BEGIN
   RAISE NOTICE 'ok  the upload that would go over is refused, the one that fits is not';
 END $$;
 
+-- The cap is exact, not approximate, and that rests on the check holding the
+-- bucket's row rather than glancing at it. Two uploads landing together
+-- against a stale figure both fit and together do not: 950 KB under a 1 MB
+-- cap admitted two 40 KB files and finished at 1,030 KB, which is how this
+-- was found. A single-transaction suite cannot race anything, so what is
+-- pinned here is the lock itself — drop it and the arithmetic still passes
+-- every other test in this file.
+DO $$
+DECLARE v_src TEXT;
+BEGIN
+  SELECT pg_get_functiondef(oid) INTO v_src
+    FROM pg_proc WHERE proname = 'enforce_storage_cap';
+  IF v_src !~* 'FOR UPDATE' THEN
+    RAISE EXCEPTION 'FAIL: the storage cap reads the running total without locking it';
+  END IF;
+  IF v_src !~* 'ON CONFLICT \(bucket_id\) DO NOTHING' THEN
+    RAISE EXCEPTION 'FAIL: nothing guarantees a row to lock on a bucket''s first upload';
+  END IF;
+  RAISE NOTICE 'ok  the cap locks the running total it measures against';
+END $$;
+
 DO $$
 DECLARE v_other TEXT := 'chat-bbbb0000-0000-4000-8000-000000000001';
 BEGIN
