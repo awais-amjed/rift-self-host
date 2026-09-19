@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS storage.buckets (
   public BOOLEAN,
   file_size_limit BIGINT
 );
+-- 029 puts triggers on `storage.objects` — a running total of what each
+-- bucket holds, and the check that refuses the upload which would go over.
+-- Unlike 002's policies on the same table, those are past the best-effort
+-- pass and so must actually apply. Only the columns they read.
+CREATE TABLE IF NOT EXISTS storage.objects (
+  id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  bucket_id TEXT,
+  name      TEXT,
+  owner     UUID,
+  metadata  JSONB
+);
 CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY);
 -- pg_cron is not installed here and `CREATE EXTENSION` in 006 is swallowed with
 -- the rest of the pre-roles best-effort pass. Later migrations that *schedule*

@@ -1378,6 +1378,213 @@ UPDATE servers SET max_voice_participants = 0, max_share_mbps = 0
  WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
 
 -- ============================================================
+-- 11c. How many people, and how much disk (029)
+-- ============================================================
+-- Both of these are walls rather than budgets, so both are testable here:
+-- the member cap lives in `register_user` and the storage cap in a trigger
+-- on `storage.objects`, and neither needs a client to co-operate.
+
+RESET ROLE;
+DO $$
+DECLARE v_members INT; v_storage BIGINT;
+BEGIN
+  SELECT max_members, max_storage_bytes INTO v_members, v_storage
+    FROM servers WHERE id = 'bbbb0000-0000-4000-8000-000000000001';
+  IF v_members IS DISTINCT FROM 0 OR v_storage IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'FAIL: a server that set nothing caps its size: % / %',
+      v_members, v_storage;
+  END IF;
+  RAISE NOTICE 'ok  a server nobody configured caps neither members nor disk';
+END $$;
+
+-- ── the member cap ──────────────────────────────────────────────────────
+-- Alpha is capped at exactly the number of people already in it, so the next
+-- arrival is the interesting one.
+
+DO $$
+DECLARE v_now INT; v_reason TEXT; v_id UUID;
+BEGIN
+  SELECT count(*) INTO v_now FROM users
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND NOT is_banned;
+  UPDATE servers SET max_members = v_now
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  -- A bot invite, for two reasons. Bots count towards the cap — that is the
+  -- documented rule and this pins it — and `register_user` hands the owner
+  -- role to the first *person* through when a server has none, which Alpha
+  -- does not have yet at this point in the file. Registering people here
+  -- would quietly make one of them the owner and break section 30.
+  INSERT INTO invites (server_id, code, max_uses, is_bot)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'fulltest', 9, true);
+
+  v_id := '11119999-0000-4000-8000-00000000f001';
+  INSERT INTO auth.users (id, instance_id, aud, role, created_at, updated_at)
+  VALUES (v_id, '00000000-0000-0000-0000-000000000000',
+          'authenticated', 'authenticated', now(), now());
+
+  v_reason := register_user('fulltest', v_id, 'pk-f1', 'sid-f1', 'f1', 'F1')
+                ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'server_full' THEN
+    RAISE EXCEPTION 'FAIL: a full server let somebody in: %', v_reason;
+  END IF;
+  RAISE NOTICE 'ok  a full server turns the next member away';
+END $$;
+
+DO $$
+DECLARE v_reason TEXT; v_id UUID := '11119999-0000-4000-8000-00000000f002';
+BEGIN
+  -- One more seat, one more member, and then full again.
+  UPDATE servers SET max_members = max_members + 1
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  INSERT INTO auth.users (id, instance_id, aud, role, created_at, updated_at)
+  VALUES (v_id, '00000000-0000-0000-0000-000000000000',
+          'authenticated', 'authenticated', now(), now());
+  v_reason := register_user('fulltest', v_id, 'pk-f2', 'sid-f2', 'f2', 'F2')
+                ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a seat was freed and nobody could take it: %', v_reason;
+  END IF;
+  RAISE NOTICE 'ok  raising the cap by one admits exactly one';
+END $$;
+
+DO $$
+DECLARE v_reason TEXT; v_id UUID := '11119999-0000-4000-8000-00000000f003';
+BEGIN
+  INSERT INTO auth.users (id, instance_id, aud, role, created_at, updated_at)
+  VALUES (v_id, '00000000-0000-0000-0000-000000000000',
+          'authenticated', 'authenticated', now(), now());
+
+  -- Banning somebody gives their place back. An operator who has decided
+  -- someone is not part of the server should not still be paying for them.
+  UPDATE users SET is_banned = true
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND username = 'f2';
+
+  v_reason := register_user('fulltest', v_id, 'pk-f3', 'sid-f3', 'f3', 'F3')
+                ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a ban did not free the seat: %', v_reason;
+  END IF;
+  RAISE NOTICE 'ok  a ban gives the seat back';
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE v_bots INT;
+BEGIN
+  SELECT count(*) INTO v_bots FROM users
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_bot;
+  IF v_bots < 2 THEN
+    RAISE EXCEPTION 'FAIL: the bots that filled the server are not members';
+  END IF;
+  RAISE NOTICE 'ok  a bot holds a seat like anybody else';
+END $$;
+
+DELETE FROM users WHERE id IN (
+  '11119999-0000-4000-8000-00000000f002', '11119999-0000-4000-8000-00000000f003');
+DELETE FROM auth.users WHERE id IN (
+  '11119999-0000-4000-8000-00000000f001',
+  '11119999-0000-4000-8000-00000000f002',
+  '11119999-0000-4000-8000-00000000f003');
+DELETE FROM invites WHERE code = 'fulltest';
+UPDATE servers SET max_members = 0
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+-- ── the storage cap ─────────────────────────────────────────────────────
+-- The running total is the whole design: if it did not follow every write,
+-- the cap would drift and eventually refuse a server with room or admit one
+-- without. So the tests are about the total keeping up, not only about the
+-- refusal.
+
+DO $$
+DECLARE v_bucket TEXT := 'chat-aaaa0000-0000-4000-8000-000000000001';
+        v_bytes BIGINT;
+BEGIN
+  INSERT INTO storage.objects (bucket_id, name, owner, metadata)
+  VALUES (v_bucket, 'sz/a.bin', '11111111-aaaa-4aaa-8aaa-000000000001',
+          jsonb_build_object('size', 1000));
+  SELECT bytes INTO v_bytes FROM app.bucket_usage WHERE bucket_id = v_bucket;
+  IF v_bytes IS DISTINCT FROM 1000 THEN
+    RAISE EXCEPTION 'FAIL: an upload did not reach the total: %', v_bytes;
+  END IF;
+
+  INSERT INTO storage.objects (bucket_id, name, owner, metadata)
+  VALUES (v_bucket, 'sz/b.bin', '11111111-aaaa-4aaa-8aaa-000000000001',
+          jsonb_build_object('size', 500));
+  SELECT bytes INTO v_bytes FROM app.bucket_usage WHERE bucket_id = v_bucket;
+  IF v_bytes IS DISTINCT FROM 1500 THEN
+    RAISE EXCEPTION 'FAIL: the total does not add up: %', v_bytes;
+  END IF;
+
+  DELETE FROM storage.objects WHERE bucket_id = v_bucket AND name = 'sz/b.bin';
+  SELECT bytes INTO v_bytes FROM app.bucket_usage WHERE bucket_id = v_bucket;
+  IF v_bytes IS DISTINCT FROM 1000 THEN
+    RAISE EXCEPTION 'FAIL: deleting a file did not give the space back: %', v_bytes;
+  END IF;
+  RAISE NOTICE 'ok  the running total follows every upload and every delete';
+END $$;
+
+DO $$
+DECLARE v_bucket TEXT := 'chat-aaaa0000-0000-4000-8000-000000000001';
+BEGIN
+  -- 1,000 bytes held, 1,200 allowed.
+  UPDATE servers SET max_storage_bytes = 1200
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, owner, metadata)
+    VALUES (v_bucket, 'sz/toobig.bin', '11111111-aaaa-4aaa-8aaa-000000000001',
+            jsonb_build_object('size', 500));
+    RAISE EXCEPTION 'FAIL: an upload past the cap was accepted';
+  EXCEPTION WHEN disk_full THEN NULL;
+  END;
+
+  -- And the one that does fit still goes in: a cap is not an outage.
+  INSERT INTO storage.objects (bucket_id, name, owner, metadata)
+  VALUES (v_bucket, 'sz/fits.bin', '11111111-aaaa-4aaa-8aaa-000000000001',
+          jsonb_build_object('size', 200));
+  RAISE NOTICE 'ok  the upload that would go over is refused, the one that fits is not';
+END $$;
+
+DO $$
+DECLARE v_other TEXT := 'chat-bbbb0000-0000-4000-8000-000000000001';
+BEGIN
+  -- Beta has no cap and is not affected by Alpha's.
+  INSERT INTO storage.objects (bucket_id, name, owner, metadata)
+  VALUES (v_other, 'sz/free.bin', '22222222-bbbb-4bbb-8bbb-000000000001',
+          jsonb_build_object('size', 999999));
+  RAISE NOTICE 'ok  one server''s disk limit is not another''s';
+END $$;
+
+-- What a member is told about it, which is what the composer warns from.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_used BIGINT; v_details JSONB;
+BEGIN
+  v_used := server_storage_used();
+  IF v_used IS DISTINCT FROM 1200 THEN
+    RAISE EXCEPTION 'FAIL: the server reports the wrong usage: %', v_used;
+  END IF;
+  v_details := get_server_details();
+  IF (v_details->>'storage_used')::BIGINT IS DISTINCT FROM 1200 THEN
+    RAISE EXCEPTION 'FAIL: usage is missing from the one call a client makes';
+  END IF;
+  -- 028's two came late to this function and were missing for a while; a
+  -- limit the client cannot read is a limit the client ignores.
+  IF NOT (v_details ? 'max_share_mbps' AND v_details ? 'max_voice_participants'
+          AND v_details ? 'max_members' AND v_details ? 'max_storage_bytes') THEN
+    RAISE EXCEPTION 'FAIL: a limit is missing from get_server_details: %', v_details;
+  END IF;
+  RAISE NOTICE 'ok  a member can read how full the server is, and every limit';
+END $$;
+
+RESET ROLE;
+UPDATE servers SET max_storage_bytes = 0
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+DELETE FROM storage.objects WHERE name LIKE 'sz/%';
+
+-- ============================================================
 -- 12. Roles and granular permissions (018)
 -- ============================================================
 -- The three booleans are now a cache of three bits. Every test here guards a

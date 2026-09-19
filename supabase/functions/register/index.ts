@@ -110,6 +110,14 @@ Deno.serve(async (req) => {
         return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
       case "username_taken":
         return CustomResponse.error("Username already taken", EC.USERNAME_TAKEN);
+      // Last, like the check itself: everything above is about the caller,
+      // and this is about the server. It is also the only refusal here a
+      // valid invite can still produce, so it says what to do about it.
+      case "server_full":
+        return CustomResponse.error(
+          "This server is full — ask an admin to make room or raise the limit",
+          EC.SERVER_FULL,
+        );
       default:
         return CustomResponse.error("Error creating user", EC.DB_ERROR, reg);
     }

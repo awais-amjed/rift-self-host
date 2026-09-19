@@ -23,6 +23,11 @@ const DBSchema = {
     // bitrate.
     maxVoiceParticipants: "max_voice_participants",
     maxShareMbps: "max_share_mbps",
+    // How large the place may get (migration 029). Both 0 = off, and both
+    // are real walls: one way to become a member, one way for bytes to
+    // arrive, and the database owns each.
+    maxMembers: "max_members",
+    maxStorageBytes: "max_storage_bytes",
   },
   // Split out of `servers` so the rest of that row can be read directly by
   // members under RLS. This table has no grant and no policy: the service role
