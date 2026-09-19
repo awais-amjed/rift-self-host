@@ -4144,6 +4144,24 @@ BEGIN
   IF app.can_use_topic('chat:not-a-uuid', false) OR app.can_use_topic('keysweep:aaaa0000-0000-4000-8000-000000000001', false) THEN
     RAISE EXCEPTION 'FAIL: a malformed or unknown topic was admitted';
   END IF;
+  -- 027's listen-only topic, by the same rule as the channel itself.
+  IF NOT app.can_use_topic('channel:aaaa1111-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member could not listen to an open channel''s topic';
+  END IF;
+  IF app.can_use_topic('channel:aaaa1111-0000-4000-8000-0000000000ff', false) THEN
+    RAISE EXCEPTION 'FAIL: a member listened to a private channel they are not in';
+  END IF;
+  IF app.can_use_topic('channel:bbbb1111-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a member listened to a channel on another server';
+  END IF;
+  -- Nobody writes here, not even a member of the channel. A member who could
+  -- would be able to forge a message announcement to everybody in it.
+  IF app.can_use_topic('channel:aaaa1111-0000-4000-8000-000000000001', true) THEN
+    RAISE EXCEPTION 'FAIL: a member could speak on a channel''s database topic';
+  END IF;
+  IF app.can_use_topic('channel:not-a-uuid', false) THEN
+    RAISE EXCEPTION 'FAIL: a malformed channel topic was admitted';
+  END IF;
   RAISE NOTICE 'ok  a member joins their server''s topics and their own, and nothing else';
 END $$;
 
@@ -4154,6 +4172,12 @@ DO $$
 BEGIN
   IF NOT app.can_use_topic('chat:aaaa1111-0000-4000-8000-0000000000ff', false) THEN
     RAISE EXCEPTION 'FAIL: a private channel''s member could not join its topic';
+  END IF;
+  IF NOT app.can_use_topic('channel:aaaa1111-0000-4000-8000-0000000000ff', false) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s member could not hear its messages';
+  END IF;
+  IF app.can_use_topic('channel:aaaa1111-0000-4000-8000-0000000000ff', true) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s member could speak on its database topic';
   END IF;
   RAISE NOTICE 'ok  a private channel''s topic admits its members';
 END $$;
@@ -4233,19 +4257,34 @@ BEGIN
     RAISE EXCEPTION 'FAIL: an edit was not told to the server';
   END IF;
 
-  -- Its members are alice and whoever the owner-seeding trigger added; the
-  -- rule is the same `app.in_channel` the channel's own policies use.
+  -- 027: a private channel is announced on a topic of its own, once, whoever
+  -- can see it. This used to be one row per member — the assertion that it is
+  -- exactly one is the whole point of that change, because the old shape was
+  -- correct and cost 176 ms on a channel 8,750 people could read.
+  SELECT count(*) INTO v_heard FROM realtime.messages
+   WHERE event = 'message' AND payload->>'id' = '9102'
+     AND topic = 'channel:aaaa1111-0000-4000-8000-0000000000ff' AND private;
+  IF v_heard <> 1 THEN
+    RAISE EXCEPTION
+      'FAIL: a private channel''s message was told to its own topic % times, not once',
+      v_heard;
+  END IF;
+  -- Nobody is told individually any more except a granted bot, which hears
+  -- only its own topic and is bounded by the grants rather than by the
+  -- membership. Anybody else here means the per-member fanout is back.
   IF EXISTS (SELECT 1 FROM realtime.messages
               WHERE event = 'message' AND payload->>'id' = '9102'
-                AND (topic NOT LIKE 'user:%'
-                     OR NOT app.in_channel('aaaa1111-0000-4000-8000-0000000000ff',
-                                           substr(topic, 6)::uuid))) THEN
-    RAISE EXCEPTION 'FAIL: a private channel''s message reached somebody outside it';
+                AND topic LIKE 'user:%'
+                AND NOT EXISTS (SELECT 1 FROM bot_channel_keys g
+                                 WHERE g.channel_id = 'aaaa1111-0000-4000-8000-0000000000ff'
+                                   AND g.bot_id::text = substr(topic, 6))) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s message was announced member by member';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM realtime.messages
-                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000001'
-                    AND payload->>'id' = '9102') THEN
-    RAISE EXCEPTION 'FAIL: a private channel''s member was not told of its message';
+  -- And never to the server's topic, which is everybody.
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE topic = 'server:aaaa0000-0000-4000-8000-000000000001'
+                AND payload->>'id' = '9102') THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s message reached the whole server';
   END IF;
 
   SELECT count(*) INTO v_heard FROM realtime.messages

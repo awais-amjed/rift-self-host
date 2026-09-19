@@ -31,6 +31,7 @@ export interface RealtimeLimits {
   maxPresenceEventsPerSecond: number;
   maxConcurrentUsers: number;
   maxJoinsPerSecond: number;
+  maxChannelsPerClient: number;
 }
 
 /**
@@ -73,6 +74,12 @@ export interface RealtimeLimits {
  * - **Joins.** A restart reconnects everybody at once, so this wants to be
  *   a good fraction of the connection count or coming back up is a thundering
  *   herd against its own rate limit.
+ * - **Topics per client.** A member holds one for the server, one of their
+ *   own, presence, voice, the open channel's typing — and since migration
+ *   027 one per *private* channel they can see, because that is where a
+ *   private channel's messages are announced. The stock 100 is therefore a
+ *   cap on private channels per member, and reaching it looks like a channel
+ *   that has silently stopped updating.
  */
 export const DEFAULT_LIMITS: RealtimeLimits = {
   maxEventsPerSecond: 200_000,
@@ -80,6 +87,7 @@ export const DEFAULT_LIMITS: RealtimeLimits = {
   maxPresenceEventsPerSecond: 50_000,
   maxConcurrentUsers: 10_000,
   maxJoinsPerSecond: 5_000,
+  maxChannelsPerClient: 1_000,
 };
 
 /** The tenant Realtime creates for itself, named after its container. */
@@ -103,7 +111,8 @@ UPDATE _realtime.tenants SET
   max_bytes_per_second           = ${limits.maxBytesPerSecond},
   max_presence_events_per_second = ${limits.maxPresenceEventsPerSecond},
   max_concurrent_users           = ${limits.maxConcurrentUsers},
-  max_joins_per_second           = ${limits.maxJoinsPerSecond}
+  max_joins_per_second           = ${limits.maxJoinsPerSecond},
+  max_channels_per_client        = ${limits.maxChannelsPerClient}
 WHERE external_id = '${TENANT}';
 `;
 }
@@ -141,19 +150,19 @@ export async function currentLimits(
     adminTarget(target),
     `SELECT max_events_per_second, max_bytes_per_second,
             max_presence_events_per_second, max_concurrent_users,
-            max_joins_per_second
+            max_joins_per_second, max_channels_per_client
      FROM _realtime.tenants WHERE external_id = '${TENANT}'`,
   );
   if (rows.length === 0) return null;
 
-  const [events, bytes, presence, users, joins] = rows[0].split(FIELD_SEPARATOR).map(
-    Number,
-  );
+  const [events, bytes, presence, users, joins, channels] = rows[0]
+    .split(FIELD_SEPARATOR).map(Number);
   return {
     maxEventsPerSecond: events,
     maxBytesPerSecond: bytes,
     maxPresenceEventsPerSecond: presence,
     maxConcurrentUsers: users,
     maxJoinsPerSecond: joins,
+    maxChannelsPerClient: channels,
   };
 }

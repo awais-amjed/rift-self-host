@@ -24,6 +24,7 @@ Deno.test("every limit reaches the tenant row", () => {
       ["max_presence_events_per_second", DEFAULT_LIMITS.maxPresenceEventsPerSecond],
       ["max_concurrent_users", DEFAULT_LIMITS.maxConcurrentUsers],
       ["max_joins_per_second", DEFAULT_LIMITS.maxJoinsPerSecond],
+      ["max_channels_per_client", DEFAULT_LIMITS.maxChannelsPerClient],
     ] as const
   ) {
     assertMatch(sql, new RegExp(`${column}\\s+= ${value}`));
@@ -53,6 +54,19 @@ Deno.test("everybody can come back at once after a restart", () => {
   assert(
     DEFAULT_LIMITS.maxJoinsPerSecond * 10 >= DEFAULT_LIMITS.maxConcurrentUsers,
     "a full server would take more than ten seconds of joins to reconnect",
+  );
+});
+
+Deno.test("a member can hold a topic for every private channel they see", () => {
+  // Since migration 027 a private channel's messages are announced on a
+  // topic of its own, so a member joins one per private channel they can
+  // read, on top of the server, their own, presence, voice and typing. The
+  // stock 100 would therefore have been a silent cap on private channels per
+  // member — and the symptom is a channel that stops updating, not an error.
+  assert(
+    DEFAULT_LIMITS.maxChannelsPerClient >= 200,
+    `${DEFAULT_LIMITS.maxChannelsPerClient} topics per client caps how many ` +
+      "private channels one member can hear from",
   );
 });
 
