@@ -353,8 +353,8 @@ Every Rift client signs a SIWS message naming `localhost` and `http://localhost`
 address the server is actually reachable at. That is a constant, not a placeholder somebody
 forgot to change.
 
-GoTrue's web3 grant (`internal/api/web3.go`, v2.189.0) puts four gates on the message's first
-line and its `URI`, and **exempts `localhost` from three of them**:
+GoTrue's web3 grant (`internal/api/web3.go`, read at v2.189.0 and still true at v2.197.0)
+puts four gates on the message's first line and its `URI`, and **exempts `localhost` from three of them**:
 
 | Gate | Rule |
 |---|---|
