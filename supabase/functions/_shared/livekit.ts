@@ -27,17 +27,21 @@ export async function livekitCredentials(
   supabase: SupabaseClient,
   serverId: string,
 ): Promise<LiveKitCredentials | null> {
-  const { data: server } = await supabase
-    .from(DBSchema.servers.tableName)
-    .select(DBSchema.servers.livekitUrl)
-    .eq(DBSchema.servers.id, serverId)
-    .single();
-
-  const { data: secrets } = await supabase
-    .from(DBSchema.serverSecrets.tableName)
-    .select(`${DBSchema.serverSecrets.livekitApiKey}, ${DBSchema.serverSecrets.livekitSecretKey}`)
-    .eq(DBSchema.serverSecrets.serverId, serverId)
-    .single();
+  // Two rows in two tables, neither waiting on the other. Minting a join
+  // token is on the path of every call, so the round trip saved here is one
+  // every member pays every time they join one.
+  const [{ data: server }, { data: secrets }] = await Promise.all([
+    supabase
+      .from(DBSchema.servers.tableName)
+      .select(DBSchema.servers.livekitUrl)
+      .eq(DBSchema.servers.id, serverId)
+      .single(),
+    supabase
+      .from(DBSchema.serverSecrets.tableName)
+      .select(`${DBSchema.serverSecrets.livekitApiKey}, ${DBSchema.serverSecrets.livekitSecretKey}`)
+      .eq(DBSchema.serverSecrets.serverId, serverId)
+      .single(),
+  ]);
 
   if (!server || !secrets) return null;
 

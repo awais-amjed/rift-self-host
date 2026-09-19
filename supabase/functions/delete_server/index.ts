@@ -105,14 +105,24 @@ async function deleteRooms(serverId: string, channelIds: string[]): Promise<stri
   try {
     const roomService = await livekitRoomService(supabase, serverId);
     if (!roomService) return "credentials_missing";
-    const failures: string[] = [];
-    for (const id of channelIds) {
-      try {
-        await roomService.deleteRoom(id);
-      } catch (err) {
-        if (!String(err).includes("not found")) failures.push(`${id}: ${err}`);
-      }
-    }
+    // Ask which rooms exist before deleting any. Rooms are named by channel
+    // id and most channels are text, so deleting by id blind meant a round
+    // trip per channel and a "not found" for nearly all of them — a server
+    // with two hundred channels paid two hundred of them, in series, while
+    // the owner waited on a delete. `listRooms` answers for the whole list at
+    // once, and what comes back is exactly what there is to delete.
+    const live = await roomService.listRooms(channelIds);
+    const failures = (await Promise.all(
+      live.map(async (room) => {
+        try {
+          await roomService.deleteRoom(room.name);
+          return null;
+        } catch (err) {
+          // A call that emptied between the listing and here is already gone.
+          return String(err).includes("not found") ? null : `${room.name}: ${err}`;
+        }
+      }),
+    )).filter((f): f is string => f !== null);
     return failures.length === 0 ? null : failures.join("; ");
   } catch (err) {
     return String(err);

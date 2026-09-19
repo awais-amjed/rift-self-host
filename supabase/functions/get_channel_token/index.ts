@@ -45,10 +45,44 @@ Deno.serve(async (req) => {
     // voice channel and nothing else — it still cannot list the channel, read
     // its roster or post in it, because every other caller asks
     // `app.sees_channel` and still gets no.
-    const { data: visible, error: visibleError } = await supabase.rpc(
-      "channel_joinable_by",
-      { p_channel: channel_id, p_user: auth.userId },
-    );
+    //
+    // ── and everything it needs to decide, asked at once ──
+    //
+    // Nothing here depends on anything else here: whether the channel admits
+    // them, whether they may connect, whether they may share, who they are,
+    // and the server's LiveKit credentials are five independent reads. They
+    // used to be five round trips one after another, and this is the function
+    // every join goes through — a channel that fills up after a raid or an
+    // event pays them once per person, in series, each.
+    //
+    // The *answers* are still weighed in the order they always were, below,
+    // so the refusal a caller gets is unchanged. Asking a question whose
+    // answer is thrown away costs a query and reveals nothing: none of these
+    // writes anything, and nothing is returned on a refusal.
+    const wantsShare = screen_share === true || sound_share === true;
+    const [
+      { data: visible, error: visibleError },
+      { data: mayConnect },
+      { data: mayShare },
+      { data: userData, error: userError },
+      credentials,
+    ] = await Promise.all([
+      supabase.rpc("channel_joinable_by", { p_channel: channel_id, p_user: auth.userId }),
+      supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "CONNECT" }),
+      wantsShare
+        ? supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "SCREEN_SHARE" })
+        : Promise.resolve({ data: null }),
+      supabase
+        .from(DBSchema.users.tableName)
+        .select(
+          `${DBSchema.users.displayName}, ${DBSchema.users.isMuted}, ` +
+            `${DBSchema.users.isDeafened}, ${DBSchema.users.isBot}`,
+        )
+        .eq(DBSchema.users.id, auth.userId)
+        .single(),
+      livekitCredentials(supabase, auth.serverId),
+    ]);
+
     if (visibleError) {
       return CustomResponse.error("Error reading channel access", EC.DB_ERROR, visibleError);
     }
@@ -60,10 +94,6 @@ Deno.serve(async (req) => {
     // `CONNECT`, and `SCREEN_SHARE` for the second connection. The moderation
     // flags below decide what a token may carry once you are in the room; these
     // decide whether there is a token at all.
-    const { data: mayConnect } = await supabase.rpc("user_has_permission", {
-      p_user: auth.userId,
-      p_name: "CONNECT",
-    });
     if (mayConnect !== true) {
       return CustomResponse.error("You cannot join voice channels", EC.PERMISSION_DENIED);
     }
@@ -71,27 +101,11 @@ Deno.serve(async (req) => {
     // share already carries the app's audio, so a separate permission would
     // only let a member be denied the quieter half of what they can already
     // do. One permission, two kinds of share.
-    if (screen_share === true || sound_share === true) {
-      const { data: mayShare } = await supabase.rpc("user_has_permission", {
-        p_user: auth.userId,
-        p_name: "SCREEN_SHARE",
-      });
-      if (mayShare !== true) {
-        return CustomResponse.error("You cannot share here", EC.PERMISSION_DENIED);
-      }
+    if (wantsShare && mayShare !== true) {
+      return CustomResponse.error("You cannot share here", EC.PERMISSION_DENIED);
     }
 
     const room = channel_id;
-
-    // Fetch user display name + moderation flags
-    const { data: userData, error: userError } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(
-        `${DBSchema.users.displayName}, ${DBSchema.users.isMuted}, ` +
-          `${DBSchema.users.isDeafened}, ${DBSchema.users.isBot}`,
-      )
-      .eq(DBSchema.users.id, auth.userId)
-      .single();
 
     if (userError || !userData) {
       return CustomResponse.error("User not found", EC.USER_NOT_FOUND, userError);
@@ -176,10 +190,9 @@ Deno.serve(async (req) => {
       mayListen = grant !== null;
     }
 
-    // Fetch LiveKit credentials. The API secret lives in `server_secrets`,
-    // which no client can read — minting this token is the only reason anything
-    // reads it, and it is why this endpoint stays an edge function.
-    const credentials = await livekitCredentials(supabase, auth.serverId);
+    // The API secret lives in `server_secrets`, which no client can read —
+    // minting this token is the only reason anything reads it, and it is why
+    // this endpoint stays an edge function.
     if (!credentials) {
       return CustomResponse.error("LiveKit credentials not configured for this server", EC.SERVER_CREDENTIALS_MISSING);
     }
