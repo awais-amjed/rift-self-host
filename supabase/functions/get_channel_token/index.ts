@@ -7,7 +7,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitCredentials } from "../_shared/livekit.ts";
+import { livekitCredentials, voiceUserId } from "../_shared/livekit.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -66,6 +66,7 @@ Deno.serve(async (req) => {
       { data: mayShare },
       { data: userData, error: userError },
       credentials,
+      { data: limitsRow },
     ] = await Promise.all([
       supabase.rpc("channel_joinable_by", { p_channel: channel_id, p_user: auth.userId }),
       supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "CONNECT" }),
@@ -81,6 +82,11 @@ Deno.serve(async (req) => {
         .eq(DBSchema.users.id, auth.userId)
         .single(),
       livekitCredentials(supabase, auth.serverId),
+      supabase
+        .from(DBSchema.servers.tableName)
+        .select(`${DBSchema.servers.maxVoiceParticipants}, ${DBSchema.servers.maxShareMbps}`)
+        .eq(DBSchema.servers.id, auth.serverId)
+        .single(),
     ]);
 
     if (visibleError) {
@@ -198,10 +204,50 @@ Deno.serve(async (req) => {
     }
     const { apiKey, apiSecret } = credentials;
 
+    const limits = (limitsRow ?? {}) as Record<string, any>;
+    const maxVoice = Number(limits[DBSchema.servers.maxVoiceParticipants] ?? 0);
+    const maxShareMbps = Number(limits[DBSchema.servers.maxShareMbps] ?? 0);
+
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
     // the edge function is the only thing that can create rooms.
     const roomService = new RoomServiceClient(credentials.host, apiKey, apiSecret);
+
+    // How full the call is (migration 028), asked only when there is a limit
+    // to compare it against — a server that has not set one pays nothing.
+    //
+    // **People, not connections.** A screen share is a second connection held
+    // by somebody already in the room, so `voiceUserId` drops it; an operator
+    // who typed 50 meant fifty people, and a limit that counted sockets would
+    // tell a member the call was full when they tried to share their screen.
+    // For the same reason a second connection from somebody already counted
+    // is always let through: they are not a new arrival.
+    //
+    // Not a perfect gate, and does not need to be. Two people arriving in the
+    // same instant can both pass, and a member holding an unexpired token
+    // from earlier can rejoin without asking. What it does stop is a channel
+    // growing without bound, because every genuinely new arrival needs a
+    // fresh token and every one of those is counted.
+    if (maxVoice > 0 && !isBot) {
+      try {
+        const present = new Set(
+          (await roomService.listParticipants(room))
+            .map((p) => voiceUserId(p.identity))
+            .filter((id): id is string => id !== null),
+        );
+        if (present.size >= maxVoice && !present.has(auth.userId)) {
+          return CustomResponse.error(
+            `This call is full — it takes ${maxVoice} ` +
+              `${maxVoice === 1 ? "person" : "people"}`,
+            EC.VOICE_CHANNEL_FULL,
+          );
+        }
+      } catch {
+        // No room yet, or LiveKit did not answer. An empty call is not a full
+        // one, and refusing everybody because the count could not be had
+        // would turn a bandwidth limit into an outage.
+      }
+    }
     try {
       await roomService.createRoom({ name: room });
     } catch (roomErr) {
@@ -253,7 +299,17 @@ Deno.serve(async (req) => {
     // Return the identity so the desktop screen-share path (which connects via
     // the Rust SDK) uses the exact identity embedded in this token instead of
     // reconstructing it client-side.
-    return CustomResponse.success({ token: livekitToken, identity });
+    // `max_share_mbps` rides along with the token rather than only living on
+    // the server row, so the client has it at the moment it needs it and a
+    // change takes effect on the next join rather than the next sync. It is a
+    // number the client keeps: a LiveKit token has nowhere to put a bitrate,
+    // so there is nothing here to clamp. `limit.bytes_per_sec` in
+    // livekit.yaml is the wall — see docs.joinrift.app/reference/#media.
+    return CustomResponse.success({
+      token: livekitToken,
+      identity,
+      max_share_mbps: maxShareMbps,
+    });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }

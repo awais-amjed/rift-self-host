@@ -37,6 +37,8 @@ const LIMIT_FIELDS = [
   { key: "message_history_cap", column: DBSchema.servers.messageHistoryCap, min: 0 },
   { key: "dm_retention_days", column: DBSchema.servers.dmRetentionDays, min: 0, nullable: true },
   { key: "dm_history_cap", column: DBSchema.servers.dmHistoryCap, min: 0, nullable: true },
+  { key: "max_voice_participants", column: DBSchema.servers.maxVoiceParticipants, min: 0 },
+  { key: "max_share_mbps", column: DBSchema.servers.maxShareMbps, min: 0 },
 ] as const;
 
 /** Every column this endpoint reads back, so the client's copy stays whole. */

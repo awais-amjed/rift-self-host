@@ -1283,6 +1283,101 @@ BEGIN
 END $$;
 
 -- ============================================================
+-- 11b. What a call may cost the operator (028)
+-- ============================================================
+-- Two columns, both 0 = off. What they *do* is enforced in
+-- `get_channel_token`, which is an edge function and outside this suite — so
+-- what is testable here is the part the database owns: the defaults a server
+-- that upgrades and is never touched reports, the constraint, and that a
+-- member cannot set either of them on themselves.
+--
+-- That last one is the only security-shaped case of the three, and it is
+-- worth having: a limit a member can raise is not a limit.
+
+RESET ROLE;
+DO $$
+DECLARE v_voice INT; v_mbps INT;
+BEGIN
+  SELECT max_voice_participants, max_share_mbps INTO v_voice, v_mbps
+    FROM servers WHERE id = 'bbbb0000-0000-4000-8000-000000000001';
+  IF v_voice IS DISTINCT FROM 0 OR v_mbps IS DISTINCT FROM 0 THEN
+    RAISE EXCEPTION 'FAIL: a server that set nothing reports a call limit: % / %',
+      v_voice, v_mbps;
+  END IF;
+  RAISE NOTICE 'ok  a server nobody configured caps neither the call nor the share';
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    UPDATE servers SET max_voice_participants = -1
+     WHERE id = 'bbbb0000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: a negative participant cap was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE servers SET max_share_mbps = -1
+     WHERE id = 'bbbb0000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: a negative share cap was accepted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  RAISE NOTICE 'ok  neither call limit can be set below zero';
+END $$;
+
+-- Alpha caps its calls. The number has to survive being set, because an
+-- operator typing it and it not sticking is the failure nobody would notice
+-- until the bandwidth bill.
+UPDATE servers SET max_voice_participants = 25, max_share_mbps = 3
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+DO $$
+DECLARE v_voice INT; v_mbps INT;
+BEGIN
+  SELECT max_voice_participants, max_share_mbps INTO v_voice, v_mbps
+    FROM servers WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  IF v_voice <> 25 OR v_mbps <> 3 THEN
+    RAISE EXCEPTION 'FAIL: the call limits did not stick: % / %', v_voice, v_mbps;
+  END IF;
+  SELECT max_voice_participants INTO v_voice
+    FROM servers WHERE id = 'bbbb0000-0000-4000-8000-000000000001';
+  IF v_voice <> 0 THEN
+    RAISE EXCEPTION 'FAIL: one server''s call cap reached another';
+  END IF;
+  RAISE NOTICE 'ok  a call cap belongs to the server that set it';
+END $$;
+
+-- A member reads the caps — the client needs the share budget — and cannot
+-- move them. Two different things could stop them, the grant or a policy, and
+-- this does not care which: what it asserts is that the numbers do not move.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_mbps INT; v_rows INT;
+BEGIN
+  SELECT max_share_mbps INTO v_mbps
+    FROM servers WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  IF v_mbps IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'FAIL: a member cannot read the share budget they must keep to: %', v_mbps;
+  END IF;
+
+  BEGIN
+    UPDATE servers SET max_voice_participants = 5000, max_share_mbps = 500
+     WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    IF v_rows <> 0 THEN
+      RAISE EXCEPTION 'FAIL: a member raised the call limits on themselves';
+    END IF;
+  EXCEPTION WHEN insufficient_privilege THEN NULL;  -- refused outright: also no
+  END;
+  RAISE NOTICE 'ok  a member reads the call limits and cannot raise them';
+END $$;
+
+RESET ROLE;
+UPDATE servers SET max_voice_participants = 0, max_share_mbps = 0
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+-- ============================================================
 -- 12. Roles and granular permissions (018)
 -- ============================================================
 -- The three booleans are now a cache of three bits. Every test here guards a

@@ -17,6 +17,12 @@ const DBSchema = {
     // two above, 0 opts DMs out of a server-wide sweep.
     dmRetentionDays: "dm_retention_days",
     dmHistoryCap: "dm_history_cap",
+    // What a call may cost the operator (migration 028). Both 0 = off. The
+    // participant cap is enforced here, by get_channel_token; the share cap
+    // is a number the client keeps, because a LiveKit token cannot carry a
+    // bitrate.
+    maxVoiceParticipants: "max_voice_participants",
+    maxShareMbps: "max_share_mbps",
   },
   // Split out of `servers` so the rest of that row can be read directly by
   // members under RLS. This table has no grant and no policy: the service role

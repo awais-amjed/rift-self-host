@@ -54,6 +54,7 @@ export const PERMISSION_DENIED = "permission_denied";
 
 // ── Operator limits ───────────────────────────────────────────────────────────
 export const LIMIT_INVALID = "limit_invalid"; // a limit is negative, or the size cap is out of range
+export const VOICE_CHANNEL_FULL = "voice_channel_full"; // max_voice_participants reached
 
 // ── Generic ───────────────────────────────────────────────────────────────────
 export const MISSING_FIELDS    = "missing_fields";
