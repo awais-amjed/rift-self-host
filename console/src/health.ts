@@ -91,8 +91,22 @@ async function realtimeLimitsCheck(target: PostgresTarget): Promise<Check> {
         name,
         level: "fail",
         detail: `Back to ${limits.maxEventsPerSecond} events/second. That counts ` +
-          "deliveries, not sends, so roughly 25 chatty members will start losing " +
-          "channels. Check SEED_SELF_HOST is false and re-run setup's realtime step.",
+          "deliveries, not sends — one message to everybody online is one event " +
+          "each — and over the limit they are dropped without a word in any log. " +
+          "Check SEED_SELF_HOST is false and re-run setup's realtime step.",
+      };
+    }
+    // Checked too, because the two are set together and raising one alone
+    // achieves nothing: events are spent per person online, so the ceiling
+    // on people is half of what the ceiling on events means.
+    if (limits.maxConcurrentUsers < DEFAULT_LIMITS.maxConcurrentUsers) {
+      return {
+        name,
+        level: "fail",
+        detail: `Back to ${limits.maxConcurrentUsers} concurrent users. Past that, ` +
+          "a client's WebSocket is refused with no reason given, which looks " +
+          "like a network fault. Check SEED_SELF_HOST is false and re-run " +
+          "setup's realtime step.",
       };
     }
     return {

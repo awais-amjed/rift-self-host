@@ -34,19 +34,52 @@ export interface RealtimeLimits {
 }
 
 /**
- * Room for a busy community server, not a guess at a hard ceiling.
+ * Sized from measurement, not from the shape of the free tier.
  *
- * These are far above anything a single-server deployment reaches; the cost of
- * being generous is bounded by the machine, whereas the cost of being tight is
- * channels that die under load with a message about rate limits nobody
- * connects to a chat that has stopped updating.
+ * The previous values were "far above anything a single-server deployment
+ * reaches". They were not. Load-tested against a real stack with real
+ * clients — a 20,000-member server, sockets held open and messages written
+ * to the database — the old numbers were reached by an ordinary busy
+ * evening, and the way they fail is the worst possible one.
+ *
+ * **Events are deliveries.** A message in an open channel goes to the
+ * server's topic (migration 017), so one send to 1,000 people online is
+ * 1,000 events. At the old 5,000 that is **five messages a second, for the
+ * whole server**, and the limit is a sixty-second rolling average, so a
+ * burst sails through and only sustained traffic trips it.
+ *
+ * **And it drops them in silence.** The same test, 1,000 listeners and ten
+ * messages a second for ninety seconds, twice, changing nothing but this
+ * number:
+ *
+ *   max_events_per_second =   5,000 ..... 340,000 of 900,000 delivered
+ *   max_events_per_second = 500,000 ..... 900,000 of 900,000 delivered
+ *
+ * Nothing was logged either time. No error reached a client, no warning
+ * reached the server's log: 62% of messages simply never arrived, and every
+ * client looked like it was working.
+ *
+ * What the numbers below are anchored to:
+ *
+ * - **Events.** The test machine (20 cores) sustained ~97,000 deliveries a
+ *   second with nothing dropped. 200,000 is set above what the hardware can
+ *   do on purpose, so the machine is the limit and this is a backstop rather
+ *   than a silent ceiling. A server that genuinely cannot keep up will fall
+ *   behind visibly instead of discarding messages quietly.
+ * - **Users.** ~85–230 KB of Realtime memory per connection, so 10,000
+ *   connections is about 1.6 GB — which is also where `RLIMIT_NOFILE` in
+ *   docker-compose.yml is set, and raising either alone achieves nothing.
+ *   A host with less memory should lower both together.
+ * - **Joins.** A restart reconnects everybody at once, so this wants to be
+ *   a good fraction of the connection count or coming back up is a thundering
+ *   herd against its own rate limit.
  */
 export const DEFAULT_LIMITS: RealtimeLimits = {
-  maxEventsPerSecond: 5000,
-  maxBytesPerSecond: 10_000_000,
-  maxPresenceEventsPerSecond: 5000,
-  maxConcurrentUsers: 1000,
-  maxJoinsPerSecond: 500,
+  maxEventsPerSecond: 200_000,
+  maxBytesPerSecond: 100_000_000,
+  maxPresenceEventsPerSecond: 50_000,
+  maxConcurrentUsers: 10_000,
+  maxJoinsPerSecond: 5_000,
 };
 
 /** The tenant Realtime creates for itself, named after its container. */
