@@ -147,7 +147,7 @@ services:
 
   auth:
     container_name: rift-auth
-    image: supabase/gotrue:v2.189.0
+    image: supabase/gotrue:v2.197.0
     profiles: [full]
     restart: unless-stopped
     healthcheck:
@@ -266,7 +266,7 @@ services:
   realtime:
     # The name is parsed for the tenant id, so the subdomain part matters.
     container_name: realtime-dev.rift-realtime
-    image: supabase/realtime:v2.102.3
+    image: supabase/realtime:v2.137.3
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -331,7 +331,7 @@ services:
 
   storage:
     container_name: rift-storage
-    image: supabase/storage-api:v1.60.4
+    image: supabase/storage-api:v1.79.4
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -514,7 +514,7 @@ services:
 
   meta:
     container_name: rift-meta
-    image: supabase/postgres-meta:v0.96.6
+    image: supabase/postgres-meta:v0.99.0
     profiles: [studio]
     restart: unless-stopped
     depends_on:
