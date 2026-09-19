@@ -468,7 +468,7 @@ services:
   # from the internet and cannot be proxied.
   livekit:
     container_name: rift-livekit
-    image: livekit/livekit-server:v1.8
+    image: livekit/livekit-server:v1.13
     profiles: [full]
     restart: unless-stopped
     command: ["--config", "/etc/livekit.yaml"]
@@ -489,7 +489,7 @@ services:
   # loopback-bound like the console.
   studio:
     container_name: rift-studio
-    image: supabase/studio:2026.07.07-sha-a6a04f2
+    image: supabase/studio:2026.09.14-sha-4dd8a95
     profiles: [studio]
     restart: unless-stopped
     ports:
