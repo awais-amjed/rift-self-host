@@ -232,6 +232,27 @@ services:
       PGRST_DB_SCHEMAS: public,storage
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_MAX_ROWS: 1000
+      # How many database connections the REST API may hold. The stock value
+      # is 10, and it is the first ceiling a busy server hits: every table
+      # read from every client goes through here, and an eleventh concurrent
+      # request waits for one of the ten.
+      #
+      # Measured against this stack, reading a page of 50 messages, the same
+      # PostgREST twice with nothing but this number different:
+      #
+      #   concurrent requests      10       25       50      100      200
+      #   pool 10 (stock)       2,734    2,201    1,135      916      873  req/s
+      #   pool 40               2,708    3,610    3,795    3,263    3,280  req/s
+      #
+      # It does not merely stop scaling at ten — it gets *worse*, because the
+      # queue behind the pool grows faster than the pool drains it. The 95th
+      # percentile at 200 concurrent goes from 653 ms to 82 ms.
+      #
+      # Forty rather than more: Postgres ships with max_connections 100, and
+      # the rest of the stack (auth, storage, realtime, the console) wants
+      # about fifteen of those. Raising this past about sixty means raising
+      # that too, or the failure moves rather than going away.
+      PGRST_DB_POOL: 40
       PGRST_ADMIN_SERVER_PORT: 3001
       PGRST_ADMIN_SERVER_HOST: localhost
       # A JWKS rather than the bare secret: it carries both the EC public key

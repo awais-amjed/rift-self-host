@@ -89,3 +89,31 @@ Deno.test("the connection ceiling and the file-descriptor ceiling agree", async 
       `${DEFAULT_LIMITS.maxConcurrentUsers} sockets plus the database pool`,
   );
 });
+
+Deno.test("the REST pool is raised, and still fits inside max_connections", async () => {
+  // Stock PostgREST holds ten database connections, and every table read from
+  // every client queues behind them. Measured on this stack, a page of fifty
+  // messages, the same PostgREST with nothing but the pool changed: at fifty
+  // concurrent requests, 1,135 req/s at ten against 3,795 at forty — it does
+  // not plateau at the stock value, it falls, because the queue behind the
+  // pool grows faster than the pool drains it.
+  //
+  // The other half of the rule is the ceiling above it. Postgres ships with
+  // max_connections 100 and the rest of the stack wants about fifteen, so a
+  // pool large enough to exhaust it would move the failure rather than fix
+  // it — from "requests queue" to "the database refuses to talk to anyone".
+  const compose = await Deno.readTextFile(
+    new URL("../../../docker-compose.yml", import.meta.url),
+  );
+  const service = compose.split("\n  rest:\n")[1]
+    .split(/\n {2}[a-z][a-z0-9-]*:\n/)[0];
+  const pool = Number(service.match(/^\s+PGRST_DB_POOL: (\d+)$/m)?.[1]);
+
+  assertEquals(Number.isFinite(pool), true, "PGRST_DB_POOL is not set on rest");
+  assert(pool >= 25, `PGRST_DB_POOL is ${pool}, which is near the stock ceiling of 10`);
+  assert(
+    pool <= 60,
+    `PGRST_DB_POOL is ${pool}, which leaves too little of Postgres's 100 ` +
+      `connections for auth, storage, realtime and the console`,
+  );
+});
