@@ -42,11 +42,19 @@
 -- `max_share_mbps` is **a budget the client keeps**, not a wall. LiveKit's
 -- join token has no bitrate field — `VideoGrant` carries what you may
 -- publish, never how much of it — so there is nothing to clamp at the point
--- the token is minted. The server states the number, the client publishes
--- within it, and an operator who needs a wall against a modified client
--- sets `limit.bytes_per_sec` in `livekit.yaml`, which is node-wide and
--- protects the uplink from anything at all. That is written down in
--- docs.joinrift.app/reference/#media rather than left to be discovered.
+-- the token is minted. The server states the number and the client publishes
+-- within it.
+--
+-- There is no server-side wall for this, and it is worth being plain about
+-- that rather than pointing at something that looks like one.
+-- `limit.bytes_per_sec` in `livekit.yaml` is not it: it is read in exactly
+-- one place, the node selector, where it stops the node accepting *new*
+-- rooms and joins once its total throughput is saturated. It never throttles
+-- somebody already publishing. A real wall would have to be enforcement
+-- after the fact — a webhook on `track_published` muting a track that
+-- declares too much — and that catches an honest client that was left on the
+-- wrong setting, which is what the clamp already catches. So: client-side,
+-- deliberately, for a limit about cost rather than about trust.
 --
 -- Counting people rather than connections, on purpose: a screen share is a
 -- second connection held by the same person, and an operator who types 50
@@ -81,4 +89,5 @@ COMMENT ON COLUMN servers.max_voice_participants IS
 COMMENT ON COLUMN servers.max_share_mbps IS
   'The most a screen share may publish, in Mbps; 0 is no limit. A budget '
   'the client keeps rather than a wall: a LiveKit join token has no bitrate '
-  'field. The wall is limit.bytes_per_sec in livekit.yaml.';
+  'field, and nothing server-side throttles a publisher. Deliberate — this '
+  'is a limit about cost, not about trust.';

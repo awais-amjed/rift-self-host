@@ -303,8 +303,10 @@ Deno.serve(async (req) => {
     // the server row, so the client has it at the moment it needs it and a
     // change takes effect on the next join rather than the next sync. It is a
     // number the client keeps: a LiveKit token has nowhere to put a bitrate,
-    // so there is nothing here to clamp. `limit.bytes_per_sec` in
-    // livekit.yaml is the wall — see docs.joinrift.app/reference/#media.
+    // so there is nothing here to clamp, and nothing server-side throttles a
+    // publisher either. Deliberate — this is a limit about cost rather than
+    // about trust, and the case it exists for is somebody left on the 10 Mbps
+    // default who does not know it costs that per watcher.
     return CustomResponse.success({
       token: livekitToken,
       identity,
