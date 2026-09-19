@@ -83,13 +83,20 @@ have, so a table is created with its final columns rather than altered into
 them afterwards. There are no real deployments yet, so there is nothing to
 migrate *from*; when that changes, a change becomes 009 and the eight stay put.
 
-That also means the schema's tests are here. `./scripts/db_test.sh` runs the
-policy suite and the migration test. The second exists because a policy test
-only ever sees the finished shape: it cannot catch a file that does not apply,
-and it cannot catch something reachable that nobody granted — by the time it
-runs, whatever Supabase's defaults handed out looks exactly like something this
-schema meant. So the migration test builds a server from nothing and then asks
-what `anon` can reach.
+That also means the schema's tests are here. `./scripts/db_test.sh` builds a
+scratch database from these files, applies all eight, and runs both suites
+against it — so it tests the schema this repository ships rather than whatever
+is in a long-lived development database. (It used to run the policy suite
+against the dev stack's live database, which meant applying each new migration
+there by hand before its own tests would pass.)
+
+There are two suites because a policy test only ever sees the finished shape:
+it cannot catch a file that does not apply, and it cannot catch something
+reachable that nobody granted — by the time it runs, whatever Supabase's
+defaults handed out looks exactly like something this schema meant. So
+`migration_test.sh` builds a server from nothing and then asks what `anon` can
+reach. The stand-in it builds on installs Supabase's real default privileges
+for that reason; without them the question answers itself.
 
 ## API keys
 
