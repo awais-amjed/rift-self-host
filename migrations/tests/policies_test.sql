@@ -7,7 +7,7 @@
 -- silently — most of all the ones that assert a *denial*, because a policy that
 -- accidentally permits looks exactly like a working app.
 --
--- Run against a database with 001–009 applied:
+-- Run against a database with 001–008 applied:
 --
 --   docker exec -i supabase-db psql -U postgres -v ON_ERROR_STOP=1 \
 --     -f - < self_hosted_server_migrations/tests/policies_test.sql
@@ -22,6 +22,15 @@
 
 \set ON_ERROR_STOP on
 BEGIN;
+
+-- `channel_joinable_by` and `channel_visible_to` are the voice token gate, and
+-- in production only an edge function on the service role ever asks them —
+-- 008 grants them to nobody else. They take the user to ask about as an
+-- argument and are SECURITY DEFINER, so the answer does not depend on who is
+-- calling; the blocks below check them in the middle of a member's actions,
+-- which needs the privilege and nothing more. Rolled back with everything else.
+GRANT EXECUTE ON FUNCTION channel_joinable_by(UUID, UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION channel_visible_to(UUID, UUID)  TO authenticated;
 
 -- ── Fixtures ────────────────────────────────────────────────
 -- Two servers, so "scoped to my server" is testable rather than assumed.
