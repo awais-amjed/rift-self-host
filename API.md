@@ -177,7 +177,7 @@ itself.
 **Two callers, two credentials.** Central's own `dm_messages` trigger presents the
 deployment secret in `x-push-secret` and names a `{recipient}`, whose devices are
 looked up here. A self-hosted server presents a **relay credential** its admin
-enrolled (central migration 010) and supplies `{relay_id, tokens: [...]}` — the
+enrolled (central's `push_relays`) and supplies `{relay_id, tokens: [...]}` — the
 tokens it already holds for its own member, so central never learns who that is.
 Both secrets live in tables with RLS and no policy at all, read only by the
 SECURITY DEFINER trigger that sends.
