@@ -74,14 +74,22 @@ scripts/db_test.sh     runs both suites against a Postgres container
 
 `migrations/` and `supabase/functions/` **are the originals**. They used to be copies of
 directories in the app repo, refreshed by a sync script; they now live here,
-where the thing that ships them lives, and the app repo has none. Their history
-came with them, so `git log migrations/001_core.sql` still answers why.
+where the thing that ships them lives, and the app repo has none.
+
+There are eight files and they are split by *kind* — tables, helpers, RPCs,
+triggers, realtime, storage, jobs, security — not by feature. Nothing in them
+describes how the schema got here: each one states the shape it is meant to
+have, so a table is created with its final columns rather than altered into
+them afterwards. There are no real deployments yet, so there is nothing to
+migrate *from*; when that changes, a change becomes 009 and the eight stay put.
 
 That also means the schema's tests are here. `./scripts/db_test.sh` runs the
-policy suite and the migration-path test — the second one exists because a
-policy test only ever sees the finished shape, and cannot catch a migration
-that reads a column it has already overwritten. One did, and every server came
-out with no administrator.
+policy suite and the migration test. The second exists because a policy test
+only ever sees the finished shape: it cannot catch a file that does not apply,
+and it cannot catch something reachable that nobody granted — by the time it
+runs, whatever Supabase's defaults handed out looks exactly like something this
+schema meant. So the migration test builds a server from nothing and then asks
+what `anon` can reach.
 
 ## API keys
 
@@ -226,7 +234,7 @@ LiveKit an API key named after the placeholder.
 ## What works, and what has not been proved
 
 Verified by running the whole thing end to end against a real Docker daemon:
-ten containers healthy, all 16 migrations applied and recorded, Realtime's
+ten containers healthy, all eight migrations applied and recorded, Realtime's
 limits surviving a container recreate, `messages` refusing the anon key, and the
 invite the console minted resolving back through `resolve_invite` to the server
 it names.

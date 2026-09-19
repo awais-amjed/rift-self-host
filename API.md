@@ -3,7 +3,7 @@
 How a client talks to a self-hosted Rift server. There are two transports, and which one a call
 uses is a deliberate line rather than an accident of history:
 
-- **Direct PostgREST**, under the policies in `migrations/002_security.sql`.
+- **Direct PostgREST**, under the policies in `migrations/008_security.sql`.
   This is almost everything: reading and sending messages, editing your own, member lists,
   channels, invites, reactions, read cursors.
 - **Edge functions**, in [`edge_functions/supabase/functions/`](edge_functions/supabase/functions/),
@@ -26,21 +26,21 @@ An endpoint earns its place only if it holds a secret, or runs before the caller
 | Function | Auth | Why it can't be a table call |
 |---|---|---|
 | `login` | none (self-authenticating via the signature) | Proxies GoTrue's `grant_type=web3` with the service key, so the client needs no anon key. Returns the session (`access_token`, `refresh_token`, …). `Chain ID: solana:mainnet` |
-| `register` | Bearer (SIWS JWT) | Claims an invite and creates the profile row **before** the caller is a member of anything. One atomic `register_user` RPC, so a failed register never burns an invite use. **`max_members` is enforced here** (029), last of the refusals and with the server row locked, so two invites racing cannot both be the last one through. Bots hold a seat; banned members do not |
+| `register` | Bearer (SIWS JWT) | Claims an invite and creates the profile row **before** the caller is a member of anything. One atomic `register_user` RPC, so a failed register never burns an invite use. **`max_members` is enforced here**, last of the refusals and with the server row locked, so two invites racing cannot both be the last one through. Bots hold a seat; banned members do not |
 | `resolve_invite` | none | Runs before the client has the server's anon key — it is what hands the key out. Maps an invite to `server_id` + `server_name` **without consuming it**, so the per-`(host, server_id)` SIWS identity can be derived before login |
 | `create_server` | `service_key` in body | Writes the LiveKit API secret. Also seeds a `general` text channel and a `voice` voice channel — they differ in name because `(server_id, name)` is unique. Returns `server_id`, `name`, `supabase_url`, `supabase_key`, `invite_code` (single-use admin invite) |
-| `update_server` | Bearer + `is_server_admin` | Writes the LiveKit API key/secret into `server_secrets`, which has no grant and no policy. Name, icon and the operator limits — including the DM overrides `dm_retention_days` / `dm_history_cap`, where **null is a value** meaning "inherit the server-wide number" and an omitted key means "leave it alone" — ride along rather than splitting one dialog across two transports. It does **not** touch storage: each server owns a `chat-<serverId>` bucket and a trigger moves that bucket's `file_size_limit` when the column changes (migration 008), in the same statement. `max_voice_participants` and `max_share_mbps` (migration 028) and `max_members` / `max_storage_bytes` (029) ride along the same way; all are 0 = off |
+| `update_server` | Bearer + `is_server_admin` | Writes the LiveKit API key/secret into `server_secrets`, which has no grant and no policy. Name, icon and the operator limits — including the DM overrides `dm_retention_days` / `dm_history_cap`, where **null is a value** meaning "inherit the server-wide number" and an omitted key means "leave it alone" — ride along rather than splitting one dialog across two transports. It does **not** touch storage: each server owns a `chat-<serverId>` bucket and a trigger moves that bucket's `file_size_limit` when the column changes, in the same statement. `max_voice_participants`, `max_share_mbps`, `max_members` and `max_storage_bytes` ride along the same way; all are 0 = off |
 | `sweep_attachments` | Bearer (any member) | Needs the **Storage API**, not a secret: `storage.protect_delete()` refuses a direct DELETE on `storage.objects`, so no database role can free an attachment blob. Applies the server's retention settings via the `sweep_attachments` RPC (service-role only) and removes the blobs whose messages are gone. Safe for any member — it removes only unreferenced objects |
-| `get_channel_token` | Bearer | Mints a LiveKit JWT with the API secret. Identity is `<userId>~<deviceId>`; `roomAdmin` for channel managers, 1 h TTL. **Moderation is enforced here at join time** — muted users get no `microphone` in `canPublishSources`, deafened users get `canSubscribe: false`. **A bot** gets `canSubscribe` only with a `bot_voice_grants` row, never `roomAdmin`, and is refused outright until a member has sealed it a media key (calls are E2E encrypted — BOTS.md §6b). **`max_voice_participants` is enforced here** (migration 028): a new arrival past it is refused `voice_channel_full`, counted as *people* so a member's screen share does not use a place, and bots are exempt because a summoned bot is not what fills a call. The reply also carries `max_share_mbps`, which the client keeps — a LiveKit token has no bitrate field, so there is nothing here to clamp |
+| `get_channel_token` | Bearer | Mints a LiveKit JWT with the API secret. Identity is `<userId>~<deviceId>`; `roomAdmin` for channel managers, 1 h TTL. **Moderation is enforced here at join time** — muted users get no `microphone` in `canPublishSources`, deafened users get `canSubscribe: false`. **A bot** gets `canSubscribe` only with a `bot_voice_grants` row, never `roomAdmin`, and is refused outright until a member has sealed it a media key (calls are E2E encrypted — BOTS.md §6b). **`max_voice_participants` is enforced here**: a new arrival past it is refused `voice_channel_full`, counted as *people* so a member's screen share does not use a place, and bots are exempt because a summoned bot is not what fills a call. The reply also carries `max_share_mbps`, which the client keeps — a LiveKit token has no bitrate field, so there is nothing here to clamp |
 | `set_bot_voice_listen` | Bearer + `MANAGE_BOTS` (checked by the RPC) | Lets a bot hear a voice channel, or stops it. Calls `grant_bot_voice_listen` / `revoke_bot_voice_listen` with the caller's JWT, then pushes the new permission onto the bot's live connection with the API secret — the row alone is half the job, exactly as with `moderate_user`, because a token is good for its hour whatever the table says |
 | `moderate_user` | Bearer + `is_admin` (checked by the RPC) | Mute/deafen/ban. Calls the `moderate_user` RPC with the caller's JWT — the rules stay in the database — then uses the LiveKit API secret to push the new permissions and metadata onto every live connection the target holds. See below |
 | `delete_channel` | Bearer + `channels_delete_managers` (checked by the policy) | Deletes the row with the caller's JWT, and the LiveKit room with the API secret. Rooms are named by channel id, so without the second half everyone carries on talking in a room whose channel is gone. Deleting a room disconnects its participants — that **is** the kick |
-| `delete_server` | Bearer + owner (checked by the `delete_server` RPC, migration 013) | Runs the RPC with the caller's JWT — the row delete cascades to everything the server holds — then, with the service role, drops every voice channel's LiveKit room, the `chat-<serverId>` bucket and the members' avatars, none of which a database role can reach. Each of those is best-effort and reported back in `errors` rather than allowed to keep a server alive |
+| `delete_server` | Bearer + owner (checked by the `delete_server` RPC) | Runs the RPC with the caller's JWT — the row delete cascades to everything the server holds — then, with the service role, drops every voice channel's LiveKit room, the `chat-<serverId>` bucket and the members' avatars, none of which a database role can reach. Each of those is best-effort and reported back in `errors` rather than allowed to keep a server alive |
 | `move_user` | Bearer + `is_server_admin` / `is_channel_manager` (checked here — nothing is written down, so there is no RPC to defer to) | Pulls a member from the call they're in into another voice channel, by sending their connections a "join this channel" packet with the API secret. See below |
 | `voice_roster` | Bearer | Who is in which voice channel right now, `{userId: channelId}`, read off LiveKit. The snapshot a client starts from before the `voice:<serverId>` broadcasts can tell it anything — see ARCHITECTURE.md §5 |
 | `configure_push` | Bearer + `is_server_admin` | Writes `push_config`, a table with no grant and no policy — the secret in it is what proves a forward request came from this server, and nothing a client can read back may hold it. `{status:true}` answers whether push is on and with which relay id (never the secret); `{endpoint, relay_id, secret}` turns it on; `{disable:true}` turns it off and hands the relay id back so the admin's client can revoke it on central |
 | `webhook` | **none** | The one endpoint anybody may call. Deploy with `--no-verify-jwt`: the whole point of a webhook is that the caller cannot log in. `POST /functions/v1/webhook/<secret>` with `{text}` — or `{content}`, the field Discord's webhooks use, so anything already pointed at one works by changing the URL. A raw non-JSON body is taken as the text. Deliberately thin: the lookup, the rate check and the insert are one `post_webhook_message` statement in the database, and all that is left here is being reachable without a JWT and ringing the `chat:<channelId>` doorbell afterwards. See BOTS.md §7 |
-| `listing_token` | Bearer + `is_server_admin` (checked here **and** by the RPC) | The proof central cannot produce for itself. The public directory lives on central, which has never heard of this database and shares no identity with it — a member signs in here with a key derived on their device and to central with a Rift account, and nothing links the two. So `publish_server` there could only check that its caller was signed in, and every *member* of a server holds the URL, id and invite code that was all it took to list somebody else's server permanently. This mints a 256-bit single-use token, five-minute life, digest-only at rest (migration 042) |
+| `listing_token` | Bearer + `is_server_admin` (checked here **and** by the RPC) | The proof central cannot produce for itself. The public directory lives on central, which has never heard of this database and shares no identity with it — a member signs in here with a key derived on their device and to central with a Rift account, and nothing links the two. So `publish_server` there could only check that its caller was signed in, and every *member* of a server holds the URL, id and invite code that was all it took to list somebody else's server permanently. This mints a 256-bit single-use token, five-minute life, digest-only at rest |
 | `verify_listing_token` | **none** | Central redeems a token here before writing a listing. Deploy with `--no-verify-jwt`: central holds no session on this server and never will. The token *is* the credential, and the reply is deliberately almost empty — a valid one returns the server id the caller already named, and every failure returns one flat refusal, so there is no oracle for whether a server exists or a token was ever real. Burned in the same statement that checks it, so a replay is refused |
 | `get_channel_key` | Bearer | Channel-key distribution (below). For a **voice** channel it also returns `bots_missing` — bots that may speak there and have no media key yet — and, for a bot caller, `my_voice_key`: the one key a bot is ever sealed |
 | `post_channel_keys` | Bearer | Channel-key distribution (below) |
@@ -193,7 +193,7 @@ Tokens FCM reports as `UNREGISTERED`/`INVALID_ARGUMENT` are deleted **from
 central's own registry only**. A relayed token lives in a database central holds
 no credentials for, and reporting the dead ones back would tell it which of a
 server's members had uninstalled the app — so that side sweeps on staleness
-instead (self-hosted migration 010).
+instead (see `push_config` in 001_schema.sql).
 
 **Ringing is gated on the unread transition**, on both tiers. A doorbell says
 *look again*; it says nothing new when the badge is already lit, and the phone
@@ -282,26 +282,38 @@ silent re-login still triggers.
 Defined by `migrations/`, run in order on a fresh instance. The central
 project has its own set, in the `rift-central` repository.
 
-1. **001_schema.sql** — types, tables, indexes, and the attestation triggers. Notable shapes:
+Eight files, split by *kind* rather than by feature, so an object is defined in
+exactly one place and the order is a dependency order.
+
+1. **001_schema.sql** — every type, table and index, in final shape. Notable shapes:
    `server_secrets` split out of `servers` so the rest of that row is safe to read directly;
    envelope length limits as CHECK constraints (they used to be TypeScript in
    `_shared/chat.ts`, which is no validation at all once clients write directly); `read_state`
    as one cursor per conversation.
-2. **002_security.sql** — `anon` revoked from everything, column-level grants for `authenticated`,
-   RLS on every table, and every policy. The `app.*` helpers are `SECURITY DEFINER` on purpose:
-   a policy that consults an RLS-locked table (say `messages` checking `channels`) evaluates
-   false for everyone and silently denies — including every Realtime change it should have
-   delivered.
-3. **003_api.sql** — the RPCs: `register_user`, `moderate_user`, `set_user_permissions`,
-   `unread_counts`, `mark_read`, `mark_all_read`, `dm_conversations`. Function EXECUTE is revoked
-   from `PUBLIC` and handed back per function, so `register_user` isn't callable by a member.
-4. **004_realtime.sql** — what may be subscribed to: `messages`, `dm_messages`, both reaction
-   tables, `users`, `channels`. Realtime re-checks policies per subscriber, which is what allows
-   badges without a fanout table.
-5. **005_storage.sql** — `chat-attachments` (25 MB, E2E ciphertext), `avatars` (2 MB, **not**
-   encrypted — same accepted trade-off as reactions), `servers` (public, fetched before login).
-6. **006_jobs.sql** — one cron job, expiring invites. The old notification-retention job went
-   with the table it existed to prune.
+2. **002_helpers.sql** — the permission bits, the `app.*` predicates every policy is written
+   in terms of, and the views a client reads a member through. They are `SECURITY DEFINER` on
+   purpose: a policy that consults an RLS-locked table (say `messages` checking `channels`)
+   evaluates false for everyone and silently denies — including every Realtime change it
+   should have delivered.
+3. **003_api.sql** — the RPCs: `register_user`, `moderate_user`, `create_channel`,
+   `get_server_details`, `unread_counts`, `mark_read`, `dm_conversations` and the rest.
+4. **004_triggers.sql** — attestation, the refusals that belong to a row rather than to a
+   code path, and the derived state (the permission cache on `users`, DM heads, the roles a
+   new server is born with).
+5. **005_realtime.sql** — what a client may subscribe to. Nothing is in the `supabase_realtime`
+   publication: each change is *broadcast* by a trigger onto a topic only the entitled may
+   join, so what is in the payload is a decision rather than a consequence.
+6. **006_storage.sql** — `chat-<serverId>` per server, `avatars` (2 MB, **not** encrypted —
+   same accepted trade-off as reactions), `servers` (public, fetched before login), plus the
+   running byte total and the trigger that refuses an upload over the cap.
+7. **007_jobs.sql** — the scheduled work: retention sweeps, expiring invites and summons,
+   and orphaned attachments.
+8. **008_security.sql** — `anon` revoked from everything, column-level grants for
+   `authenticated`, RLS on every table, and every policy. **It is last on purpose.** Supabase's
+   own default privileges grant EXECUTE on each new function in `public` to `anon` and
+   `authenticated`, and `ALTER DEFAULT PRIVILEGES ... REVOKE` does not undo them — so the
+   blanket `REVOKE ALL ON ALL FUNCTIONS` has to run once every function exists. Anything
+   granted here is granted by name; nothing is reachable by omission.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. Two of those exist
