@@ -146,6 +146,42 @@ REVOKE ALL ON notification_prefs FROM anon;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON notification_prefs TO authenticated;
 
+-- ---------- the soundboard ----------
+-- Read by everybody on the server, written by whoever holds the bit. There is
+-- no RPC and no edge function: an INSERT here carries no secret and grants
+-- nothing, so a policy says all of it.
+--
+-- `server_id` and `created_by` are not in the INSERT grant — they are stamped
+-- (004), because a member who could name either could hang a clip on another
+-- server or on somebody else.
+REVOKE ALL ON soundboard_sounds FROM anon, authenticated;
+
+GRANT SELECT ON soundboard_sounds TO authenticated;
+
+GRANT INSERT (name, emoji, object_path, duration_ms, bytes)
+  ON soundboard_sounds TO authenticated;
+
+-- Rename and re-label, but never repoint: `object_path` is not here, so the
+-- bytes under a clip cannot be swapped out from under the clients that have
+-- already cached them.
+GRANT UPDATE (name, emoji) ON soundboard_sounds TO authenticated;
+
+GRANT DELETE ON soundboard_sounds TO authenticated;
+
+CREATE POLICY soundboard_select ON soundboard_sounds FOR SELECT TO authenticated
+  USING (server_id = app.server_id());
+
+-- The stamp runs first — a BEFORE trigger fires before the check — so this
+-- reads the value the row will actually have, not the one the client sent.
+CREATE POLICY soundboard_insert ON soundboard_sounds FOR INSERT TO authenticated
+  WITH CHECK (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
+
+CREATE POLICY soundboard_update ON soundboard_sounds FOR UPDATE TO authenticated
+  USING (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
+
+CREATE POLICY soundboard_delete ON soundboard_sounds FOR DELETE TO authenticated
+  USING (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
+
 -- New tables arrive writable by `authenticated` and new functions executable by
 -- PUBLIC. Neither default is wanted here.
 REVOKE ALL ON webhooks FROM anon, authenticated;
@@ -866,3 +902,5 @@ ALTER TABLE bot_voice_summons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE listing_tokens ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE dm_conversation_heads ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE soundboard_sounds ENABLE ROW LEVEL SECURITY;

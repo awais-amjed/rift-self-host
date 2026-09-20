@@ -276,6 +276,7 @@ silent re-login still triggers.
 | `moderate_user`, `set_user_permissions` | RPCs — RLS is row-level, so a policy allowing an admin to write another member's flags would also let them rewrite that member's identity. `moderate_user` kept the RPC but regained an edge function in front of it, which is the only thing that can reach LiveKit (above) |
 | `list_dm_conversations` | `dm_conversations(p_limit, p_before)` — `DISTINCT ON` instead of a thousand rows grouped in TypeScript, and since 041 a page of them rather than every peer you have ever messaged |
 | the `notifications` table | `unread_counts()` + `mark_read()` over `read_state` |
+| *(new)* the soundboard | `select`/`insert`/`update`/`delete` on `soundboard_sounds`, gated on `MANAGE_SOUNDBOARD`; `server_id` and `created_by` have no column grant and are stamped. **Playing one is not here at all** — a press is a packet on the call's LiveKit data channel and every listener plays the clip locally, so the server neither carries the audio nor learns that it happened |
 
 ## Database schema
 
@@ -304,7 +305,8 @@ exactly one place and the order is a dependency order.
    publication: each change is *broadcast* by a trigger onto a topic only the entitled may
    join, so what is in the payload is a decision rather than a consequence.
 6. **006_storage.sql** — `chat-<serverId>` per server, `avatars` (2 MB, **not** encrypted —
-   same accepted trade-off as reactions), `servers` (public, fetched before login), plus the
+   same accepted trade-off as reactions), `soundboard` (512 KB a clip, unencrypted for the same
+   reason, one folder per server), `servers` (public, fetched before login), plus the
    running byte total and the trigger that refuses an upload over the cap.
 7. **007_jobs.sql** — the scheduled work: retention sweeps, expiring invites and summons,
    and orphaned attachments.

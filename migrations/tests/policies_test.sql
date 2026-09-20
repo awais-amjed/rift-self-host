@@ -4776,6 +4776,206 @@ END $$;
 RESET ROLE;
 
 -- ============================================================
+-- 28. The soundboard (library, bits, and the blob behind it)
+-- ============================================================
+-- A play never touches this database — it is a packet on the call's data
+-- channel — so everything there is to protect here is the *library*: who may
+-- add to it, who may read it, and whether a deleted clip leaves its bytes
+-- lying in a bucket.
+
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+DO $$
+BEGIN
+  IF app.perm('MANAGE_SOUNDBOARD') = 0 OR app.perm('USE_SOUNDBOARD') = 0 THEN
+    RAISE EXCEPTION 'FAIL: the soundboard bits are not in perm_bit';
+  END IF;
+  -- A bit outside `perm_all` is one the role editor masks off, so no role can
+  -- ever be given it — a permission that exists and cannot be granted.
+  IF (app.perm_all() & app.perm('MANAGE_SOUNDBOARD')) = 0
+     OR (app.perm_all() & app.perm('USE_SOUNDBOARD')) = 0 THEN
+    RAISE EXCEPTION 'FAIL: a soundboard bit is outside perm_all';
+  END IF;
+  RAISE NOTICE 'ok  both soundboard bits exist and are grantable';
+END $$;
+
+-- Playing is ordinary; adding is not. Beta is the untouched server, so its
+-- roles are exactly what `seed_default_roles` made them.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM roles
+              WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001'
+                AND is_everyone
+                AND (permissions & app.perm('USE_SOUNDBOARD')) = 0) THEN
+    RAISE EXCEPTION 'FAIL: the baseline cannot use the soundboard';
+  END IF;
+  IF EXISTS (SELECT 1 FROM roles
+              WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001'
+                AND is_everyone
+                AND (permissions & app.perm('MANAGE_SOUNDBOARD')) <> 0) THEN
+    RAISE EXCEPTION 'FAIL: everybody can fill the soundboard';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM roles
+                  WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001'
+                    AND name = 'Moderator'
+                    AND (permissions & app.perm('MANAGE_SOUNDBOARD')) <> 0) THEN
+    RAISE EXCEPTION 'FAIL: moderators cannot manage the soundboard';
+  END IF;
+  RAISE NOTICE 'ok  everybody may press one, a moderator decides what is there';
+END $$;
+
+-- ---------- adding one ----------
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+-- Alice is an administrator. She cannot so much as *name* the two stamped
+-- columns — there is no grant on them — and what she leaves out is filled in
+-- for her, which is the half a widened grant would have to fall back on.
+DO $$
+DECLARE v_row soundboard_sounds%ROWTYPE;
+BEGIN
+  BEGIN
+    INSERT INTO soundboard_sounds
+           (server_id, created_by, name, object_path, duration_ms, bytes)
+    VALUES ('bbbb0000-0000-4000-8000-000000000001',
+            '11111111-aaaa-4aaa-8aaa-000000000002',
+            'not-mine',
+            'bbbb0000-0000-4000-8000-000000000001/x.audio', 100, 100);
+    RAISE EXCEPTION 'FAIL: a client named the columns the server stamps';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  INSERT INTO soundboard_sounds (name, emoji, object_path, duration_ms, bytes)
+  VALUES ('airhorn', '📯',
+          'aaaa0000-0000-4000-8000-000000000001/horn.audio', 1200, 9000);
+
+  SELECT * INTO v_row FROM soundboard_sounds WHERE name = 'airhorn';
+  IF v_row.server_id <> 'aaaa0000-0000-4000-8000-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: a clip was not hung on its author''s server';
+  END IF;
+  IF v_row.created_by <> '11111111-aaaa-4aaa-8aaa-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: a clip was not signed with its author''s name';
+  END IF;
+  RAISE NOTICE 'ok  an admin adds a clip, and the server and author are stamped';
+END $$;
+
+-- Bob holds no role at all, so he is the baseline and nothing more.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO soundboard_sounds (name, object_path, duration_ms, bytes)
+    VALUES ('bob-was-here',
+            'aaaa0000-0000-4000-8000-000000000001/bob.audio', 500, 400);
+    RAISE EXCEPTION 'FAIL: a plain member filled the soundboard';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    DELETE FROM soundboard_sounds WHERE name = 'airhorn';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  IF NOT EXISTS (SELECT 1 FROM soundboard_sounds WHERE name = 'airhorn') THEN
+    RAISE EXCEPTION 'FAIL: a plain member deleted a clip';
+  END IF;
+
+  -- ...but he can see it, which is the point of a soundboard.
+  IF NOT EXISTS (SELECT 1 FROM soundboard_sounds WHERE name = 'airhorn') THEN
+    RAISE EXCEPTION 'FAIL: a member cannot read the soundboard';
+  END IF;
+  RAISE NOTICE 'ok  a member reads the library and cannot write to it';
+END $$;
+
+-- The bytes cannot be swapped out from under a cached clip: `object_path` has
+-- no UPDATE grant, so this is refused by the grant rather than by a policy.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    UPDATE soundboard_sounds
+       SET object_path = 'aaaa0000-0000-4000-8000-000000000001/swapped.audio'
+     WHERE name = 'airhorn';
+    RAISE EXCEPTION 'FAIL: a clip was repointed at other bytes';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- Renaming is fine, and is the reason there is an UPDATE grant at all.
+  UPDATE soundboard_sounds SET name = 'air horn' WHERE name = 'airhorn';
+  RAISE NOTICE 'ok  a clip can be renamed and cannot be repointed';
+END $$;
+
+-- ---------- another server's library ----------
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM soundboard_sounds
+              WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a member of Beta read Alpha''s soundboard';
+  END IF;
+  RAISE NOTICE 'ok  a soundboard stops at its own server';
+END $$;
+
+-- ---------- the ceiling ----------
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+DO $$
+DECLARE i INTEGER;
+BEGIN
+  FOR i IN 1..(app.soundboard_max() - 1) LOOP
+    INSERT INTO soundboard_sounds
+           (server_id, name, object_path, duration_ms, bytes)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'filler-' || i,
+            'aaaa0000-0000-4000-8000-000000000001/f' || i || '.audio', 100, 100);
+  END LOOP;
+
+  BEGIN
+    INSERT INTO soundboard_sounds
+           (server_id, name, object_path, duration_ms, bytes)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'one-too-many',
+            'aaaa0000-0000-4000-8000-000000000001/over.audio', 100, 100);
+    RAISE EXCEPTION 'FAIL: the soundboard went past its ceiling';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%soundboard_full%' THEN RAISE; END IF;
+  END;
+
+  -- A full board on one server is not a full board on the next.
+  INSERT INTO soundboard_sounds
+         (server_id, name, object_path, duration_ms, bytes)
+  VALUES ('bbbb0000-0000-4000-8000-000000000001', 'beta-clip',
+          'bbbb0000-0000-4000-8000-000000000001/b.audio', 100, 100);
+  RAISE NOTICE 'ok  a server holds app.soundboard_max() clips and no more';
+END $$;
+
+-- ---------- and the bytes go with the row ----------
+DO $$
+BEGIN
+  INSERT INTO storage.objects (bucket_id, name, metadata)
+  VALUES ('soundboard',
+          'aaaa0000-0000-4000-8000-000000000001/horn.audio',
+          '{"size": 9000}'::jsonb);
+
+  DELETE FROM soundboard_sounds WHERE name = 'air horn';
+
+  IF EXISTS (SELECT 1 FROM storage.objects
+              WHERE bucket_id = 'soundboard'
+                AND name = 'aaaa0000-0000-4000-8000-000000000001/horn.audio') THEN
+    RAISE EXCEPTION 'FAIL: deleting a clip left its bytes in the bucket';
+  END IF;
+  RAISE NOTICE 'ok  deleting a clip deletes the file behind it';
+END $$;
+
+-- Cleared, so the sections after this one start from the library they expect.
+DELETE FROM soundboard_sounds;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

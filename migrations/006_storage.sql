@@ -34,6 +34,19 @@ INSERT INTO storage.buckets (id, name, public, file_size_limit)
 VALUES ('avatars', 'avatars', false, 2097152)
 ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 2097152;
 
+-- Soundboard clips. Unencrypted for the same reason avatars are — a clip every
+-- member plays gains nothing from per-member wrapping — and private for the
+-- same reason too. 512 KB each, which is the only ceiling on a clip that a
+-- modified client cannot talk its way past.
+--
+-- Not `sound-<server uuid>`, unlike attachments: the two reasons a bucket per
+-- server exists there are a per-server *size* cap and a read policy that can
+-- name one server, and here the size cap is the same number for everybody
+-- while the read policy has a folder to name instead.
+INSERT INTO storage.buckets (id, name, public, file_size_limit)
+VALUES ('soundboard', 'soundboard', false, 524288)
+ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 524288;
+
 -- The server icon bucket predates the app's own uploads and stays public: it
 -- is fetched before anyone has a session, on the join screen.
 INSERT INTO storage.buckets (id, name, public, file_size_limit)
@@ -194,6 +207,34 @@ CREATE POLICY avatars_delete ON storage.objects FOR DELETE TO authenticated
   USING (
     bucket_id = 'avatars'
     AND (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- A clip lives under its server's id, which is the whole read rule: a member
+-- of one server cannot fetch another's, even on a project hosting several.
+-- Writing needs the bit, and the folder has to be the caller's own server —
+-- without the second half, MANAGE_SOUNDBOARD on any server on the project
+-- would be MANAGE_SOUNDBOARD on all of them.
+CREATE POLICY soundboard_select ON storage.objects FOR SELECT TO authenticated
+  USING (
+    bucket_id = 'soundboard'
+    AND (storage.foldername(name))[1] = app.server_id()::text
+  );
+
+CREATE POLICY soundboard_insert ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'soundboard'
+    AND (storage.foldername(name))[1] = app.server_id()::text
+    AND app.has_perm('MANAGE_SOUNDBOARD')
+  );
+
+-- No update policy at all. A path is minted once and never written twice —
+-- replacing a clip's bytes under a name every client has cached is how you
+-- get a picker where the labels and the sounds disagree.
+CREATE POLICY soundboard_delete ON storage.objects FOR DELETE TO authenticated
+  USING (
+    bucket_id = 'soundboard'
+    AND (storage.foldername(name))[1] = app.server_id()::text
+    AND app.has_perm('MANAGE_SOUNDBOARD')
   );
 
 CREATE POLICY chat_attachments_select ON storage.objects FOR SELECT TO authenticated

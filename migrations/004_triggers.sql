@@ -580,13 +580,15 @@ BEGIN
      | app.perm('MENTION_ALL')
      | app.perm('CONNECT')       | app.perm('SPEAK')
      | app.perm('SCREEN_SHARE')
-     | app.perm('SUMMON_BOTS')   | app.perm('CREATE_INVITE'), true, false),
+     | app.perm('SUMMON_BOTS')   | app.perm('CREATE_INVITE')
+     | app.perm('USE_SOUNDBOARD'), true, false),
     (NEW.id, 'Moderator', 200,
        app.perm('MANAGE_CHANNELS') | app.perm('MANAGE_MESSAGES')
      | app.perm('MANAGE_WEBHOOKS') | app.perm('KICK_MEMBERS')
      | app.perm('MUTE_MEMBERS')    | app.perm('DEAFEN_MEMBERS')
      | app.perm('MOVE_MEMBERS')    | app.perm('ADD_BOTS')
-     | app.perm('CREATE_PRIVATE_CHANNEL'), false, false),
+     | app.perm('CREATE_PRIVATE_CHANNEL')
+     | app.perm('MANAGE_SOUNDBOARD'), false, false),
     (NEW.id, 'Admin',     300, app.perm('ADMINISTRATOR'), false, false),
     (NEW.id, 'Owner',     400, app.perm('ADMINISTRATOR'), false, true)
   ON CONFLICT (server_id, name) DO NOTHING;
@@ -786,6 +788,54 @@ CREATE TRIGGER device_tokens_stamp BEFORE INSERT OR UPDATE ON device_tokens
 CREATE TRIGGER dm_messages_ring AFTER INSERT ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION ring_dm_recipient();
 
+-- ============================================================
+-- The soundboard's three rules
+-- ============================================================
+-- Whose clip it is, a ceiling, and no blob left behind.
+--
+-- The ceiling is a trigger rather than a check in the RPC that inserts,
+-- because there is no such RPC: adding a clip is an ordinary INSERT under a
+-- policy, so the only place a count can be enforced is the row itself.
+
+-- Stamped rather than accepted, the same rule as a device token and a
+-- notification preference: a client that could name the server could hang a
+-- clip on one it is not in, and a client that could name the author could put
+-- somebody else's name on it.
+CREATE OR REPLACE FUNCTION stamp_soundboard_sound()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  IF auth.uid() IS NOT NULL THEN
+    NEW.server_id  := app.server_id();
+    NEW.created_by := auth.uid();
+  END IF;
+  RETURN NEW;
+END; $$;
+
+CREATE OR REPLACE FUNCTION enforce_soundboard_max()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  IF (SELECT count(*) FROM soundboard_sounds s
+       WHERE s.server_id = NEW.server_id) >= app.soundboard_max() THEN
+    RAISE EXCEPTION 'soundboard_full';
+  END IF;
+  RETURN NEW;
+END; $$;
+
+-- Deleting the row deletes the file. Unlike a chat attachment — whose blob is
+-- named only inside a body the server cannot read, so it can only ever be
+-- *swept* — a clip's object path is a column here. Something that can be done
+-- exactly should not be done on a timer.
+CREATE OR REPLACE FUNCTION drop_soundboard_object()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  DELETE FROM storage.objects
+   WHERE bucket_id = 'soundboard' AND name = OLD.object_path;
+  RETURN OLD;
+END; $$;
+
 CREATE TRIGGER messages_ring AFTER INSERT ON messages
   FOR EACH ROW EXECUTE FUNCTION ring_channel_members();
 
@@ -861,3 +911,12 @@ CREATE TRIGGER dm_messages_head AFTER INSERT ON dm_messages
 
 CREATE TRIGGER dm_messages_head_gone AFTER DELETE ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION app.forget_dm_head();
+
+CREATE TRIGGER soundboard_sounds_stamp BEFORE INSERT ON soundboard_sounds
+  FOR EACH ROW EXECUTE FUNCTION stamp_soundboard_sound();
+
+CREATE TRIGGER soundboard_sounds_cap BEFORE INSERT ON soundboard_sounds
+  FOR EACH ROW EXECUTE FUNCTION enforce_soundboard_max();
+
+CREATE TRIGGER soundboard_sounds_drop_object AFTER DELETE ON soundboard_sounds
+  FOR EACH ROW EXECUTE FUNCTION drop_soundboard_object();

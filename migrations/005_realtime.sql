@@ -120,6 +120,26 @@ BEGIN
   RETURN NULL;
 END $$;
 
+-- The library changed. An empty payload like `channels`, for the same reason:
+-- what a client does with this is re-read the list, and sending the row would
+-- be a second copy of it that can disagree with the first.
+CREATE OR REPLACE FUNCTION app.announce_soundboard() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    v_server := OLD.server_id;
+  ELSE
+    v_server := NEW.server_id;
+  END IF;
+  PERFORM realtime.send('{}'::jsonb, 'soundboard', 'server:' || v_server, true);
+  RETURN NULL;
+END $$;
+
 CREATE OR REPLACE FUNCTION app.announce_member() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -452,3 +472,7 @@ CREATE TRIGGER notification_prefs_announce
 CREATE TRIGGER channel_members_announce
   AFTER INSERT OR UPDATE OR DELETE ON channel_members
   FOR EACH ROW EXECUTE FUNCTION app.announce_channel_member();
+
+CREATE TRIGGER soundboard_sounds_announce
+  AFTER INSERT OR UPDATE OR DELETE ON soundboard_sounds
+  FOR EACH ROW EXECUTE FUNCTION app.announce_soundboard();

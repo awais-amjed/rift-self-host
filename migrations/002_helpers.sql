@@ -488,6 +488,14 @@ $$;
 -- ============================================================
 -- 1. The two new bits
 -- ============================================================
+-- The soundboard's pair sits at the end, and the split between them is the
+-- point: `USE_SOUNDBOARD` is on `@everyone`, because firing a clip in a call
+-- you are already allowed to speak in is an ordinary thing a member does, and
+-- a server that disagrees takes it off one role. `MANAGE_SOUNDBOARD` is not,
+-- because what the whole server hears is not one member's to decide.
+--
+-- Neither bit reaches the *listener*: turning a soundboard down is a setting
+-- on the device hearing it and has nothing to ask a server about.
 
 CREATE OR REPLACE FUNCTION app.perm_bit(p_name TEXT) RETURNS BIGINT
   LANGUAGE sql IMMUTABLE AS $$
@@ -519,12 +527,14 @@ CREATE OR REPLACE FUNCTION app.perm_bit(p_name TEXT) RETURNS BIGINT
     WHEN 'CREATE_PRIVATE_CHANNEL' THEN 1::BIGINT << 21
     WHEN 'ADD_BOTS'               THEN 1::BIGINT << 22  -- create a bot invite
     WHEN 'SUMMON_BOTS'            THEN 1::BIGINT << 23  -- bring one into a call
+    WHEN 'MANAGE_SOUNDBOARD'      THEN 1::BIGINT << 24  -- add and remove clips
+    WHEN 'USE_SOUNDBOARD'         THEN 1::BIGINT << 25  -- fire one in a call
     ELSE NULL
   END
 $$;
 
 CREATE OR REPLACE FUNCTION app.perm_all() RETURNS BIGINT
-  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 24) - 1 $$;
+  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 26) - 1 $$;
 
 CREATE OR REPLACE FUNCTION app.bot_summoned_to(p_channel UUID, p_bot UUID)
   RETURNS BOOLEAN

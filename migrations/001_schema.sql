@@ -1512,6 +1512,75 @@ COMMENT ON TABLE listing_tokens IS
   'verify_listing_token. Only a digest is stored.';
 
 -- ============================================================
+-- Soundboard
+-- ============================================================
+-- Short clips anybody in a call can fire, heard by everyone in it.
+--
+-- **Nothing about a play goes through this database.** A press is a packet on
+-- the call's own data channel, and every listener plays the clip out of its
+-- own speakers at its own volume. That is what makes "turn his soundboard
+-- down" a real control rather than a request to the person pressing it, and
+-- it is why a play costs the server nothing at all — this table is only the
+-- library the packet names.
+--
+-- The bytes are **not encrypted**, the same trade-off avatars and reactions
+-- already make: a clip every member plays gains nothing from per-member
+-- wrapping. They live in the `soundboard` bucket under this server's id, and
+-- are private rather than public-read so the open internet cannot enumerate
+-- them.
+--
+-- Two ceilings, and only one of them is enforceable here:
+--
+--   * **size** is the bucket's `file_size_limit`, which Storage applies to
+--     the upload itself — a modified client cannot get past it.
+--   * **duration** is whatever the uploader says it is. Nothing in Postgres
+--     can decode an mp3 to check, so `duration_ms` is a *claim*, kept for the
+--     list to show and bounded only so it cannot be absurd. What actually
+--     stops a twenty-minute clip is the listener: every client cuts playback
+--     off at its own ceiling, which is the same shape as the cooldown and
+--     works for the same reason — the person hearing it decides.
+
+CREATE TABLE IF NOT EXISTS soundboard_sounds (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  server_id   UUID        NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- Who added it. SET NULL rather than CASCADE, for the same reason a webhook
+  -- outlives whoever set it up: the server's soundboard is the server's.
+  created_by  UUID        REFERENCES users(id) ON DELETE SET NULL,
+
+  name        TEXT        NOT NULL CHECK (length(name) BETWEEN 1 AND 32),
+
+  -- One grapheme's worth of decoration, so a wall of clips can be read at a
+  -- glance. Not validated as an emoji — the check is a length, because
+  -- deciding what counts as one is a job for the thing with a font.
+  emoji       TEXT        CHECK (emoji IS NULL OR length(emoji) BETWEEN 1 AND 16),
+
+  -- Object name inside the `soundboard` bucket: `<server id>/<random>.audio`.
+  object_path TEXT        NOT NULL UNIQUE,
+
+  duration_ms INTEGER     NOT NULL CHECK (duration_ms BETWEEN 1 AND 30000),
+  bytes       INTEGER     NOT NULL CHECK (bytes > 0),
+
+  -- Two clips called the same thing is a picker nobody can use.
+  UNIQUE (server_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS soundboard_sounds_server
+  ON soundboard_sounds (server_id, created_at);
+
+COMMENT ON TABLE soundboard_sounds IS
+  'This server''s soundboard library. A play is a data-channel packet naming '
+  'a row here; the database never hears about one.';
+
+-- How many a server may hold. A number rather than a per-server column: the
+-- limits in `servers` are the ones an operator pays for in disk and bandwidth,
+-- and a soundboard costs neither — what it costs is a picker that stops being
+-- usable, which is the same for everybody.
+CREATE OR REPLACE FUNCTION app.soundboard_max() RETURNS INTEGER
+  LANGUAGE sql IMMUTABLE AS $$ SELECT 48 $$;
+
+-- ============================================================
 -- Storage accounting
 -- ============================================================
 -- The running total the disk cap is checked against. Kept rather than
