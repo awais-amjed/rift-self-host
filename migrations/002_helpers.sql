@@ -1022,10 +1022,18 @@ CREATE OR REPLACE VIEW member_directory
          u.manifest,
          u.is_server_admin,
          u.is_channel_manager,
-         u.can_create_tokens
+         u.can_create_tokens,
+         -- When they joined *this* server — the only tenure anybody here can
+         -- vouch for, since servers do not know about each other and there is
+         -- no global "member since" to show instead.
+         --
+         -- Last, and out of the grouping it belongs to, because that is the
+         -- only place `CREATE OR REPLACE VIEW` will take a new column: this
+         -- file is re-runnable and nothing in these migrations drops.
+         u.created_at AS joined_at
     FROM users u;
 
-CREATE VIEW member_role_list
+CREATE OR REPLACE VIEW member_role_list
   WITH (security_invoker = true) AS
   SELECT mr.user_id,
          r.id AS role_id,
@@ -1059,7 +1067,8 @@ COMMENT ON VIEW voice_summons IS
 COMMENT ON VIEW member_directory IS
   'A member as every client surface reads one — the column list behind '
   'list_members, search_members, members_by_ids and members_by_usernames. '
-  'security_invoker, so users_select still decides who is visible.';
+  'security_invoker, so users_select still decides who is visible. '
+  'joined_at is this server''s own tenure and no other''s.';
 
 COMMENT ON VIEW member_role_list IS
   'Which roles each member holds. `is_owner` marks the one role held by '
