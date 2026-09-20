@@ -4954,7 +4954,17 @@ BEGIN
   RAISE NOTICE 'ok  a server holds app.soundboard_max() clips and no more';
 END $$;
 
--- ---------- and the bytes go with the row ----------
+-- ---------- the row goes, and the bytes are not this schema's to take ----------
+-- This used to assert the opposite, and passed while the feature was broken.
+-- A trigger on the row did `DELETE FROM storage.objects`; against a real
+-- stack Storage's own `protect_objects_delete` refuses that and took the
+-- whole DELETE down with it, so a clip could not be removed at all. Nothing
+-- here could see it, because the scratch database's `storage.objects` is a
+-- plain table from `scratch_db.sh` with none of Storage's guards on it.
+--
+-- So the assertion is inverted on purpose: the row leaves the object alone,
+-- and the client finishes the job through the Storage API. If a future
+-- trigger starts reaching into that table again, this fails and says why.
 DO $$
 BEGIN
   INSERT INTO storage.objects (bucket_id, name, metadata)
@@ -4964,12 +4974,15 @@ BEGIN
 
   DELETE FROM soundboard_sounds WHERE name = 'air horn';
 
-  IF EXISTS (SELECT 1 FROM storage.objects
-              WHERE bucket_id = 'soundboard'
-                AND name = 'aaaa0000-0000-4000-8000-000000000001/horn.audio') THEN
-    RAISE EXCEPTION 'FAIL: deleting a clip left its bytes in the bucket';
+  IF NOT EXISTS (SELECT 1 FROM storage.objects
+                  WHERE bucket_id = 'soundboard'
+                    AND name = 'aaaa0000-0000-4000-8000-000000000001/horn.audio') THEN
+    RAISE EXCEPTION
+      'FAIL: something in the schema deleted a storage object. Storage '
+      'refuses that against a real stack, and it would orphan the bytes '
+      'even where it works — the client uses the Storage API.';
   END IF;
-  RAISE NOTICE 'ok  deleting a clip deletes the file behind it';
+  RAISE NOTICE 'ok  removing a clip leaves storage.objects to the Storage API';
 END $$;
 
 -- Cleared, so the sections after this one start from the library they expect.

@@ -823,18 +823,26 @@ BEGIN
   RETURN NEW;
 END; $$;
 
--- Deleting the row deletes the file. Unlike a chat attachment — whose blob is
--- named only inside a body the server cannot read, so it can only ever be
--- *swept* — a clip's object path is a column here. Something that can be done
--- exactly should not be done on a timer.
-CREATE OR REPLACE FUNCTION drop_soundboard_object()
-  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
-  SET search_path = public AS $$
-BEGIN
-  DELETE FROM storage.objects
-   WHERE bucket_id = 'soundboard' AND name = OLD.object_path;
-  RETURN OLD;
-END; $$;
+-- There is deliberately no trigger dropping a clip's file when its row goes.
+--
+-- There was one, and it was wrong twice over. Storage installs a
+-- `protect_objects_delete` guard on `storage.objects` that raises
+-- `Direct deletion from storage tables is not allowed` for anything but its
+-- own API, so the trigger did not merely fail to remove the file — it failed
+-- the whole DELETE, and a clip could not be removed at all.
+--
+-- The guard can be opted out of with `storage.allow_delete_query`, and that
+-- would still have been wrong: deleting the row in `storage.objects` does
+-- not delete the bytes behind it. Only the Storage API knows where they are.
+-- The trigger would have left every removed clip's 5 MB on the host's disk
+-- with nothing left pointing at it — which is exactly what the guard's own
+-- hint warns about.
+--
+-- So the client removes the object through the Storage API, after the row is
+-- gone (`SoundboardRepository.deleteObject`). Row first, deliberately: an
+-- orphaned object costs space, while a row whose object has gone is a clip
+-- in everybody's picker that plays nothing — the same asymmetry that makes
+-- `addSound` upload before it inserts.
 
 CREATE TRIGGER messages_ring AFTER INSERT ON messages
   FOR EACH ROW EXECUTE FUNCTION ring_channel_members();
@@ -918,5 +926,3 @@ CREATE TRIGGER soundboard_sounds_stamp BEFORE INSERT ON soundboard_sounds
 CREATE TRIGGER soundboard_sounds_cap BEFORE INSERT ON soundboard_sounds
   FOR EACH ROW EXECUTE FUNCTION enforce_soundboard_max();
 
-CREATE TRIGGER soundboard_sounds_drop_object AFTER DELETE ON soundboard_sounds
-  FOR EACH ROW EXECUTE FUNCTION drop_soundboard_object();
