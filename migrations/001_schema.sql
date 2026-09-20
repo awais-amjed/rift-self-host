@@ -1559,7 +1559,11 @@ CREATE TABLE IF NOT EXISTS soundboard_sounds (
   -- Object name inside the `soundboard` bucket: `<server id>/<random>.audio`.
   object_path TEXT        NOT NULL UNIQUE,
 
-  duration_ms INTEGER     NOT NULL CHECK (duration_ms BETWEEN 1 AND 30000),
+  -- Zero means nobody could measure it. That is a real answer rather than a
+  -- failure: a desktop's audio backend will not decode from memory, some
+  -- files do not carry a length, and refusing a clip over a *label* would be
+  -- the wrong call. The list prints an em dash for it.
+  duration_ms INTEGER     NOT NULL CHECK (duration_ms BETWEEN 0 AND 30000),
   bytes       INTEGER     NOT NULL CHECK (bytes > 0),
 
   -- Two clips called the same thing is a picker nobody can use.
