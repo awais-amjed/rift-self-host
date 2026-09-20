@@ -36,16 +36,29 @@ ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 2097152;
 
 -- Soundboard clips. Unencrypted for the same reason avatars are — a clip every
 -- member plays gains nothing from per-member wrapping — and private for the
--- same reason too. 512 KB each, which is the only ceiling on a clip that a
+-- same reason too. 5 MB each, which is the only ceiling on a clip that a
 -- modified client cannot talk its way past.
+--
+-- 5 MB is the 30-second ceiling written as bytes: half a minute of WAV at
+-- 44.1 kHz/16-bit stereo is about 5.3 MB, and `wav` is one of the formats
+-- every target can decode. Anything compressed is far under it, so the size
+-- cap only ever catches a file that was not going to be a clip.
+--
+-- Note what this number is doing, because nothing else is doing it: unlike
+-- `chat-*`, this bucket is **not** counted by `app.track_bucket_usage` and
+-- not refused by `app.enforce_storage_cap`, both of which match on
+-- `bucket_id LIKE 'chat-%'`. So the per-file limit times
+-- `app.soundboard_max()` — 48 × 5 MB, 240 MB — is the entire bound on what a
+-- server's soundboard can cost its host. Raise either number and that is the
+-- figure that moves.
 --
 -- Not `sound-<server uuid>`, unlike attachments: the two reasons a bucket per
 -- server exists there are a per-server *size* cap and a read policy that can
 -- name one server, and here the size cap is the same number for everybody
 -- while the read policy has a folder to name instead.
 INSERT INTO storage.buckets (id, name, public, file_size_limit)
-VALUES ('soundboard', 'soundboard', false, 524288)
-ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 524288;
+VALUES ('soundboard', 'soundboard', false, 5242880)
+ON CONFLICT (id) DO UPDATE SET public = false, file_size_limit = 5242880;
 
 -- The server icon bucket predates the app's own uploads and stays public: it
 -- is fetched before anyone has a session, on the join screen.

@@ -305,7 +305,7 @@ exactly one place and the order is a dependency order.
    publication: each change is *broadcast* by a trigger onto a topic only the entitled may
    join, so what is in the payload is a decision rather than a consequence.
 6. **006_storage.sql** — `chat-<serverId>` per server, `avatars` (2 MB, **not** encrypted —
-   same accepted trade-off as reactions), `soundboard` (512 KB a clip, unencrypted for the same
+   same accepted trade-off as reactions), `soundboard` (5 MB a clip, unencrypted for the same
    reason, one folder per server), `servers` (public, fetched before login), plus the
    running byte total and the trigger that refuses an upload over the cap.
 7. **007_jobs.sql** — the scheduled work: retention sweeps, expiring invites and summons,
