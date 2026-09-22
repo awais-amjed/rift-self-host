@@ -450,10 +450,7 @@ export function renderOverride(publishing: Publishing): string | null {
   const { apiPort, bind, lanAddress } = publishing;
   if (apiPort === null) return null;
 
-  const livekitEnvironment = lanAddress === null ? "" : `    environment:
-      LIVEKIT_RTC_USE_EXTERNAL_IP: "false"
-      LIVEKIT_RTC_NODE_IP: "${lanAddress.trim()}"
-`;
+  const livekitLan = lanAddress === null ? "" : pinLivekitTo(lanAddress.trim());
 
   return `${OVERRIDE_MARK}. It publishes what Caddy would otherwise have
 # fronted: the API gateway, and LiveKit's signalling. Media was already going
@@ -469,7 +466,31 @@ services:
   livekit:
     ports:
       - "${bind}:7880:7880"
-${livekitEnvironment}`;
+${livekitLan}`;
+}
+
+/**
+ * The part of the override that pins LiveKit's media to [address].
+ *
+ * Neither of the obvious ways works. LiveKit reads no environment variable for
+ * either setting — `LIVEKIT_RTC_NODE_IP` was written here for months and did
+ * nothing — and `use_external_ip: true` in livekit.yaml wins over
+ * `--node-ip`, so the flag alone still advertises the router's address. So
+ * LiveKit starts from a copy of its config with STUN turned off, which leaves
+ * livekit.yaml itself, the file operators are told to edit, as it is.
+ *
+ * `$` would be compose interpolation, and the script needs none.
+ */
+function pinLivekitTo(address: string): string {
+  return `    # Media pinned to the LAN address: STUN would answer with the router's.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        sed 's/^\\([[:space:]]*use_external_ip:\\).*/\\1 false/'
+        /etc/livekit.yaml > /tmp/livekit.yaml &&
+        exec /livekit-server --config /tmp/livekit.yaml --node-ip ${address}
+`;
 }
 
 /** The first line of every override this console writes. */

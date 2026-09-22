@@ -223,8 +223,13 @@ Deno.test("the local override publishes what Caddy would have fronted", () => {
   assertStringIncludes(yaml, '"0.0.0.0:7880:7880"');
   // Behind a router, STUN answers with the router's address and the call
   // connects with no sound. This is the line that prevents it.
-  assertStringIncludes(yaml, 'LIVEKIT_RTC_NODE_IP: "192.168.1.6"');
-  assertStringIncludes(yaml, 'LIVEKIT_RTC_USE_EXTERNAL_IP: "false"');
+  assertStringIncludes(yaml, "--node-ip 192.168.1.6");
+  // The flag alone is not enough: `use_external_ip: true` beats it, so the
+  // config LiveKit starts from has STUN off. Environment variables were tried
+  // first and LiveKit reads none of them.
+  assertStringIncludes(yaml, "use_external_ip:\\).*/\\1 false/");
+  assertStringIncludes(yaml, "--config /tmp/livekit.yaml");
+  assertEquals(yaml.includes("LIVEKIT_RTC_"), false);
 });
 
 Deno.test("a stack behind Caddy publishes nothing extra", () => {
@@ -243,7 +248,8 @@ Deno.test("an operator's own proxy gets the upstreams on the loopback", () => {
   // A VPS behind no router: STUN gives the right answer, so nothing overrides
   // it. Pinning the node IP here would break media on the one host that has a
   // real external address.
-  assertEquals(yaml.includes("LIVEKIT_RTC_NODE_IP"), false);
+  assertEquals(yaml.includes("--node-ip"), false);
+  assertEquals(yaml.includes("entrypoint"), false);
 });
 
 Deno.test("an own-proxy stack still records its domain and its port", async () => {
