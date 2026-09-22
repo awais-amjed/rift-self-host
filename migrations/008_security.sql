@@ -69,36 +69,47 @@ GRANT SELECT, INSERT               ON read_state TO authenticated;
 
 GRANT UPDATE (last_read_id, updated_at) ON read_state TO authenticated;
 
+DROP POLICY IF EXISTS invites_select_own ON invites;
 CREATE POLICY invites_select_own ON invites FOR SELECT TO authenticated
   USING (server_id = app.server_id() AND created_by = auth.uid());
 
+DROP POLICY IF EXISTS invites_delete_own ON invites;
 CREATE POLICY invites_delete_own ON invites FOR DELETE TO authenticated
   USING (server_id = app.server_id() AND created_by = auth.uid());
 
+DROP POLICY IF EXISTS dm_messages_insert ON dm_messages;
 CREATE POLICY dm_messages_insert ON dm_messages FOR INSERT TO authenticated
   WITH CHECK (sender_id = auth.uid() AND app.can_receive_dm(recipient_id));
 
+DROP POLICY IF EXISTS dm_messages_update_own ON dm_messages;
 CREATE POLICY dm_messages_update_own ON dm_messages FOR UPDATE TO authenticated
   USING (sender_id = auth.uid()) WITH CHECK (sender_id = auth.uid());
 
+DROP POLICY IF EXISTS dm_messages_delete_own ON dm_messages;
 CREATE POLICY dm_messages_delete_own ON dm_messages FOR DELETE TO authenticated
   USING (sender_id = auth.uid());
 
+DROP POLICY IF EXISTS message_reactions_select ON message_reactions;
 CREATE POLICY message_reactions_select ON message_reactions FOR SELECT TO authenticated
   USING (app.can_see_message(message_id));
 
+DROP POLICY IF EXISTS message_reactions_insert ON message_reactions;
 CREATE POLICY message_reactions_insert ON message_reactions FOR INSERT TO authenticated
   WITH CHECK (user_id = auth.uid() AND app.can_see_message(message_id));
 
+DROP POLICY IF EXISTS message_reactions_delete_own ON message_reactions;
 CREATE POLICY message_reactions_delete_own ON message_reactions FOR DELETE TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS dm_reactions_select ON dm_message_reactions;
 CREATE POLICY dm_reactions_select ON dm_message_reactions FOR SELECT TO authenticated
   USING (app.can_see_dm(message_id));
 
+DROP POLICY IF EXISTS dm_reactions_insert ON dm_message_reactions;
 CREATE POLICY dm_reactions_insert ON dm_message_reactions FOR INSERT TO authenticated
   WITH CHECK (user_id = auth.uid() AND app.can_see_dm(message_id));
 
+DROP POLICY IF EXISTS dm_reactions_delete_own ON dm_message_reactions;
 CREATE POLICY dm_reactions_delete_own ON dm_message_reactions FOR DELETE TO authenticated
   USING (user_id = auth.uid());
 
@@ -168,17 +179,21 @@ GRANT UPDATE (name, emoji) ON soundboard_sounds TO authenticated;
 
 GRANT DELETE ON soundboard_sounds TO authenticated;
 
+DROP POLICY IF EXISTS soundboard_select ON soundboard_sounds;
 CREATE POLICY soundboard_select ON soundboard_sounds FOR SELECT TO authenticated
   USING (server_id = app.server_id());
 
 -- The stamp runs first — a BEFORE trigger fires before the check — so this
 -- reads the value the row will actually have, not the one the client sent.
+DROP POLICY IF EXISTS soundboard_insert ON soundboard_sounds;
 CREATE POLICY soundboard_insert ON soundboard_sounds FOR INSERT TO authenticated
   WITH CHECK (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
 
+DROP POLICY IF EXISTS soundboard_update ON soundboard_sounds;
 CREATE POLICY soundboard_update ON soundboard_sounds FOR UPDATE TO authenticated
   USING (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
 
+DROP POLICY IF EXISTS soundboard_delete ON soundboard_sounds;
 CREATE POLICY soundboard_delete ON soundboard_sounds FOR DELETE TO authenticated
   USING (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
 
@@ -196,9 +211,11 @@ GRANT SELECT (id, created_at, server_id, channel_id, created_by, name,
 
 GRANT DELETE ON webhooks TO authenticated;
 
+DROP POLICY IF EXISTS webhooks_select ON webhooks;
 CREATE POLICY webhooks_select ON webhooks FOR SELECT TO authenticated
   USING (server_id = app.server_id() AND app.can_manage_channels());
 
+DROP POLICY IF EXISTS webhooks_delete ON webhooks;
 CREATE POLICY webhooks_delete ON webhooks FOR DELETE TO authenticated
   USING (server_id = app.server_id() AND app.can_manage_channels());
 
@@ -270,6 +287,7 @@ REVOKE ALL ON FUNCTION sync_role_permission_cache()      FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION seed_default_roles()              FROM PUBLIC;
 
+DROP POLICY IF EXISTS roles_insert ON roles;
 CREATE POLICY roles_insert ON roles FOR INSERT TO authenticated
   WITH CHECK (
     server_id = app.server_id()
@@ -278,6 +296,7 @@ CREATE POLICY roles_insert ON roles FOR INSERT TO authenticated
     AND app.may_hold_perms(permissions)
   );
 
+DROP POLICY IF EXISTS roles_update ON roles;
 CREATE POLICY roles_update ON roles FOR UPDATE TO authenticated
   USING (server_id = app.server_id() AND app.may_manage_role(position))
   WITH CHECK (
@@ -286,9 +305,11 @@ CREATE POLICY roles_update ON roles FOR UPDATE TO authenticated
     AND app.may_hold_perms(permissions)
   );
 
+DROP POLICY IF EXISTS roles_delete ON roles;
 CREATE POLICY roles_delete ON roles FOR DELETE TO authenticated
   USING (server_id = app.server_id() AND app.may_manage_role(position));
 
+DROP POLICY IF EXISTS member_roles_insert ON member_roles;
 CREATE POLICY member_roles_insert ON member_roles FOR INSERT TO authenticated
   WITH CHECK (
     app.may_assign_role(role_id)
@@ -298,6 +319,7 @@ CREATE POLICY member_roles_insert ON member_roles FOR INSERT TO authenticated
                    AND u.server_id = app.server_id())
   );
 
+DROP POLICY IF EXISTS channels_write_managers ON channels;
 CREATE POLICY channels_write_managers ON channels FOR INSERT TO authenticated
   WITH CHECK (
     server_id = app.server_id()
@@ -305,16 +327,20 @@ CREATE POLICY channels_write_managers ON channels FOR INSERT TO authenticated
               ELSE app.has_perm('MANAGE_CHANNELS') END)
   );
 
+DROP POLICY IF EXISTS channels_update_managers ON channels;
 CREATE POLICY channels_update_managers ON channels FOR UPDATE TO authenticated
   USING (app.can_manage_channel(id)) WITH CHECK (app.can_manage_channel(id));
 
+DROP POLICY IF EXISTS channels_delete_managers ON channels;
 CREATE POLICY channels_delete_managers ON channels FOR DELETE TO authenticated
   USING (app.can_manage_channel(id));
 
+DROP POLICY IF EXISTS messages_update_own ON messages;
 CREATE POLICY messages_update_own ON messages FOR UPDATE TO authenticated
   USING (sender_id = auth.uid() AND app.can_see_channel(channel_id))
   WITH CHECK (sender_id = auth.uid());
 
+DROP POLICY IF EXISTS messages_delete ON messages;
 CREATE POLICY messages_delete ON messages FOR DELETE TO authenticated
   USING (
     app.can_see_channel(channel_id)
@@ -323,6 +349,7 @@ CREATE POLICY messages_delete ON messages FOR DELETE TO authenticated
          OR app.can_manage_channel(channel_id))
   );
 
+DROP POLICY IF EXISTS channel_keyring_insert ON channel_keyring;
 CREATE POLICY channel_keyring_insert ON channel_keyring FOR INSERT TO authenticated
   WITH CHECK (
     wrapped_by = auth.uid()
@@ -397,6 +424,7 @@ GRANT EXECUTE ON FUNCTION leave_channel(UUID) TO authenticated;
 GRANT INSERT (server_id, created_by, code, max_uses, expires_at, is_bot, role_id)
   ON invites TO authenticated;
 
+DROP POLICY IF EXISTS member_roles_delete ON member_roles;
 CREATE POLICY member_roles_delete ON member_roles FOR DELETE TO authenticated
   USING (
     app.may_assign_role(role_id)
@@ -429,6 +457,7 @@ GRANT INSERT (channel_id, sender_id, ciphertext, nonce, signature, key_version,
 GRANT UPDATE (ciphertext, nonce, signature, key_version, blocks) ON messages
   TO authenticated;
 
+DROP POLICY IF EXISTS messages_insert ON messages;
 CREATE POLICY messages_insert ON messages FOR INSERT TO authenticated
   WITH CHECK (
     app.can_see_channel(channel_id)
@@ -479,6 +508,7 @@ REVOKE ALL ON bot_voice_grants FROM anon, authenticated;
 -- membership is not public, and neither is what is listening to it.
 GRANT SELECT ON bot_voice_grants TO authenticated;
 
+DROP POLICY IF EXISTS bot_voice_grants_select ON bot_voice_grants;
 CREATE POLICY bot_voice_grants_select ON bot_voice_grants
   FOR SELECT TO authenticated USING (app.can_see_channel(channel_id));
 
@@ -498,6 +528,7 @@ REVOKE ALL ON bot_voice_keys FROM anon, authenticated;
 
 GRANT SELECT, INSERT ON bot_voice_keys TO authenticated;
 
+DROP POLICY IF EXISTS bot_voice_keys_insert ON bot_voice_keys;
 CREATE POLICY bot_voice_keys_insert ON bot_voice_keys
   FOR INSERT TO authenticated
   WITH CHECK (
@@ -505,6 +536,7 @@ CREATE POLICY bot_voice_keys_insert ON bot_voice_keys
     AND app.may_write_bot_voice_key(channel_id, bot_id, is_channel_key)
   );
 
+DROP POLICY IF EXISTS bot_voice_keys_select ON bot_voice_keys;
 CREATE POLICY bot_voice_keys_select ON bot_voice_keys
   FOR SELECT TO authenticated
   USING (bot_id = auth.uid() OR app.can_see_channel(channel_id));
@@ -519,10 +551,12 @@ GRANT EXECUTE ON FUNCTION app.bot_reads_channel(UUID)          TO authenticated;
 
 GRANT EXECUTE ON FUNCTION app.bot_reads_version(UUID, INTEGER) TO authenticated;
 
+DROP POLICY IF EXISTS bot_channel_keys_select ON bot_channel_keys;
 CREATE POLICY bot_channel_keys_select ON bot_channel_keys
   FOR SELECT TO authenticated
   USING (app.can_see_channel(channel_id) OR bot_id = auth.uid());
 
+DROP POLICY IF EXISTS invites_insert ON invites;
 CREATE POLICY invites_insert ON invites FOR INSERT TO authenticated
   WITH CHECK (
     server_id = app.server_id()
@@ -550,6 +584,7 @@ REVOKE ALL ON bot_voice_summons FROM anon, authenticated;
 
 GRANT SELECT ON bot_voice_summons TO authenticated;
 
+DROP POLICY IF EXISTS bot_voice_summons_select ON bot_voice_summons;
 CREATE POLICY bot_voice_summons_select ON bot_voice_summons
   FOR SELECT TO authenticated
   USING (app.can_see_channel(channel_id) OR bot_id = auth.uid());
@@ -691,6 +726,7 @@ REVOKE ALL ON FUNCTION app.server_roles() FROM PUBLIC, anon;
 
 GRANT EXECUTE ON FUNCTION app.server_roles() TO authenticated;
 
+DROP POLICY IF EXISTS messages_select ON messages;
 CREATE POLICY messages_select ON messages FOR SELECT TO authenticated
   USING (
     (channel_id IN (SELECT unnest(app.visible_channels()))
@@ -707,6 +743,7 @@ CREATE POLICY messages_select ON messages FOR SELECT TO authenticated
          OR to_bot = (SELECT auth.uid()))
   );
 
+DROP POLICY IF EXISTS channel_keyring_select ON channel_keyring;
 CREATE POLICY channel_keyring_select ON channel_keyring FOR SELECT TO authenticated
   USING (
     channel_id IN (SELECT unnest(app.visible_channels()))
@@ -714,57 +751,72 @@ CREATE POLICY channel_keyring_select ON channel_keyring FOR SELECT TO authentica
         AND channel_id IN (SELECT unnest(app.bot_channels())))
   );
 
+DROP POLICY IF EXISTS channel_members_select ON channel_members;
 CREATE POLICY channel_members_select ON channel_members FOR SELECT TO authenticated
   USING (channel_id IN (SELECT unnest(app.visible_channels())));
 
+DROP POLICY IF EXISTS channel_role_access_select ON channel_role_access;
 CREATE POLICY channel_role_access_select ON channel_role_access
   FOR SELECT TO authenticated
   USING (channel_id IN (SELECT unnest(app.visible_channels())));
 
+DROP POLICY IF EXISTS users_select_members ON users;
 CREATE POLICY users_select_members ON users FOR SELECT TO authenticated
   USING (server_id = (SELECT app.server_id()));
 
+DROP POLICY IF EXISTS users_select_self ON users;
 CREATE POLICY users_select_self ON users FOR SELECT TO authenticated
   USING (id = (SELECT auth.uid()));
 
+DROP POLICY IF EXISTS users_update_self ON users;
 CREATE POLICY users_update_self ON users FOR UPDATE TO authenticated
   USING (id = (SELECT auth.uid()) AND server_id = (SELECT app.server_id()))
   WITH CHECK (id = (SELECT auth.uid()) AND server_id = (SELECT app.server_id()));
 
+DROP POLICY IF EXISTS member_roles_select ON member_roles;
 CREATE POLICY member_roles_select ON member_roles FOR SELECT TO authenticated
   USING (role_id IN (SELECT unnest(app.server_roles())));
 
+DROP POLICY IF EXISTS servers_select ON servers;
 CREATE POLICY servers_select ON servers FOR SELECT TO authenticated
   USING (id = (SELECT app.server_id()));
 
+DROP POLICY IF EXISTS roles_select ON roles;
 CREATE POLICY roles_select ON roles FOR SELECT TO authenticated
   USING (server_id = (SELECT app.server_id()));
 
+DROP POLICY IF EXISTS channels_select ON channels;
 CREATE POLICY channels_select ON channels FOR SELECT TO authenticated
   USING (
     server_id = (SELECT app.server_id())
     AND (NOT is_private OR app.in_channel(id, (SELECT auth.uid())))
   );
 
+DROP POLICY IF EXISTS dm_messages_select ON dm_messages;
 CREATE POLICY dm_messages_select ON dm_messages FOR SELECT TO authenticated
   USING (sender_id = (SELECT auth.uid()) OR recipient_id = (SELECT auth.uid()));
 
+DROP POLICY IF EXISTS read_state_own ON read_state;
 CREATE POLICY read_state_own ON read_state FOR ALL TO authenticated
   USING (user_id = (SELECT auth.uid()))
   WITH CHECK (user_id = (SELECT auth.uid()));
 
+DROP POLICY IF EXISTS notification_prefs_own ON notification_prefs;
 CREATE POLICY notification_prefs_own ON notification_prefs FOR ALL TO authenticated
   USING (user_id = (SELECT auth.uid()))
   WITH CHECK (user_id = (SELECT auth.uid()));
 
+DROP POLICY IF EXISTS device_tokens_own ON device_tokens;
 CREATE POLICY device_tokens_own ON device_tokens FOR ALL TO authenticated
   USING (user_id = (SELECT auth.uid()))
   WITH CHECK (user_id = (SELECT auth.uid()));
 
+DROP POLICY IF EXISTS dm_conversation_heads_select ON dm_conversation_heads;
 CREATE POLICY dm_conversation_heads_select ON dm_conversation_heads
   FOR SELECT TO authenticated
   USING (user_id = (SELECT auth.uid()));
 
+DROP POLICY IF EXISTS bot_server_grants_select ON bot_server_grants;
 CREATE POLICY bot_server_grants_select ON bot_server_grants
   FOR SELECT TO authenticated
   USING (server_id = (SELECT app.server_id()));

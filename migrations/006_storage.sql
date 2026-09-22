@@ -201,21 +201,25 @@ BEGIN
   RETURN NEW;
 END $$;
 
+DROP POLICY IF EXISTS avatars_select ON storage.objects;
 CREATE POLICY avatars_select ON storage.objects FOR SELECT TO authenticated
   USING (bucket_id = 'avatars');
 
+DROP POLICY IF EXISTS avatars_insert ON storage.objects;
 CREATE POLICY avatars_insert ON storage.objects FOR INSERT TO authenticated
   WITH CHECK (
     bucket_id = 'avatars'
     AND (storage.foldername(name))[1] = auth.uid()::text
   );
 
+DROP POLICY IF EXISTS avatars_update ON storage.objects;
 CREATE POLICY avatars_update ON storage.objects FOR UPDATE TO authenticated
   USING (
     bucket_id = 'avatars'
     AND (storage.foldername(name))[1] = auth.uid()::text
   );
 
+DROP POLICY IF EXISTS avatars_delete ON storage.objects;
 CREATE POLICY avatars_delete ON storage.objects FOR DELETE TO authenticated
   USING (
     bucket_id = 'avatars'
@@ -227,12 +231,14 @@ CREATE POLICY avatars_delete ON storage.objects FOR DELETE TO authenticated
 -- Writing needs the bit, and the folder has to be the caller's own server —
 -- without the second half, MANAGE_SOUNDBOARD on any server on the project
 -- would be MANAGE_SOUNDBOARD on all of them.
+DROP POLICY IF EXISTS soundboard_select ON storage.objects;
 CREATE POLICY soundboard_select ON storage.objects FOR SELECT TO authenticated
   USING (
     bucket_id = 'soundboard'
     AND (storage.foldername(name))[1] = app.server_id()::text
   );
 
+DROP POLICY IF EXISTS soundboard_insert ON storage.objects;
 CREATE POLICY soundboard_insert ON storage.objects FOR INSERT TO authenticated
   WITH CHECK (
     bucket_id = 'soundboard'
@@ -243,6 +249,7 @@ CREATE POLICY soundboard_insert ON storage.objects FOR INSERT TO authenticated
 -- No update policy at all. A path is minted once and never written twice —
 -- replacing a clip's bytes under a name every client has cached is how you
 -- get a picker where the labels and the sounds disagree.
+DROP POLICY IF EXISTS soundboard_delete ON storage.objects;
 CREATE POLICY soundboard_delete ON storage.objects FOR DELETE TO authenticated
   USING (
     bucket_id = 'soundboard'
@@ -250,29 +257,36 @@ CREATE POLICY soundboard_delete ON storage.objects FOR DELETE TO authenticated
     AND app.has_perm('MANAGE_SOUNDBOARD')
   );
 
+DROP POLICY IF EXISTS chat_attachments_select ON storage.objects;
 CREATE POLICY chat_attachments_select ON storage.objects FOR SELECT TO authenticated
   USING (bucket_id = 'chat-' || app.server_id()::TEXT);
 
+DROP POLICY IF EXISTS chat_attachments_insert ON storage.objects;
 CREATE POLICY chat_attachments_insert ON storage.objects FOR INSERT TO authenticated
   WITH CHECK (bucket_id = 'chat-' || app.server_id()::TEXT);
 
+DROP POLICY IF EXISTS chat_attachments_delete ON storage.objects;
 CREATE POLICY chat_attachments_delete ON storage.objects FOR DELETE TO authenticated
   USING (
     bucket_id = 'chat-' || app.server_id()::TEXT
     AND (owner = auth.uid() OR app.can_manage_channels())
   );
 
+DROP TRIGGER IF EXISTS servers_bucket_insert ON servers;
 CREATE TRIGGER servers_bucket_insert AFTER INSERT ON servers
   FOR EACH ROW EXECUTE FUNCTION sync_server_bucket();
 
+DROP TRIGGER IF EXISTS servers_bucket_update ON servers;
 CREATE TRIGGER servers_bucket_update AFTER UPDATE OF max_attachment_bytes ON servers
   FOR EACH ROW WHEN (OLD.max_attachment_bytes IS DISTINCT FROM NEW.max_attachment_bytes)
   EXECUTE FUNCTION sync_server_bucket();
 
+DROP TRIGGER IF EXISTS rift_track_bucket_usage ON storage.objects;
 CREATE TRIGGER rift_track_bucket_usage
   AFTER INSERT OR UPDATE OR DELETE ON storage.objects
   FOR EACH ROW EXECUTE FUNCTION app.track_bucket_usage();
 
+DROP TRIGGER IF EXISTS rift_enforce_storage_cap ON storage.objects;
 CREATE TRIGGER rift_enforce_storage_cap
   BEFORE INSERT ON storage.objects
   FOR EACH ROW EXECUTE FUNCTION app.enforce_storage_cap();

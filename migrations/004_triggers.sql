@@ -776,15 +776,19 @@ COMMENT ON FUNCTION ring_channel_members() IS
   'read_state rather than the roster: being caught up is the rare case, and '
   'the roster is the expensive one to walk.';
 
+DROP TRIGGER IF EXISTS attest_messages ON messages;
 CREATE TRIGGER attest_messages BEFORE INSERT OR UPDATE ON messages
   FOR EACH ROW EXECUTE FUNCTION attest_message();
 
+DROP TRIGGER IF EXISTS attest_dm_messages ON dm_messages;
 CREATE TRIGGER attest_dm_messages BEFORE INSERT OR UPDATE ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION attest_message();
 
+DROP TRIGGER IF EXISTS device_tokens_stamp ON device_tokens;
 CREATE TRIGGER device_tokens_stamp BEFORE INSERT OR UPDATE ON device_tokens
   FOR EACH ROW EXECUTE FUNCTION stamp_device_owner();
 
+DROP TRIGGER IF EXISTS dm_messages_ring ON dm_messages;
 CREATE TRIGGER dm_messages_ring AFTER INSERT ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION ring_dm_recipient();
 
@@ -844,85 +848,111 @@ END; $$;
 -- in everybody's picker that plays nothing — the same asymmetry that makes
 -- `addSound` upload before it inserts.
 
+DROP TRIGGER IF EXISTS messages_ring ON messages;
 CREATE TRIGGER messages_ring AFTER INSERT ON messages
   FOR EACH ROW EXECUTE FUNCTION ring_channel_members();
 
+DROP TRIGGER IF EXISTS notification_prefs_stamp ON notification_prefs;
 CREATE TRIGGER notification_prefs_stamp BEFORE INSERT OR UPDATE ON notification_prefs
   FOR EACH ROW EXECUTE FUNCTION stamp_notification_pref();
 
+DROP TRIGGER IF EXISTS validate_message_mentions ON messages;
 CREATE TRIGGER validate_message_mentions BEFORE INSERT OR UPDATE ON messages
   FOR EACH ROW EXECUTE FUNCTION validate_message_mentions();
 
+DROP TRIGGER IF EXISTS users_pin_is_bot ON users;
 CREATE TRIGGER users_pin_is_bot BEFORE UPDATE ON users
   FOR EACH ROW EXECUTE FUNCTION pin_is_bot();
 
+DROP TRIGGER IF EXISTS messages_pin_bot_command ON messages;
 CREATE TRIGGER messages_pin_bot_command BEFORE UPDATE ON messages
   FOR EACH ROW EXECUTE FUNCTION pin_bot_command();
 
+DROP TRIGGER IF EXISTS member_roles_refuse_everyone ON member_roles;
 CREATE TRIGGER member_roles_refuse_everyone BEFORE INSERT OR UPDATE ON member_roles
   FOR EACH ROW EXECUTE FUNCTION refuse_everyone_assignment();
 
+DROP TRIGGER IF EXISTS roles_protect_everyone ON roles;
 CREATE TRIGGER roles_protect_everyone BEFORE UPDATE OR DELETE ON roles
   FOR EACH ROW EXECUTE FUNCTION protect_everyone_role();
 
+DROP TRIGGER IF EXISTS member_roles_sync_cache ON member_roles;
 CREATE TRIGGER member_roles_sync_cache
   AFTER INSERT OR UPDATE OR DELETE ON member_roles
   FOR EACH ROW EXECUTE FUNCTION sync_member_permission_cache();
 
+DROP TRIGGER IF EXISTS roles_sync_cache ON roles;
 CREATE TRIGGER roles_sync_cache AFTER INSERT OR UPDATE OR DELETE ON roles
   FOR EACH ROW EXECUTE FUNCTION sync_role_permission_cache();
 
+DROP TRIGGER IF EXISTS servers_seed_roles ON servers;
 CREATE TRIGGER servers_seed_roles AFTER INSERT ON servers
   FOR EACH ROW EXECUTE FUNCTION seed_default_roles();
 
+DROP TRIGGER IF EXISTS channel_keyring_refuse_ineligible ON channel_keyring;
 CREATE TRIGGER channel_keyring_refuse_ineligible BEFORE INSERT ON channel_keyring
   FOR EACH ROW EXECUTE FUNCTION refuse_ineligible_keyring();
 
+DROP TRIGGER IF EXISTS channel_members_reassign ON channel_members;
 CREATE TRIGGER channel_members_reassign AFTER DELETE ON channel_members
   FOR EACH ROW EXECUTE FUNCTION reassign_or_close_channel();
 
+DROP TRIGGER IF EXISTS channels_seed_owner ON channels;
 CREATE TRIGGER channels_seed_owner AFTER INSERT ON channels
   FOR EACH ROW EXECUTE FUNCTION seed_private_channel_owner();
 
+DROP TRIGGER IF EXISTS channels_apply_bot_grants ON channels;
 CREATE TRIGGER channels_apply_bot_grants AFTER INSERT ON channels
   FOR EACH ROW EXECUTE FUNCTION apply_bot_server_grants();
 
+DROP TRIGGER IF EXISTS channels_drop_bot_grants ON channels;
 CREATE TRIGGER channels_drop_bot_grants AFTER UPDATE OF is_private ON channels
   FOR EACH ROW EXECUTE FUNCTION drop_bot_grants_when_closed();
 
+DROP TRIGGER IF EXISTS channels_drop_bot_voice_grants ON channels;
 CREATE TRIGGER channels_drop_bot_voice_grants AFTER UPDATE OF is_private ON channels
   FOR EACH ROW EXECUTE FUNCTION drop_bot_voice_grants_when_closed();
 
+DROP TRIGGER IF EXISTS bot_voice_grants_reset_keys ON bot_voice_grants;
 CREATE TRIGGER bot_voice_grants_reset_keys
   AFTER INSERT OR DELETE ON bot_voice_grants
   FOR EACH ROW EXECUTE FUNCTION drop_bot_voice_keys_on_grant_change();
 
+DROP TRIGGER IF EXISTS bot_voice_summons_reset_keys ON bot_voice_summons;
 CREATE TRIGGER bot_voice_summons_reset_keys
   AFTER INSERT OR DELETE ON bot_voice_summons
   FOR EACH ROW EXECUTE FUNCTION drop_bot_voice_keys_on_summon_change();
 
+DROP TRIGGER IF EXISTS channels_drop_bot_voice_summons ON channels;
 CREATE TRIGGER channels_drop_bot_voice_summons
   AFTER UPDATE ON channels
   FOR EACH ROW EXECUTE FUNCTION drop_bot_voice_summons_when_closed();
 
+DROP TRIGGER IF EXISTS roles_protect_owner ON roles;
 CREATE TRIGGER roles_protect_owner BEFORE INSERT OR UPDATE OR DELETE ON roles
   FOR EACH ROW EXECUTE FUNCTION protect_owner_role();
 
+DROP TRIGGER IF EXISTS member_roles_refuse_second_owner ON member_roles;
 CREATE TRIGGER member_roles_refuse_second_owner BEFORE INSERT OR UPDATE ON member_roles
   FOR EACH ROW EXECUTE FUNCTION refuse_second_owner();
 
+DROP TRIGGER IF EXISTS users_refuse_owner_leaving ON users;
 CREATE TRIGGER users_refuse_owner_leaving BEFORE DELETE ON users
   FOR EACH ROW EXECUTE FUNCTION refuse_owner_leaving();
 
+DROP TRIGGER IF EXISTS dm_messages_head ON dm_messages;
 CREATE TRIGGER dm_messages_head AFTER INSERT ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION app.remember_dm_head();
 
+DROP TRIGGER IF EXISTS dm_messages_head_gone ON dm_messages;
 CREATE TRIGGER dm_messages_head_gone AFTER DELETE ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION app.forget_dm_head();
 
+DROP TRIGGER IF EXISTS soundboard_sounds_stamp ON soundboard_sounds;
 CREATE TRIGGER soundboard_sounds_stamp BEFORE INSERT ON soundboard_sounds
   FOR EACH ROW EXECUTE FUNCTION stamp_soundboard_sound();
 
+DROP TRIGGER IF EXISTS soundboard_sounds_cap ON soundboard_sounds;
 CREATE TRIGGER soundboard_sounds_cap BEFORE INSERT ON soundboard_sounds
   FOR EACH ROW EXECUTE FUNCTION enforce_soundboard_max();
 

@@ -441,38 +441,47 @@ COMMENT ON FUNCTION app.announce_to_channel(UUID, TEXT, JSONB) IS
   'topic for an open channel, the channel''s own for a private one. One row '
   'in either case — the membership does not appear in the cost.';
 
+DROP TRIGGER IF EXISTS messages_announce ON messages;
 CREATE TRIGGER messages_announce
   AFTER INSERT OR UPDATE OR DELETE ON messages
   FOR EACH ROW EXECUTE FUNCTION app.announce_message();
 
+DROP TRIGGER IF EXISTS message_reactions_announce ON message_reactions;
 CREATE TRIGGER message_reactions_announce
   AFTER INSERT OR DELETE ON message_reactions
   FOR EACH ROW EXECUTE FUNCTION app.announce_reaction();
 
+DROP TRIGGER IF EXISTS dm_messages_announce ON dm_messages;
 CREATE TRIGGER dm_messages_announce
   AFTER INSERT OR UPDATE OR DELETE ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION app.announce_dm();
 
+DROP TRIGGER IF EXISTS dm_message_reactions_announce ON dm_message_reactions;
 CREATE TRIGGER dm_message_reactions_announce
   AFTER INSERT OR DELETE ON dm_message_reactions
   FOR EACH ROW EXECUTE FUNCTION app.announce_dm_reaction();
 
+DROP TRIGGER IF EXISTS channels_announce ON channels;
 CREATE TRIGGER channels_announce
   AFTER INSERT OR UPDATE OR DELETE ON channels
   FOR EACH ROW EXECUTE FUNCTION app.announce_channels();
 
+DROP TRIGGER IF EXISTS users_announce ON users;
 CREATE TRIGGER users_announce
   AFTER INSERT OR UPDATE OR DELETE ON users
   FOR EACH ROW EXECUTE FUNCTION app.announce_member();
 
+DROP TRIGGER IF EXISTS notification_prefs_announce ON notification_prefs;
 CREATE TRIGGER notification_prefs_announce
   AFTER INSERT OR UPDATE OR DELETE ON notification_prefs
   FOR EACH ROW EXECUTE FUNCTION app.announce_prefs();
 
+DROP TRIGGER IF EXISTS channel_members_announce ON channel_members;
 CREATE TRIGGER channel_members_announce
   AFTER INSERT OR UPDATE OR DELETE ON channel_members
   FOR EACH ROW EXECUTE FUNCTION app.announce_channel_member();
 
+DROP TRIGGER IF EXISTS soundboard_sounds_announce ON soundboard_sounds;
 CREATE TRIGGER soundboard_sounds_announce
   AFTER INSERT OR UPDATE OR DELETE ON soundboard_sounds
   FOR EACH ROW EXECUTE FUNCTION app.announce_soundboard();
