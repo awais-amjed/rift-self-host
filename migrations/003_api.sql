@@ -1271,6 +1271,12 @@ BEGIN
               WHERE server_id = v_invite.server_id AND username = p_username) THEN
     RETURN jsonb_build_object('reason', 'username_taken');
   END IF;
+  -- Named rather than left to `users_username_shape`, so a caller that went
+  -- round the client's field gets a reason it can show instead of a check
+  -- violation it has to guess at.
+  IF p_username !~ '^[A-Za-z0-9_.-]{2,32}$' THEN
+    RETURN jsonb_build_object('reason', 'username_invalid');
+  END IF;
 
   INSERT INTO users (
     id, server_id, username, display_name, public_key, stable_id, is_bot
@@ -1935,6 +1941,12 @@ BEGIN
   IF EXISTS (SELECT 1 FROM users
               WHERE server_id = v_invite.server_id AND username = p_username) THEN
     RETURN jsonb_build_object('reason', 'username_taken');
+  END IF;
+  -- Named rather than left to `users_username_shape`, so a caller that went
+  -- round the client's field gets a reason it can show instead of a check
+  -- violation it has to guess at.
+  IF p_username !~ '^[A-Za-z0-9_.-]{2,32}$' THEN
+    RETURN jsonb_build_object('reason', 'username_invalid');
   END IF;
 
   -- The operator's ceiling on members.

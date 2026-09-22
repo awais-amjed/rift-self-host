@@ -41,6 +41,7 @@ export const INVITE_EXHAUSTED = "invite_exhausted"; // max_uses reached
 export const INVITE_EXPIRED   = "invite_expired";   // expires_at has passed
 export const IDENTITY_TAKEN   = "identity_taken";   // public_key or stable_id already registered
 export const USERNAME_TAKEN   = "username_taken";
+export const USERNAME_INVALID = "username_invalid"; // outside the mention parser's alphabet
 export const INVALID_PUBLIC_KEY = "invalid_public_key"; // not valid base64 or wrong length
 export const INVALID_STABLE_ID  = "invalid_stable_id";  // not valid base64 or wrong length
 

@@ -313,6 +313,16 @@ CREATE TABLE IF NOT EXISTS users (
   -- "all". A CHECK rather than a test in `register_user`, because the rule
   -- belongs to the column and there is more than one way to write a row.
   CONSTRAINT users_username_not_reserved CHECK (lower(username) <> 'all'),
+  -- A username is what `@`-mentions resolve against, and the parser's
+  -- alphabet is `[A-Za-z0-9_.-]` with a 32 ceiling (the client's
+  -- `message_markup.dart`, and `MentionSuggestions`, which refuses a query
+  -- containing whitespace). A name outside it is a member nobody can mention
+  -- and search cannot reach — "Benny Smith!" was accepted here, and was
+  -- unmentionable from the moment it landed. Same argument as the rule above:
+  -- it belongs to the column, because `register_user` is not the only way a
+  -- row gets written and a bot joining through the SDK goes round whatever a
+  -- client checks.
+  CONSTRAINT users_username_shape CHECK (username ~ '^[A-Za-z0-9_.-]{2,32}$'),
   CONSTRAINT users_manifest_is_bot CHECK (manifest IS NULL OR is_bot),
   -- Bounded: any member can read it and the bot writes it unattended. A
   -- manifest is a short list of verbs, not a payload.

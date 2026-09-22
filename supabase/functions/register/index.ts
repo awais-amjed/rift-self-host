@@ -110,6 +110,11 @@ Deno.serve(async (req) => {
         return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
       case "username_taken":
         return CustomResponse.error("Username already taken", EC.USERNAME_TAKEN);
+      case "username_invalid":
+        return CustomResponse.error(
+          "Usernames are 2\u201332 characters: letters, numbers, underscore, dot or hyphen \u2014 no spaces",
+          EC.USERNAME_INVALID,
+        );
       // Last, like the check itself: everything above is about the caller,
       // and this is about the server. It is also the only refusal here a
       // valid invite can still produce, so it says what to do about it.

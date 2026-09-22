@@ -1908,6 +1908,27 @@ RESET ROLE;
 INSERT INTO invites (server_id, code, max_uses)
 VALUES ('aaaa0000-0000-4000-8000-000000000001', 'TESTINV0001', 5);
 INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-00000000000a');
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-00000000000b');
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-00000000000c');
+
+-- A username is what `@`-mentions resolve against, so one the parser cannot
+-- express is a member nobody can reach. `users_username_shape` is what a
+-- write that never goes through the RPC runs into — checked here, as the
+-- owner, so only the constraint can be what refuses it.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO users (id, server_id, username, display_name, public_key,
+                       stable_id)
+    VALUES ('11111111-aaaa-4aaa-8aaa-00000000000c',
+            'aaaa0000-0000-4000-8000-000000000001',
+            'Benny Smith!', 'Benny', 'pk-sp2', 'sid-sp2');
+    RAISE EXCEPTION 'FAIL: the column took a username with a space';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+  RAISE NOTICE 'ok  users_username_shape holds the line at the column';
+END $$;
 
 SET LOCAL ROLE service_role;
 
@@ -1926,6 +1947,21 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a new member has no row';
   END IF;
   RAISE NOTICE 'ok  somebody can still join a server';
+END $$;
+
+-- The client refuses this shape at the keystroke; this is the half a bot
+-- joining through the SDK cannot go round. Named rather than left to the
+-- constraint, so the caller gets a reason instead of a check violation.
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := register_user('TESTINV0001',
+                            '11111111-aaaa-4aaa-8aaa-00000000000b',
+                            'pk-sp', 'sid-sp', 'Benny Smith!', 'Benny');
+  IF v_result->>'reason' <> 'username_invalid' THEN
+    RAISE EXCEPTION 'FAIL: a username with a space registered: %', v_result;
+  END IF;
+  RAISE NOTICE 'ok  a username mentions cannot express is refused by name';
 END $$;
 
 SET LOCAL ROLE authenticated;
