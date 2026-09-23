@@ -200,6 +200,20 @@ BEGIN
   IF TG_OP <> 'INSERT' THEN
     PERFORM realtime.send('{}'::jsonb, 'me', 'user:' || v_row.id, true);
   END IF;
+
+  -- A ban is the sweep's first rotation signal — somebody sealed into the
+  -- current version who is no longer entitled to it — and nothing was ringing
+  -- for it, so the key a banned member already unwrapped went on being the one
+  -- the room was written under. Row-level security stops them fetching any of
+  -- it, which is why this is defence in depth rather than a door; but it is
+  -- the defence the design builds, and it was not happening.
+  --
+  -- Both directions, because the unban is the same doorbell doing the other
+  -- half of its job: the sweep heals a member back into the current version
+  -- rather than rotating for them.
+  IF TG_OP = 'UPDATE' AND OLD.is_banned IS DISTINCT FROM NEW.is_banned THEN
+    PERFORM realtime.send('{}'::jsonb, 'sweep', 'server:' || v_row.server_id, true);
+  END IF;
   RETURN NULL;
 END $$;
 
@@ -323,6 +337,15 @@ BEGIN
 
   IF TG_OP = 'DELETE' THEN
     PERFORM realtime.send('{}'::jsonb, 'me', 'user:' || OLD.user_id, true);
+    -- The other half of the same rotation signal: somebody removed from a
+    -- private channel is sealed into a key the conversation must move off.
+    -- Only on the way out — an arrival is *healed* into the current version,
+    -- which their own client asks for when it opens the channel, and ringing
+    -- for it would spend a delivery per member every time a private channel
+    -- is created.
+    PERFORM realtime.send('{}'::jsonb, 'sweep',
+                          'server:' || (SELECT c.server_id FROM channels c
+                                         WHERE c.id = OLD.channel_id), true);
     RETURN NULL;
   END IF;
 
