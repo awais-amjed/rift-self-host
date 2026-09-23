@@ -261,9 +261,17 @@ DROP POLICY IF EXISTS chat_attachments_select ON storage.objects;
 CREATE POLICY chat_attachments_select ON storage.objects FOR SELECT TO authenticated
   USING (bucket_id = 'chat-' || app.server_id()::TEXT);
 
+-- `ATTACH_FILES` is checked here, because the upload is the only moment the
+-- server sees a file at all: the attachment's name and key live inside the
+-- sealed message body, so a check at the message would have nothing to read.
+-- Without it the permission the roles editor offers was never enforced
+-- anywhere, and a member it had been taken from could still upload.
 DROP POLICY IF EXISTS chat_attachments_insert ON storage.objects;
 CREATE POLICY chat_attachments_insert ON storage.objects FOR INSERT TO authenticated
-  WITH CHECK (bucket_id = 'chat-' || app.server_id()::TEXT);
+  WITH CHECK (
+    bucket_id = 'chat-' || app.server_id()::TEXT
+    AND app.has_perm('ATTACH_FILES')
+  );
 
 DROP POLICY IF EXISTS chat_attachments_delete ON storage.objects;
 CREATE POLICY chat_attachments_delete ON storage.objects FOR DELETE TO authenticated

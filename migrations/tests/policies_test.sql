@@ -3899,6 +3899,98 @@ BEGIN
   RAISE NOTICE 'ok  and shrink by the crowd rather than growing with it';
 END $$;
 
+-- ── The two permissions that were offered and never asked ───
+-- `ADD_REACTIONS` and `ATTACH_FILES` are in the roles editor, are saved into
+-- the bitmask, and were read by nothing: the reaction policy checked only that
+-- you could see the message, and the attachment bucket only that you were a
+-- member of the server. A permission that cannot be taken away is worse than
+-- one that does not exist — the editor says it worked.
+
+DO $$
+BEGIN
+  INSERT INTO message_reactions (message_id, user_id, emoji)
+  VALUES (9402, '11111111-aaaa-4aaa-8aaa-000000000002', '🔥');
+  RAISE NOTICE 'ok  a member with ADD_REACTIONS may react';
+END $$;
+
+DO $$
+BEGIN
+  INSERT INTO storage.objects (bucket_id, name, owner)
+  VALUES ('chat-aaaa0000-0000-4000-8000-000000000001',
+          'aaaa1111-0000-4000-8000-0000000000f1/allowed.bin',
+          '11111111-aaaa-4aaa-8aaa-000000000002');
+  RAISE NOTICE 'ok  a member with ATTACH_FILES may upload';
+END $$;
+
+RESET ROLE;
+UPDATE roles
+   SET permissions = permissions & ~(app.perm('ADD_REACTIONS')
+                                     | app.perm('ATTACH_FILES'))
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+   AND is_everyone;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO message_reactions (message_id, user_id, emoji)
+    VALUES (9401, '11111111-aaaa-4aaa-8aaa-000000000002', '😂');
+    RAISE EXCEPTION 'FAIL: a member without ADD_REACTIONS reacted anyway';
+  EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+  END;
+  RAISE NOTICE 'ok  taking ADD_REACTIONS away stops the reaction';
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, owner)
+    VALUES ('chat-aaaa0000-0000-4000-8000-000000000001',
+            'aaaa1111-0000-4000-8000-0000000000f1/refused.bin',
+            '11111111-aaaa-4aaa-8aaa-000000000002');
+    RAISE EXCEPTION 'FAIL: a member without ATTACH_FILES uploaded anyway';
+  EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+  END;
+  RAISE NOTICE 'ok  taking ATTACH_FILES away stops the upload';
+END $$;
+
+-- Deleting one you already left stays yours: the permission governs adding,
+-- not living with what you added before it was taken.
+DO $$
+BEGIN
+  DELETE FROM message_reactions
+   WHERE message_id = 9402
+     AND user_id = '11111111-aaaa-4aaa-8aaa-000000000002';
+  RAISE NOTICE 'ok  and leaves the ones already there to their owner';
+END $$;
+
+-- An administrator is unaffected, because `has_perm` folds ADMINISTRATOR in.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  INSERT INTO message_reactions (message_id, user_id, emoji)
+  VALUES (9402, '11111111-aaaa-4aaa-8aaa-000000000001', '🔥');
+  RAISE NOTICE 'ok  an administrator still holds both without being given one';
+END $$;
+
+RESET ROLE;
+UPDATE roles
+   SET permissions = permissions | app.perm('ADD_REACTIONS')
+                                 | app.perm('ATTACH_FILES')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+   AND is_everyone;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
 
 -- ============================================================
 -- 25. The DM conversation list, a page at a time (041)

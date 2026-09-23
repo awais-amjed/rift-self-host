@@ -93,9 +93,17 @@ DROP POLICY IF EXISTS message_reactions_select ON message_reactions;
 CREATE POLICY message_reactions_select ON message_reactions FOR SELECT TO authenticated
   USING (app.can_see_message(message_id));
 
+-- `ADD_REACTIONS` is checked here and nowhere else. A reaction is a plain row
+-- the server can read — unlike a mention, which is inside the ciphertext — so
+-- this is the only place the permission the roles editor offers can mean
+-- anything. Without it the toggle saved a bit that nothing ever read.
 DROP POLICY IF EXISTS message_reactions_insert ON message_reactions;
 CREATE POLICY message_reactions_insert ON message_reactions FOR INSERT TO authenticated
-  WITH CHECK (user_id = auth.uid() AND app.can_see_message(message_id));
+  WITH CHECK (
+    user_id = auth.uid()
+    AND app.can_see_message(message_id)
+    AND app.has_perm('ADD_REACTIONS')
+  );
 
 DROP POLICY IF EXISTS message_reactions_delete_own ON message_reactions;
 CREATE POLICY message_reactions_delete_own ON message_reactions FOR DELETE TO authenticated
