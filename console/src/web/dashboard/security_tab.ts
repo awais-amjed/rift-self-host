@@ -32,8 +32,8 @@ const ROTATE_HELP = `
 <ol>
   <li>Pick the key below. Not sure which one leaked? Replace the
     <strong>signing keys</strong>.</li>
-  <li>Press <strong>Replace</strong> and confirm. Wait until the button reads
-    Replace again. It can take a minute.</li>
+  <li>Press its <strong>Replace</strong> button and confirm. Wait until the
+    button stops reading Replacing. It can take a minute.</li>
   <li>Check the <a href="#overview">Overview</a> tab: every container should be
     green.</li>
   <li>Make a new backup from the <a href="#backups">Backups</a> tab. Older
@@ -107,10 +107,15 @@ document.getElementById("secrets").addEventListener("click", (event) => {
 
 // Most likely to be needed first, so first. Each says what it costs the people
 // on the server, because that is the thing an operator has to weigh.
+//
+// Each button names what it replaces, too. Three buttons all reading
+// "Replace" are told apart only by the heading beside them, which a tab
+// order and a hurried eye both lose.
 const ROTATIONS = [
   {
     kind: "signing",
     title: "Signing keys",
+    action: "Replace keys",
     cost: "Use this if you are not sure what leaked. Everyone is signed out and " +
       "signed straight back in, without noticing.",
     confirm: "Replace the signing keys? Everyone is signed out and their apps sign " +
@@ -121,6 +126,7 @@ const ROTATIONS = [
   {
     kind: "livekit",
     title: "Voice credentials",
+    action: "Replace credentials",
     cost: "Calls in progress drop and rejoin by themselves in under a minute.",
     confirm: "Replace the voice credentials? Calls in progress will drop and rejoin " +
       "by themselves in under a minute.",
@@ -130,6 +136,7 @@ const ROTATIONS = [
   {
     kind: "database",
     title: "Database password",
+    action: "Replace password",
     cost: "The server does not answer for a few seconds while services restart.",
     confirm: "Replace the database password? The server will not answer for a few " +
       "seconds while services restart.",
@@ -151,7 +158,7 @@ function renderRotations(rotations) {
       (last ? '<p class="hint">' + last + "</p>" : "") +
       '</div><button class="quiet" data-kind="' + rotation.kind + '"' +
       (window._rotating ? " disabled" : "") + ">" +
-      (busy ? "Replacing…" : "Replace") + "</button></div>";
+      (busy ? "Replacing…" : rotation.action) + "</button></div>";
   }).join("");
 }
 
