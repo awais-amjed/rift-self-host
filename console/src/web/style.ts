@@ -36,6 +36,15 @@ input {
   border: 1px solid var(--line); border-radius: 8px; font-size: 15px;
   font-family: inherit;
 }
+/* A tick box is never a field-width control. The rule above is for the things
+   you type into, and a checkbox that inherits it stretches its box across the
+   panel — so the browser centres the tick in the middle of the form, above a
+   label it no longer looks attached to. That is what the setup page's toggles
+   did for want of a class, so the base rule says it too: forgetting
+   `label.check` now costs an uppercase label, not a checkbox adrift. */
+input[type="checkbox"], input[type="radio"] {
+  width: auto; padding: 0; accent-color: var(--accent);
+}
 select {
   width: 100%; padding: 10px 12px; background: var(--inset); color: var(--text);
   border: 1px solid var(--line); border-radius: 8px; font-size: 15px; font-family: inherit;

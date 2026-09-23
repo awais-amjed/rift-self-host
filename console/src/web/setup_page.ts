@@ -8,8 +8,12 @@ function optionInput(field: OptionField, value: unknown, shownNow: boolean): str
   const scope = field.only ? ` data-only="${field.only}"` : "";
   const hide = shownNow ? "" : " hidden";
   if (field.kind === "toggle") {
+    // `check`, or this label is styled as a *field* label — which means
+    // `input { width: 100% }` applies to the checkbox, stretching its box
+    // across the panel so the browser centres the tick in the middle of the
+    // form, above an uppercased label it no longer looks attached to.
     return `<div class="field"${scope}${hide}>
-      <label for="${field.key}">
+      <label class="check" for="${field.key}">
         <input id="${field.key}" name="${field.key}" type="checkbox"
                data-kind="toggle" ${value === true ? "checked" : ""}>
         ${field.label}
