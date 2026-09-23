@@ -102,18 +102,47 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Unknown user in entries", EC.USER_NOT_FOUND);
     }
 
-    // A bot may not hold a channel key (BOTS.md §2). `channel_keyring` refuses
-    // the row too, but a trigger raises for the whole statement — so one bot
-    // in a batch would fail the wrap for every real member beside it, and the
-    // client would see a database error rather than the reason. Refusing here
-    // names it, and does so before anything is written.
+    // A bot holds a channel key only where an admin granted one, and only from
+    // the version the grant names (BOTS.md §6). `refuse_ineligible_keyring`
+    // says the same thing on the row, but a trigger raises for the whole
+    // statement — so one ineligible bot in a batch would fail the wrap for
+    // every real member beside it, and the client would see a database error
+    // rather than the reason. Refusing here names it, and does so before
+    // anything is written.
+    //
+    // Checking the grant rather than the bot flag is the whole of it. A
+    // blanket refusal here outlived the rule it came from, and what it broke
+    // was not only the grant: the sweep seals the next version to *everyone*
+    // eligible, so one granted bot in the batch refused the rotation itself —
+    // and a channel with a grant on it could then never rotate for any other
+    // reason either, a banned member's included.
     const bots = ((usersData ?? []) as Record<string, any>[])
-      .filter((u) => u[DBSchema.users.isBot] === true);
+      .filter((u) => u[DBSchema.users.isBot] === true)
+      .map((u) => u[DBSchema.users.id] as string);
     if (bots.length > 0) {
-      return CustomResponse.error(
-        "Channel keys cannot be wrapped for a bot",
-        EC.PERMISSION_DENIED,
+      const { data: grantData, error: grantError } = await supabase
+        .from("bot_channel_keys")
+        .select("bot_id, from_key_version")
+        .eq("channel_id", channel_id)
+        .in("bot_id", bots);
+      if (grantError) {
+        return CustomResponse.error("Error reading bot grants", EC.DB_ERROR, grantError);
+      }
+      const grantedFrom = new Map(
+        ((grantData ?? []) as Record<string, any>[])
+          .map((g) => [g.bot_id as string, g.from_key_version as number]),
       );
+      const refused = bots.filter((id) => {
+        const from = grantedFrom.get(id);
+        return from === undefined || key_version < from;
+      });
+      if (refused.length > 0) {
+        return CustomResponse.error(
+          "Channel keys cannot be wrapped for a bot without a grant to this " +
+            "channel at this key version",
+          EC.PERMISSION_DENIED,
+        );
+      }
     }
 
     const rows = entries.map((entry: Record<string, any>) => ({

@@ -153,6 +153,15 @@ member into the current key rather than triggering another rotation. There is no
 flag to set and nothing to reset. Old versions stay in the ring, so scrollback
 written under them is still readable by everyone who could read it before.
 
+`post_channel_keys` also refuses a batch that seals to a **bot** with no
+`bot_channel_keys` grant to that channel at that version — the same rule
+`refuse_ineligible_keyring` puts on the row, named here so one ineligible
+recipient does not come back as a database error for every real member beside
+it. It has to be the grant and not the bot flag: the sweep seals the next
+version to everyone eligible, so a blanket refusal fails the **rotation**, and a
+channel with a grant on it could then never rotate for any reason — a banned
+member's included.
+
 **The key-distribution trio is a deliberate deferral, not a rule.** `post_channel_keys` enforces
 the `key_version ≤ current+1` race (first writer wins, losers refetch and re-wrap) and
 `sweep_channel_keys` computes healing sets across channels. Both are expressible as RPCs, but
