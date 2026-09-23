@@ -104,7 +104,12 @@ details[open] summary { margin-bottom: 10px; }
 
 .top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
 .top a { font-size: 13px; color: var(--faint); }
-.tabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--line);
+/* Wraps rather than scrolls. A scrolling row hides whichever tabs do not fit,
+   and on a phone that included the tab you were already on — the only thing
+   saying so was a stub of its underline at the right-hand edge. There are five
+   of them and they are short, so a second line on a narrow screen costs less
+   than a hidden one. */
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--bg); z-index: 2; margin: 0 -4px; }
 .tabs button { background: none; color: var(--faint); border: 0; border-radius: 0;
   border-bottom: 2px solid transparent; padding: 12px 12px 10px; font-weight: 500;
