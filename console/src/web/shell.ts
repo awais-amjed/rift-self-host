@@ -19,7 +19,12 @@ export function escapeAttribute(value: string): string {
   );
 }
 
-export function shell(title: string, body: string, script = ""): string {
+export function shell(
+  title: string,
+  body: string,
+  script = "",
+  mainClass = "",
+): string {
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -27,7 +32,7 @@ export function shell(title: string, body: string, script = ""): string {
 <meta name="robots" content="noindex">
 <title>${title}</title>
 <style>${STYLE}</style>
-</head><body><main>${body}</main>
+</head><body><main${mainClass ? ` class="${mainClass}"` : ""}>${body}</main>
 ${script ? `<script>${script}</script>` : ""}
 </body></html>`;
 }

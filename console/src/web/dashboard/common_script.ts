@@ -11,6 +11,21 @@ function escapeHtml(value) {
   })[c]);
 }
 
+/// A moment, spelled the same way on every tab.
+///
+/// toLocaleString() alone gives "9/24/2026, 8:00:00 AM": a numeric month that
+/// two readers will read two ways, and seconds nobody asked for on a figure
+/// that is only ever a date. A named month and no seconds, in the reader's own
+/// locale and the machine's own zone — this console is about one machine, and
+/// the schedule beside these times is written in UTC, so the two need telling
+/// apart.
+function formatWhen(value) {
+  return new Date(value).toLocaleString([], {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
 async function copyText(button, value) {
   await navigator.clipboard.writeText(value);
   if (!button.dataset.label) button.dataset.label = button.textContent;

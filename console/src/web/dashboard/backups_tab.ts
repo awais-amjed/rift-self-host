@@ -160,7 +160,7 @@ async function loadBackups() {
     '<div class="rotation"><div>' +
     '<strong class="mono">' + escapeHtml(file.name) + "</strong>" +
     '<p class="hint">' + formatBytes(file.bytes) + " · " +
-    new Date(file.createdAt).toLocaleString() +
+    formatWhen(file.createdAt) +
     (file.encrypted ? " · encrypted" : " · not encrypted") +
     (keep > 0 && index >= keep - 1
       ? ' · <span class="doomed">deleted by the next backup</span>'

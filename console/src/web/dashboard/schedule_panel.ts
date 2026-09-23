@@ -130,7 +130,7 @@ function describeSchedule(schedule) {
 }
 
 function nextText(schedule) {
-  const next = escapeHtml(new Date(schedule.next).toLocaleString());
+  const next = escapeHtml(formatWhen(schedule.next));
   return schedule.dueNow ? "within a few minutes</strong>, as one is due, then <strong>" + next : next;
 }
 
@@ -142,10 +142,10 @@ function renderSchedule(schedule) {
     : describeSchedule(schedule);
   if (last && last.error) {
     html += '<br><span class="error">The last scheduled backup failed (' +
-      escapeHtml(new Date(last.finishedAt).toLocaleString()) + "): " + escapeHtml(last.error) +
+      escapeHtml(formatWhen(last.finishedAt)) + "): " + escapeHtml(last.error) +
       ". It is tried again within the hour.</span>";
   } else if (last) {
-    html += "<br>Last scheduled backup: " + escapeHtml(new Date(last.finishedAt).toLocaleString()) +
+    html += "<br>Last scheduled backup: " + escapeHtml(formatWhen(last.finishedAt)) +
       (last.pruned.length ? ", deleted " + last.pruned.length + " older" : "") + ".";
   }
   if (last && last.pruneError) {

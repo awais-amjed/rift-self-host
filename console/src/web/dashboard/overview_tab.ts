@@ -144,8 +144,15 @@ function renderHealth(state) {
       : service.state === "running" ? (service.health === "starting" ? "warn" : "ok")
       : "fail";
     if (level === "fail") broken = true;
+    // Compose says "(healthy)" only for a service that defines a healthcheck,
+    // so one that does not came out as a bare "Up 14 minutes" in a column
+    // where every sibling ended in a word — which reads as the word having
+    // gone missing rather than as there being nothing to report.
+    const status = service.state === "running" && !service.health
+      ? service.status + " (no health check)"
+      : service.status;
     return '<tr><td class="name"><span class="dot ' + level + '"></span>' +
-      escapeHtml(service.name) + "</td><td>" + escapeHtml(service.status) + "</td></tr>";
+      escapeHtml(service.name) + "</td><td>" + escapeHtml(status) + "</td></tr>";
   }).join("") || '<tr><td class="name">Nothing is running.</td></tr>';
   setBadge("overview", broken);
 }

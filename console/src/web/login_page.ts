@@ -17,5 +17,10 @@ still <code>CONSOLE_PASSWORD</code> in the <code>.env</code> beside your
   ${failed ? '<p class="error">That is not the password.</p>' : ""}
   <button type="submit">Sign in</button>
 </form>`,
+    "",
+    // The only page with nothing else on it. Left at the top of an otherwise
+    // empty window, one small card reads as a page that failed to finish
+    // loading.
+    "centred",
   );
 }

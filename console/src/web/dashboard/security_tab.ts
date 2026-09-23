@@ -150,7 +150,7 @@ function renderRotations(rotations) {
     const busy = window._rotating === rotation.kind;
     const when = rotations ? rotations[rotation.kind] : undefined;
     const last = when === undefined ? ""
-      : when ? "Last replaced " + new Date(when).toLocaleString()
+      : when ? "Last replaced " + formatWhen(when)
       : "Never replaced";
     return '<div class="rotation"><div>' +
       "<strong>" + rotation.title + "</strong>" +

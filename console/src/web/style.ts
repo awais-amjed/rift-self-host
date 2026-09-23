@@ -16,6 +16,10 @@ body {
   font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 main { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; }
+/* A page whose whole content is one card sits in the middle of the window
+   rather than at the top of an empty one. */
+main.centred { min-height: 100vh; display: flex; flex-direction: column;
+  justify-content: center; padding-block: 24px; }
 a { color: var(--accent-bright); }
 h1 { font-size: 24px; letter-spacing: -0.02em; margin: 0 0 6px; }
 h2 { font-size: 15px; margin: 32px 0 12px; color: var(--dim); font-weight: 600; }
@@ -52,6 +56,12 @@ button.small { padding: 8px 14px; font-size: 14px; font-weight: 500; }
 .rotation:first-child { border-top: 0; padding-top: 0; }
 .rotation:last-child { padding-bottom: 0; }
 .rotation button { flex-shrink: 0; }
+/* The text half takes the width it needs and the buttons wrap under it when
+   there is not enough for both. A backup's name is a long monospace string,
+   and held to half a phone it broke into three lines beside a two-line date. */
+.rotation > div:first-child { min-width: 0; flex: 1 1 240px; }
+.rotation .mono { overflow-wrap: anywhere; }
+@media (max-width: 560px) { .rotation { flex-wrap: wrap; gap: 10px; } }
 button {
   background: linear-gradient(135deg, var(--accent), #A56BFA); color: #fff;
   border: 0; border-radius: 8px; padding: 11px 20px; font-size: 15px;
