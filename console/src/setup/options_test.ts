@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
+  applies,
   defaults,
   envHasPassword,
   fields,
@@ -63,6 +64,62 @@ Deno.test("every field the form renders is a real option", () => {
   // SetupOptions would render an input nothing reads.
   for (const field of fields) {
     assert(field.key in defaults, `${field.key} is not a SetupOptions key`);
+  }
+});
+
+/**
+ * The form used to show every field whatever was ticked, so an operator filled
+ * in a domain, picked local testing, and only found out at submit that the two
+ * do not go together. These pin the rule the page now draws itself from — and
+ * pin it to [problemsWith], which is the thing that actually decides.
+ */
+Deno.test("a field applies exactly where the stack has one", () => {
+  const field = (key: string) => fields.find((f) => f.key === key)!;
+  const local: SetupOptions = { ...defaults, localTesting: true, localAddress: "192.168.1.6" };
+  const caddy: SetupOptions = { ...defaults, domain: "chat.example.com" };
+  const proxied: SetupOptions = { ...caddy, ownProxy: true };
+
+  // A local-testing stack has an address instead of a name, and no Caddy.
+  assert(!applies(field("domain"), local));
+  assert(!applies(field("ownProxy"), local), "the two are not a combination");
+  assert(!applies(field("httpPort"), local));
+  assert(applies(field("localAddress"), local));
+  assert(applies(field("localPort"), local));
+
+  // A real server with this stack's own Caddy: the reverse of all of it.
+  assert(applies(field("domain"), caddy));
+  assert(applies(field("httpPort"), caddy));
+  assert(applies(field("httpsPort"), caddy));
+  assert(!applies(field("localAddress"), caddy));
+  assert(!applies(field("proxyPort"), caddy), "nothing to point at yet");
+
+  // Somebody else's proxy holds 80 and 443, and needs a port to reach.
+  assert(applies(field("proxyPort"), proxied));
+  assert(!applies(field("httpPort"), proxied));
+  assert(!applies(field("httpsPort"), proxied));
+  assert(applies(field("domain"), proxied), "it is what the proxy serves");
+
+  // The console's own settings belong to every stack.
+  for (const options of [local, caddy, proxied]) {
+    assert(applies(field("serverName"), options));
+    assert(applies(field("consolePassword"), options));
+    assert(applies(field("consolePort"), options));
+    assert(applies(field("livekitUdpPort"), options));
+  }
+});
+
+Deno.test("a stack made only of the fields that apply is a valid one", () => {
+  // The page posts nothing it is hiding, so whatever survives `applies` has
+  // to be enough on its own.
+  const local: SetupOptions = { ...defaults, localTesting: true, localAddress: "192.168.1.6" };
+  const proxied: SetupOptions = { ...defaults, domain: "chat.example.com", ownProxy: true };
+  for (const options of [local, proxied]) {
+    const posted: Record<string, unknown> = { ...defaults };
+    for (const f of fields) {
+      if (applies(f, options)) posted[f.key] = options[f.key];
+    }
+    posted.localTesting = options.localTesting;
+    assertEquals(problemsWith(posted as unknown as SetupOptions), []);
   }
 });
 

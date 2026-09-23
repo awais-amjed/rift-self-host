@@ -96,6 +96,27 @@ export const defaults: SetupOptions = {
   livekitUdpPort: 7882,
 };
 
+/**
+ * When a field applies at all.
+ *
+ * The two toggles are not preferences, they are three different stacks, and
+ * most of this form belongs to only one of them: a local-testing stack has no
+ * domain and no certificate, and neither it nor an operator's own proxy runs
+ * Caddy, so the HTTP and HTTPS ports are nobody's. [problemsWith] has always
+ * known that — it refuses the combinations and skips the ports it does not
+ * own — but the form did not, so an operator filled in a domain, picked local
+ * testing, and was told at submit that it had all been for nothing.
+ */
+export type AppliesWhen =
+  /** A real server: a domain, and something terminating TLS for it. */
+  | "domain"
+  /** A throwaway stack on the LAN. */
+  | "local"
+  /** Only with the operator's own reverse proxy in front. */
+  | "proxy"
+  /** Only when this stack runs its own Caddy — neither of the above. */
+  | "caddy";
+
 /** One field, as the setup page draws it. */
 export interface OptionField {
   key: keyof SetupOptions;
@@ -104,6 +125,24 @@ export interface OptionField {
   kind: "text" | "number" | "password" | "toggle";
   /** Tucked behind "Advanced" — correct for almost everyone as it stands. */
   advanced: boolean;
+  /** Absent means every stack has one. */
+  only?: AppliesWhen;
+}
+
+/** Whether [field] applies to the stack [options] describes. */
+export function applies(field: OptionField, options: SetupOptions): boolean {
+  switch (field.only) {
+    case undefined:
+      return true;
+    case "local":
+      return options.localTesting;
+    case "domain":
+      return !options.localTesting;
+    case "proxy":
+      return !options.localTesting && options.ownProxy;
+    case "caddy":
+      return !options.localTesting && !options.ownProxy;
+  }
 }
 
 /**
@@ -118,6 +157,7 @@ export const fields: OptionField[] = [
     label: "Domain",
     kind: "text",
     advanced: false,
+    only: "domain",
     hint: "Must already point at this machine. Unless you bring your own " +
       "reverse proxy below, the HTTP and HTTPS ports must be reachable and a " +
       "certificate is fetched automatically. Rift will not work over plain " +
@@ -140,6 +180,7 @@ export const fields: OptionField[] = [
     label: "LAN address",
     kind: "text",
     advanced: false,
+    only: "local",
     hint: "What clients will type, such as 192.168.1.6. Local testing only.",
   },
   {
@@ -147,6 +188,7 @@ export const fields: OptionField[] = [
     label: "Local API port",
     kind: "number",
     advanced: true,
+    only: "local",
     hint: "Where the API is published for local testing. 8000 is usually " +
       "already taken by something.",
   },
@@ -155,6 +197,7 @@ export const fields: OptionField[] = [
     label: "I have my own reverse proxy",
     kind: "toggle",
     advanced: false,
+    only: "domain",
     hint: "Skips the built-in Caddy, for a machine that already terminates " +
       "TLS for something else. The stack publishes its two upstreams on " +
       "127.0.0.1 instead, and the dashboard shows the routes to point at " +
@@ -166,6 +209,7 @@ export const fields: OptionField[] = [
     label: "API port for your proxy",
     kind: "number",
     advanced: false,
+    only: "proxy",
     hint: "Where Kong is published on 127.0.0.1 for your proxy to reach. " +
       "LiveKit's signalling goes to 127.0.0.1:7880 beside it.",
   },
@@ -182,10 +226,17 @@ export const fields: OptionField[] = [
     label: "HTTP port",
     kind: "number",
     advanced: true,
+    only: "caddy",
     hint: "Where Let's Encrypt answers its challenge. Moving it off 80 means " +
       "something else must forward 80 here, or no certificate can be issued.",
   },
-  { key: "httpsPort", label: "HTTPS port", kind: "number", advanced: true },
+  {
+    key: "httpsPort",
+    label: "HTTPS port",
+    kind: "number",
+    advanced: true,
+    only: "caddy",
+  },
   {
     key: "livekitUdpPort",
     label: "Voice port (UDP)",

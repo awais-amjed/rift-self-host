@@ -1,10 +1,14 @@
-import type { OptionField, SetupOptions } from "../setup/options.ts";
+import { applies, type OptionField, type SetupOptions } from "../setup/options.ts";
 import { shell, STREAM_SCRIPT } from "./shell.ts";
 
 /** One input, rendered from its [OptionField] and current value. */
-function optionInput(field: OptionField, value: unknown): string {
+function optionInput(field: OptionField, value: unknown, shownNow: boolean): string {
+  // `hidden` rather than omitted: the toggles change which of these apply
+  // without a round trip, so every field is rendered once and shown or not.
+  const scope = field.only ? ` data-only="${field.only}"` : "";
+  const hide = shownNow ? "" : " hidden";
   if (field.kind === "toggle") {
-    return `<div class="field">
+    return `<div class="field"${scope}${hide}>
       <label for="${field.key}">
         <input id="${field.key}" name="${field.key}" type="checkbox"
                data-kind="toggle" ${value === true ? "checked" : ""}>
@@ -20,7 +24,7 @@ function optionInput(field: OptionField, value: unknown): string {
     ? "password"
     : "text";
   const shown = field.kind === "password" ? "" : String(value ?? "");
-  return `<div class="field">
+  return `<div class="field"${scope}${hide}>
     <label for="${field.key}">${field.label}</label>
     <input id="${field.key}" name="${field.key}" type="${type}" value="${shown}"
            data-kind="${field.kind}">
@@ -37,12 +41,9 @@ function optionInput(field: OptionField, value: unknown): string {
  * what they will get, and changes only what they care about.
  */
 export function setupPage(fields: OptionField[], values: SetupOptions): string {
-  const plain = fields.filter((f) => !f.advanced).map((f) =>
-    optionInput(f, values[f.key])
-  ).join("");
-  const advanced = fields.filter((f) => f.advanced).map((f) =>
-    optionInput(f, values[f.key])
-  ).join("");
+  const draw = (f: OptionField) => optionInput(f, values[f.key], applies(f, values));
+  const plain = fields.filter((f) => !f.advanced).map(draw).join("");
+  const advanced = fields.filter((f) => f.advanced).map(draw).join("");
 
   return shell(
     "Set up your Rift server",
@@ -99,6 +100,32 @@ export function setupPage(fields: OptionField[], values: SetupOptions): string {
     `${STREAM_SCRIPT}
 const form = document.getElementById("form");
 
+// Which fields the chosen stack actually has. The same rule as applies() on
+// the server, and the reason it is repeated here rather than imported is that
+// this string is the page's only script — but the server still decides: a
+// hidden field is also skipped when the form is read, so nothing typed into a
+// box that has since stopped applying can reach /api/setup.
+const localTesting = document.getElementById("localTesting");
+const ownProxy = document.getElementById("ownProxy");
+
+function showApplicableFields() {
+  const local = localTesting.checked;
+  const proxy = ownProxy.checked;
+  const shown = {
+    domain: !local,
+    local: local,
+    proxy: !local && proxy,
+    caddy: !local && !proxy,
+  };
+  for (const field of form.querySelectorAll("[data-only]")) {
+    field.hidden = !shown[field.dataset.only];
+  }
+}
+
+localTesting.addEventListener("change", showApplicableFields);
+ownProxy.addEventListener("change", showApplicableFields);
+showApplicableFields();
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   document.getElementById("go").disabled = true;
@@ -106,6 +133,20 @@ form.addEventListener("submit", async (event) => {
 
   const options = {};
   for (const input of form.querySelectorAll("input[name]")) {
+    // A field this stack does not have is not an empty answer to a question,
+    // it is not a question. Sending it would hand /api/setup a domain from a
+    // local-testing stack, or an HTTP port for a Caddy that never starts —
+    // and anything omitted falls back to the .env-or-default set there.
+    //
+    // A hidden *toggle* is the exception, and sends false. Falling back would
+    // read it from a hand-written .env, so an operator with
+    // RIFT_OWN_PROXY=true who picks local testing would be refused for
+    // choosing both when the page is showing them one.
+    const scope = input.closest("[data-only]");
+    if (scope && scope.hidden) {
+      if (input.dataset.kind === "toggle") options[input.name] = false;
+      continue;
+    }
     const raw = input.type === "checkbox" ? "" : input.value.trim();
     // A blank number means "leave the default alone"; sending 0 would be a
     // port choice rather than an absence.
