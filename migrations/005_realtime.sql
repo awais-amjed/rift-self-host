@@ -140,6 +140,49 @@ BEGIN
   RETURN NULL;
 END $$;
 
+-- ---------- a bot's reach changed ----------
+-- The `sweep` event, rung by the database rather than by a client.
+--
+-- A grant is forward-only: it starts the bot at one version past the current
+-- one, and the key for that version does not exist yet. Somebody has to mint
+-- it, and the only somebodies who can are the members who hold the current
+-- one — so until one of their clients runs a sweep, a granted bot reads
+-- nothing at all while the channel has just told the room it reads everything
+-- from now on. A revoke is the same shape: it drops the sealed rows and leaves
+-- the rotation to the sweep, which is what moves the conversation off the key
+-- the bot already unwrapped.
+--
+-- Rung here rather than by the dialog that granted, because `bot_channel_keys`
+-- is written from four places — both RPCs, a channel created under a
+-- server-wide grant, and a channel made private — and the client that did it
+-- is not always one that can do the wrapping. This is the one place all four
+-- pass through.
+--
+-- Per statement, not per row. A server-wide grant is one INSERT covering every
+-- open channel, and `sweep_channel_keys` answers for all of them at once, so
+-- one ring is the whole job — where a row-level trigger would spend a delivery
+-- per channel per member on saying the same thing again.
+--
+-- Empty payload: `sweep` has never carried one. It means "go and look".
+CREATE OR REPLACE FUNCTION app.announce_bot_keys() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RETURN NULL;
+  END IF;
+  -- One server per statement in practice; the DISTINCT is what makes that
+  -- true rather than assumed.
+  FOR v_server IN
+    SELECT DISTINCT c.server_id
+      FROM changed g JOIN channels c ON c.id = g.channel_id
+  LOOP
+    PERFORM realtime.send('{}'::jsonb, 'sweep', 'server:' || v_server, true);
+  END LOOP;
+  RETURN NULL;
+END $$;
+
 CREATE OR REPLACE FUNCTION app.announce_member() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -480,6 +523,18 @@ DROP TRIGGER IF EXISTS channel_members_announce ON channel_members;
 CREATE TRIGGER channel_members_announce
   AFTER INSERT OR UPDATE OR DELETE ON channel_members
   FOR EACH ROW EXECUTE FUNCTION app.announce_channel_member();
+
+DROP TRIGGER IF EXISTS bot_channel_keys_granted ON bot_channel_keys;
+CREATE TRIGGER bot_channel_keys_granted
+  AFTER INSERT ON bot_channel_keys
+  REFERENCING NEW TABLE AS changed
+  FOR EACH STATEMENT EXECUTE FUNCTION app.announce_bot_keys();
+
+DROP TRIGGER IF EXISTS bot_channel_keys_revoked ON bot_channel_keys;
+CREATE TRIGGER bot_channel_keys_revoked
+  AFTER DELETE ON bot_channel_keys
+  REFERENCING OLD TABLE AS changed
+  FOR EACH STATEMENT EXECUTE FUNCTION app.announce_bot_keys();
 
 DROP TRIGGER IF EXISTS soundboard_sounds_announce ON soundboard_sounds;
 CREATE TRIGGER soundboard_sounds_announce
