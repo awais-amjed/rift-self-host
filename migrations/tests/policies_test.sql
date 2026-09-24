@@ -3139,6 +3139,126 @@ END $$;
 SET LOCAL ROLE authenticated;
 
 -- ============================================================
+-- 18b. A page of a channel
+-- ============================================================
+-- `channel_messages` is split in two so the index can be used: a definer
+-- half that answers in ids and checks only that the channel is open to the
+-- caller, and an invoker half that fetches the rows with `messages_select`
+-- in force. The split is only safe if the second half really is still
+-- deciding, so that is what these check — including the case the first half
+-- deliberately does not filter.
+
+-- Written as the superuser with bob's claim set, the way the fixtures at the
+-- top of this file are: `attest_message` still stamps the sender, and an
+-- ephemeral row is one only a bot may insert under the policy.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9210, 'aaaa1111-0000-4000-8000-000000000001', 'page-one',   'n', 's', 1),
+  (9211, 'aaaa1111-0000-4000-8000-000000000001', 'page-two',   'n', 's', 1),
+  (9212, 'aaaa1111-0000-4000-8000-000000000001', 'page-three', 'n', 's', 1);
+-- Alice's, and only carol may see it — so bob, who reads below, is neither
+-- its sender nor its recipient. The id half returns this id to anybody in
+-- the channel; the policy is what stops the row coming back.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version,
+                      ephemeral_for)
+  VALUES (9213, 'aaaa1111-0000-4000-8000-000000000001', 'just-for-carol',
+          'n', 's', 1, '11111111-aaaa-4aaa-8aaa-000000000003');
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+SET LOCAL ROLE authenticated;
+
+DO $$
+DECLARE v_ids BIGINT[];
+BEGIN
+  -- Newest first, and it really is the newest: other sections of this file
+  -- write to this channel too, and the sequence was pushed past the
+  -- hand-numbered fixtures at the top, so this asks what the channel's own
+  -- newest is rather than assuming it is one of these three.
+  SELECT array_agg(id) INTO v_ids
+    FROM channel_messages('aaaa1111-0000-4000-8000-000000000001', p_limit => 4);
+  IF v_ids IS NULL OR cardinality(v_ids) = 0 THEN
+    RAISE EXCEPTION 'FAIL: the newest page was empty';
+  END IF;
+  IF v_ids[1] <> (SELECT max(m.id) FROM messages m
+                   WHERE m.channel_id = 'aaaa1111-0000-4000-8000-000000000001'
+                     AND m.ephemeral_for IS NULL) THEN
+    RAISE EXCEPTION 'FAIL: the newest page did not start at the newest message';
+  END IF;
+  IF cardinality(v_ids) > 1 AND v_ids[1] < v_ids[2] THEN
+    RAISE EXCEPTION 'FAIL: the newest page came back oldest first';
+  END IF;
+
+  -- Paging: everything before 9212, and 9212 itself is not in it.
+  SELECT array_agg(id) INTO v_ids
+    FROM channel_messages('aaaa1111-0000-4000-8000-000000000001', p_before => 9212);
+  IF 9212 = ANY(v_ids) THEN
+    RAISE EXCEPTION 'FAIL: p_before returned the row it was told to stop at';
+  END IF;
+  IF NOT (9211 = ANY(v_ids)) THEN
+    RAISE EXCEPTION 'FAIL: p_before skipped the row before it';
+  END IF;
+
+  -- Catching up: only what arrived after, oldest first, because that is the
+  -- order a client appends in.
+  SELECT array_agg(id ORDER BY id) INTO v_ids
+    FROM channel_messages('aaaa1111-0000-4000-8000-000000000001', p_after => 9210);
+  IF 9210 = ANY(v_ids) OR NOT (9211 = ANY(v_ids)) THEN
+    RAISE EXCEPTION 'FAIL: p_after returned the wrong side of the cursor';
+  END IF;
+  IF (SELECT id FROM channel_messages('aaaa1111-0000-4000-8000-000000000001',
+                                      p_after => 9210) LIMIT 1) <> 9211 THEN
+    RAISE EXCEPTION 'FAIL: catching up came back newest first';
+  END IF;
+
+  RAISE NOTICE 'ok  a page of a channel, in both directions';
+END $$;
+
+-- The one the split exists to get right: bob is in the channel, so the id
+-- half hands out 9213's id, and `messages_select` is what keeps the row.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM channel_messages(
+                         'aaaa1111-0000-4000-8000-000000000001', p_limit => 50)
+              WHERE id = 9213) THEN
+    RAISE EXCEPTION 'FAIL: an ephemeral message for somebody else came back';
+  END IF;
+  -- And it is not that the id was withheld: the definer half names it.
+  IF NOT (9213 = ANY(ARRAY(SELECT app.channel_page_ids(
+            'aaaa1111-0000-4000-8000-000000000001', NULL, NULL, 50)))) THEN
+    RAISE EXCEPTION 'FAIL: the id half is filtering, so this proves nothing';
+  END IF;
+  RAISE NOTICE 'ok  the policy still decides, one row at a time';
+END $$;
+
+-- And its own gate: a channel you cannot open answers with nothing, in
+-- either half. Dana is in the server and outside the private room.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000a1","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM channel_messages(
+                         'aaaa1111-0000-4000-8000-0000000000a0', p_limit => 50)) THEN
+    RAISE EXCEPTION 'FAIL: an outsider read a private channel''s page';
+  END IF;
+  IF EXISTS (SELECT 1 FROM app.channel_page_ids(
+                         'aaaa1111-0000-4000-8000-0000000000a0', NULL, NULL, 50)) THEN
+    RAISE EXCEPTION 'FAIL: an outsider read a private channel''s message ids';
+  END IF;
+  RAISE NOTICE 'ok  a channel you cannot open has no page, and no ids either';
+END $$;
+
+RESET ROLE;
+DELETE FROM messages WHERE id IN (9210, 9211, 9212, 9213);
+SET LOCAL ROLE authenticated;
+
+-- ============================================================
 -- 19. What a granted bot actually reads (035)
 -- ============================================================
 -- 017 built the key half of the moderation grant and it was correct. It never

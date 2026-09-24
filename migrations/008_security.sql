@@ -651,6 +651,18 @@ REVOKE ALL ON FUNCTION message_reaction_tallies(read_scope, BIGINT[]) FROM PUBLI
 
 GRANT EXECUTE ON FUNCTION message_reaction_tallies(read_scope, BIGINT[]) TO authenticated;
 
+REVOKE ALL ON FUNCTION channel_messages(UUID, BIGINT, BIGINT, INTEGER) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION channel_messages(UUID, BIGINT, BIGINT, INTEGER) TO authenticated;
+
+-- The definer half, which `channel_messages` calls and nothing else should.
+-- It answers in ids and it answers for a channel it has decided the caller
+-- may open, so it is not dangerous to hold — but it is also not an endpoint,
+-- and `app` is not a schema PostgREST exposes. Granted because a SECURITY
+-- DEFINER function still needs its caller to hold EXECUTE.
+GRANT EXECUTE ON FUNCTION app.channel_page_ids(UUID, BIGINT, BIGINT, INTEGER)
+  TO authenticated;
+
 REVOKE ALL ON FUNCTION dm_conversations(INTEGER, BIGINT) FROM PUBLIC;
 
 -- Not reachable over the API by anybody. Both endpoints that touch it hold the

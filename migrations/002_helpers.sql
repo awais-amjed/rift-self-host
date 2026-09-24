@@ -912,6 +912,84 @@ COMMENT ON FUNCTION app.server_roles() IS
   'The roles of the caller''s server, as one array.';
 
 -- ============================================================
+-- 3b. One page of a channel, as ids
+-- ============================================================
+-- The same trap `app.unread_thresholds` fell into, in the read everybody
+-- makes most: `WHERE channel_id = … ORDER BY id DESC LIMIT 51`.
+--
+-- Messages from every channel share one table and one sequence, so the
+-- primary key is already in `id` order and can serve that sort on its own —
+-- walk ids downwards from the newest message on the server and discard
+-- everything belonging to another channel. The planner prices that at 255
+-- rows, because it assumes `channel_id` is spread evenly through the id
+-- range. It is not: ids are handed out in arrival order, so a channel's
+-- messages sit where that channel was last busy. Opening a channel that is
+-- not the server's most recent writer — `#rules`, `#announcements`, every
+-- channel a community has stopped using — crossed four million rows and took
+-- 4.4 seconds on 5,000,000 messages. `idx_messages_channel (channel_id, id)`
+-- answers it in 0.17 ms and was never touched, and no amount of ANALYZE
+-- changes that: there is no statistic that says "this column's values are
+-- clustered against the table's own ordering".
+--
+-- What tips the choice is asking for **ids and nothing else**. Then the
+-- index holds the whole answer, the scan is index-only, and its cost (3.24)
+-- comes in under the primary key's estimate (22.52). Ask for `ciphertext`
+-- in the same breath — or let a policy ask for `ephemeral_for` — and every
+-- row needs the heap, the estimate goes back over, and so does the plan.
+--
+-- Which is why this is SECURITY DEFINER and returns ids: under RLS the
+-- policy's own columns would be fetched here and the fix would undo itself.
+-- `channel_messages` in 003 does the visible half, joining these ids back to
+-- `messages` by primary key with the policy in force. So the only thing this
+-- function decides is whether you may open the channel at all — the same
+-- question `messages_select` asks first — and the only thing it discloses
+-- beyond what that policy would is that an id exists: an ephemeral bot reply
+-- to somebody else, a button press of theirs. Never a row, never a byte of
+-- one, and only inside a channel the caller is already in.
+--
+-- Deliberately not a copy of `messages_select`'s other three clauses. Two
+-- statements of one access rule drift, and the direction they drift in is
+-- silent over-exposure; a page that comes back short because the policy
+-- dropped a row from it is a page that comes back short.
+CREATE OR REPLACE FUNCTION app.channel_page_ids(
+  p_channel UUID,
+  p_before  BIGINT,
+  p_after   BIGINT,
+  p_limit   INTEGER
+) RETURNS SETOF BIGINT
+  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  -- Asked once, not per row, and it is the whole of the access check.
+  -- An outsider gets no rows, which is what the policy gives them too.
+  IF NOT app.can_see_channel(p_channel) THEN RETURN; END IF;
+
+  -- Branched rather than `p_before IS NULL OR x.id < p_before`, for the
+  -- reason the member pages are branched: a disjunction is never an index
+  -- condition, and the index is the entire point of this function.
+  IF p_after IS NOT NULL THEN
+    RETURN QUERY
+    SELECT x.id FROM messages x
+     WHERE x.channel_id = p_channel AND x.id > p_after
+     ORDER BY x.id LIMIT p_limit;
+  ELSIF p_before IS NOT NULL THEN
+    RETURN QUERY
+    SELECT x.id FROM messages x
+     WHERE x.channel_id = p_channel AND x.id < p_before
+     ORDER BY x.id DESC LIMIT p_limit;
+  ELSE
+    RETURN QUERY
+    SELECT x.id FROM messages x
+     WHERE x.channel_id = p_channel
+     ORDER BY x.id DESC LIMIT p_limit;
+  END IF;
+END $$;
+
+COMMENT ON FUNCTION app.channel_page_ids(UUID, BIGINT, BIGINT, INTEGER) IS
+  'One page of a channel''s message ids, newest first, or oldest first when '
+  'p_after is given. Nothing but ids, so the read stays on '
+  'idx_messages_channel; `channel_messages` turns them into rows under RLS.';
+
+-- ============================================================
 -- 4. Telling anyone how full it is
 -- ============================================================
 -- Not a secret, and useful before it matters: a composer can say the server

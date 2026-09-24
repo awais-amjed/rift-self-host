@@ -272,7 +272,8 @@ silent re-login still triggers.
 
 | Was | Now |
 |---|---|
-| `list_messages`, `list_dms` | `select` with the sender embedded (`users!messages_sender_id_fkey`) |
+| `list_messages` | `channel_messages(p_channel, p_before, p_after, p_limit)`, with the sender embedded (`users!messages_sender_id_fkey`). It was a plain `select` until load testing found that `channel_id=eq.…&order=id.desc&limit=51` is answered by walking the **primary key** — every channel shares one table and one sequence, so opening a channel that had gone quiet crossed every message written anywhere on the server since. 4.4 s against 5,000,000 messages, 1.5 ms through the RPC. It takes the page as ids off `idx_messages_channel` (`app.channel_page_ids`, SECURITY DEFINER, which checks only that the channel is open to you) and fetches the rows by key under `messages_select`, so a page can come back shorter than it asked for |
+| `list_dms` | `select` with the sender embedded. Not affected: a DM page is found by `LEAST/GREATEST(sender_id, recipient_id)`, which the primary key cannot serve, so the pair index is the only candidate |
 | `send_message`, `send_dm` | `insert`; a BEFORE trigger stamps `sender_id = auth.uid()` and `created_at`, so a client can't post as someone else or backdate |
 | `edit_message`, `edit_dm`, `delete_message`, `delete_dm` | `update`/`delete` scoped by policy; the column grant limits an edit to the envelope |
 | `list_users`, `get_server_details` | `select` on `users` / `servers` / `channels`, all scoped to your server |

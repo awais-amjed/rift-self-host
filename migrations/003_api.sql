@@ -1008,6 +1008,59 @@ COMMENT ON FUNCTION members_by_usernames(TEXT[], UUID) IS
 -- free. What moves here is only the standalone read — the one that asks about a
 -- page of messages at once and so was the one that overflowed.
 
+-- ============================================================
+-- A page of a channel
+-- ============================================================
+-- What the chat list reads, and the one call this schema makes that a client
+-- cannot make for itself.
+--
+-- `from('messages').eq('channel_id', …).order('id', desc).limit(51)` is the
+-- obvious shape and it is a trap — see `app.channel_page_ids` for why the
+-- planner walks the primary key instead of the index built for exactly this,
+-- and why opening a channel that had gone quiet cost 4.4 seconds against
+-- 5,000,000 messages. The page has to be taken as ids first, which is not
+-- something PostgREST can express, so it is taken here.
+--
+-- SECURITY INVOKER, and that is the whole division of labour: the definer
+-- half decides only whether the channel is open to the caller, and every row
+-- it names is then fetched by primary key with `messages_select` in force —
+-- ephemeral replies, button presses, a bot's key version, all of it decided
+-- where it has always been decided. A page may therefore come back shorter
+-- than `p_limit` because the policy dropped a row from it. That is correct
+-- and the client already copes: `has_more` is read from the id count, and
+-- the next page is asked for from the oldest id actually returned.
+CREATE OR REPLACE FUNCTION channel_messages(
+  p_channel UUID,
+  p_before  BIGINT  DEFAULT NULL,
+  p_after   BIGINT  DEFAULT NULL,
+  p_limit   INTEGER DEFAULT 51
+) RETURNS SETOF messages
+  LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = public AS $$
+DECLARE
+  -- One page, plus the row that proves there is another. The ceiling is the
+  -- same clamp the member pages use and for the same reason: a client asking
+  -- for five thousand has a bug, and failing its request turns that bug into
+  -- an empty channel.
+  v_limit INTEGER := LEAST(GREATEST(COALESCE(p_limit, 51), 1), 101);
+BEGIN
+  IF p_after IS NOT NULL THEN
+    RETURN QUERY
+    SELECT m.* FROM app.channel_page_ids(p_channel, NULL, p_after, v_limit) AS p(id)
+      JOIN messages m ON m.id = p.id
+     ORDER BY m.id;
+  ELSE
+    RETURN QUERY
+    SELECT m.* FROM app.channel_page_ids(p_channel, p_before, NULL, v_limit) AS p(id)
+      JOIN messages m ON m.id = p.id
+     ORDER BY m.id DESC;
+  END IF;
+END $$;
+
+COMMENT ON FUNCTION channel_messages(UUID, BIGINT, BIGINT, INTEGER) IS
+  'One page of a channel, newest first — or oldest first from p_after, which '
+  'is how a client catches up after a reconnect. Rows are still subject to '
+  'messages_select, so a page can be shorter than it asked for.';
+
 CREATE OR REPLACE FUNCTION message_reaction_tallies(
   p_scope read_scope,
   p_ids   BIGINT[]
