@@ -53,6 +53,14 @@ CREATE TABLE IF NOT EXISTS storage.objects (
   last_accessed_at TIMESTAMPTZ DEFAULT now(), path_tokens TEXT[], version TEXT,
   user_metadata JSONB, level INT
 );
+-- Storage's own index, and the collation is the point: `(bucket_id, name
+-- COLLATE "C")` is what makes a prefix range on a folder an index scan, and
+-- the avatar ceiling in 006 is written against it. Without it here the suite
+-- would pass on a sequential scan and say nothing about the shape production
+-- actually runs.
+CREATE INDEX IF NOT EXISTS idx_objects_bucket_id_name
+  ON storage.objects (bucket_id, name COLLATE "C");
+
 CREATE OR REPLACE FUNCTION storage.foldername(name TEXT) RETURNS TEXT[]
   LANGUAGE plpgsql AS $shim$
 DECLARE parts TEXT[]; BEGIN parts := string_to_array(name, '/');

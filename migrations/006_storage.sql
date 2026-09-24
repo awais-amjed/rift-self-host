@@ -178,24 +178,36 @@ BEGIN
   -- noticed. The sweep in 007 now collects every avatar nobody's row names;
   -- this is what bounds the pile between two runs of it.
   IF NEW.bucket_id = 'avatars' THEN
-    -- `split_part`, not `storage.foldername`, and only because one of them
-    -- can be indexed. `foldername` is a plpgsql function returning an array,
-    -- so a predicate built on it is evaluated for every object in the bucket
-    -- — this count was a scan of the whole `avatars` bucket, per upload:
-    -- 44 ms on a 50,000-member server where everybody has a picture, and
-    -- growing with the pile it exists to bound. `split_part` is immutable and
-    -- built in, so `objects_avatar_owner` below answers it directly (0.04 ms).
+    -- A prefix range on `name`, not `(storage.foldername(o.name))[1] =
+    -- v_owner`. `foldername` is a plpgsql function returning an array, so a
+    -- predicate built on it is evaluated for every object in the bucket: this
+    -- count was a scan of the whole `avatars` bucket, per upload — 44 ms on a
+    -- 50,000-member server where everybody has a picture, and growing with
+    -- the pile it exists to bound.
     --
-    -- The two agree. `foldername('uid/abc')[1]` is 'uid' and so is
-    -- `split_part('uid/abc', '/', 1)`; on a name with no slash at all
-    -- `foldername` yields an empty array and therefore NULL, which is what
-    -- the NULLIF reproduces — split_part would otherwise hand back the whole
-    -- name and call it a folder.
+    -- Written as a range it is answered by Storage's own
+    -- `idx_objects_bucket_id_name`, which is `(bucket_id, name COLLATE "C")`.
+    -- The collation is why this works and why it is spelled out: under C the
+    -- ordering is byte order, so everything under `uid/` is exactly the range
+    -- `>= 'uid/'` to `< 'uid0'` — '0' is 0x30 and '/' is 0x2F, with nothing
+    -- in between. 44 ms → 0.06 ms, and no index of our own.
+    --
+    -- An index on `split_part(name, '/', 1)` would have been tidier and
+    -- cannot be created: `storage.objects` belongs to `supabase_storage_admin`
+    -- and CREATE INDEX needs ownership, which `postgres` does not have on a
+    -- real Supabase and does have in this suite's stand-in. That is a
+    -- difference the tests cannot see, so it is written down here.
+    --
+    -- `v_owner` is the folder, by the same rule `foldername` uses: the part
+    -- before the first slash, or nothing at all when there is no slash —
+    -- which is what the NULLIF reproduces, since `split_part` would otherwise
+    -- hand back the whole name and call it a folder.
     v_owner := NULLIF(split_part(NEW.name, '/', 1), NEW.name);
     IF v_owner IS NOT NULL
        AND (SELECT count(*) FROM storage.objects o
              WHERE o.bucket_id = 'avatars'
-               AND split_part(o.name, '/', 1) = v_owner)
+               AND o.name COLLATE "C" >= v_owner || '/'
+               AND o.name COLLATE "C" <  v_owner || '0')
            >= app.avatars_per_member() THEN
       RAISE EXCEPTION
         'Too many avatars stored for this account — the old ones are cleared up shortly'
@@ -346,9 +358,3 @@ DROP TRIGGER IF EXISTS rift_enforce_storage_cap ON storage.objects;
 CREATE TRIGGER rift_enforce_storage_cap
   BEFORE INSERT ON storage.objects
   FOR EACH ROW EXECUTE FUNCTION app.enforce_storage_cap();
-
--- What makes the avatar ceiling above cost a lookup instead of a scan. The
--- bucket is in the key because the question is never asked without one, and
--- because every other bucket's objects are then not in this index at all.
-CREATE INDEX IF NOT EXISTS objects_avatar_owner
-  ON storage.objects (bucket_id, split_part(name, '/', 1));
