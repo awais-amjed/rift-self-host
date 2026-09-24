@@ -229,9 +229,28 @@ The console's own checks:
 
 ```bash
 cd console
-deno test --allow-read --allow-write --allow-env --allow-run=psql
-deno lint && deno fmt --check
+deno task test     # 145 cases, no Docker or Postgres needed
+deno task check    # type check, lint, fmt --check
 ```
+
+Both type check against whatever Deno is installed locally, and the image pins
+`denoland/deno:alpine-2.1.4`. A newer local Deno reports three `Uint8Array is
+not assignable to BufferSource` errors in `backup/seal.ts` and fails both
+tasks: TypeScript 5.7 made `Uint8Array` generic over its buffer, and
+WebCrypto's `BufferSource` wants the non-shared one. Annotating them
+`Uint8Array<ArrayBuffer>` would fix the local check and break the pinned one,
+where the type takes no argument — so the fix is to bump the image, not the
+source. Until then, append `--no-check` to run the cases themselves:
+
+```bash
+deno test --allow-env --allow-read --allow-write --allow-run=psql --no-check
+```
+
+**Nothing in `style.ts` or any other page module may contain a backtick.** Each
+is a single template literal from its first line to its last, so a backtick
+inside one — in a CSS comment, in prose, quoting a selector — closes it early
+and the module stops parsing. `page_test.ts` catches it the moment it is run,
+because it imports every page.
 
 `templates/` is excluded from `fmt` and `lint`, and that exclusion is
 load-bearing rather than cosmetic — `deno fmt` reads the YAML there and rewrites
