@@ -838,6 +838,56 @@ CREATE TRIGGER dm_messages_ring AFTER INSERT ON dm_messages
 -- ============================================================
 -- The soundboard's three rules
 -- ============================================================
+-- The default LiveKit node follows servers.livekit_url
+-- ============================================================
+-- `livekit_nodes` is what a channel picks from; `servers.livekit_url` is what
+-- everything written before regions still reads, including the client's own
+-- fallback and the console's local-testing switch. Rather than pick a winner
+-- and rewrite the other half of the stack, one row is declared to *be* that
+-- column and kept equal to it.
+--
+-- So: a server always has at least one node, its label starts as 'Default'
+-- and the operator may rename it to somewhere real, and pointing
+-- `servers.livekit_url` somewhere else moves that node with it.
+
+CREATE OR REPLACE FUNCTION mirror_default_livekit_node()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  -- Rename is the operator's; the address is the column's. An UPDATE that
+  -- did not touch the URL has nothing to mirror.
+  IF TG_OP = 'UPDATE' AND NEW.livekit_url IS NOT DISTINCT FROM OLD.livekit_url THEN
+    RETURN NEW;
+  END IF;
+
+  UPDATE livekit_nodes
+     SET url = NEW.livekit_url
+   WHERE server_id = NEW.id AND is_default;
+
+  IF NOT FOUND THEN
+    INSERT INTO livekit_nodes (server_id, label, url, is_default)
+    VALUES (NEW.id, 'Default', NEW.livekit_url, true);
+  END IF;
+
+  RETURN NEW;
+END; $$;
+
+-- The other direction is refused rather than mirrored. Deleting this row
+-- would leave `servers.livekit_url` naming a node that is not in the list, so
+-- a channel could be sent to an address nothing offers; renaming is how an
+-- operator makes it read as a place.
+CREATE OR REPLACE FUNCTION refuse_default_node_delete()
+  RETURNS TRIGGER LANGUAGE plpgsql
+  SET search_path = public AS $$
+BEGIN
+  -- Unless the server is going too, in which case the cascade is the point.
+  IF EXISTS (SELECT 1 FROM servers s WHERE s.id = OLD.server_id) THEN
+    RAISE EXCEPTION 'default_node_undeletable';
+  END IF;
+  RETURN OLD;
+END; $$;
+
+-- ============================================================
 -- Whose clip it is, a ceiling, and no blob left behind.
 --
 -- The ceiling is a trigger rather than a check in the RPC that inserts,
@@ -894,6 +944,14 @@ END; $$;
 DROP TRIGGER IF EXISTS messages_ring ON messages;
 CREATE TRIGGER messages_ring AFTER INSERT ON messages
   FOR EACH ROW EXECUTE FUNCTION ring_channel_members();
+
+DROP TRIGGER IF EXISTS servers_mirror_default_node ON servers;
+CREATE TRIGGER servers_mirror_default_node AFTER INSERT OR UPDATE ON servers
+  FOR EACH ROW EXECUTE FUNCTION mirror_default_livekit_node();
+
+DROP TRIGGER IF EXISTS livekit_nodes_protect_default ON livekit_nodes;
+CREATE TRIGGER livekit_nodes_protect_default BEFORE DELETE ON livekit_nodes
+  FOR EACH ROW WHEN (OLD.is_default) EXECUTE FUNCTION refuse_default_node_delete();
 
 DROP TRIGGER IF EXISTS notification_prefs_stamp ON notification_prefs;
 CREATE TRIGGER notification_prefs_stamp BEFORE INSERT OR UPDATE ON notification_prefs

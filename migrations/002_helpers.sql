@@ -1258,3 +1258,81 @@ COMMENT ON VIEW member_directory IS
 COMMENT ON VIEW member_role_list IS
   'Which roles each member holds. `is_owner` marks the one role held by '
   'exactly one person (013).';
+
+-- ============================================================
+-- Which LiveKit a call goes on
+-- ============================================================
+-- A room lives on exactly one node — LiveKit's open-source server binds it
+-- there and cross-node media is a Cloud feature — so this is never "each
+-- person connects nearby". It is one decision, made once, when the room is
+-- created, and everybody who joins afterwards goes where it already is.
+--
+-- The order is: where the call already is, then what the channel is pinned
+-- to, then what the caller measured, then the default. Each step is a weaker
+-- claim than the one above it, and the first is absolute because a live room
+-- cannot be moved.
+
+CREATE OR REPLACE FUNCTION app.claim_voice_node(
+  p_channel   UUID,
+  p_preferred UUID DEFAULT NULL
+) RETURNS TABLE (id UUID, url TEXT, label TEXT)
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
+  v_node   UUID;
+BEGIN
+  SELECT c.server_id, c.livekit_node_id INTO v_server, v_node
+    FROM channels c WHERE c.id = p_channel;
+
+  IF v_server IS NULL THEN RETURN; END IF;
+
+  -- What the caller measured, but only if it is really one of ours. The id
+  -- arrives from a client, so it is a suggestion until this says otherwise.
+  IF v_node IS NULL AND p_preferred IS NOT NULL THEN
+    SELECT n.id INTO v_node FROM livekit_nodes n
+     WHERE n.id = p_preferred AND n.server_id = v_server;
+  END IF;
+
+  IF v_node IS NULL THEN
+    SELECT n.id INTO v_node FROM livekit_nodes n
+     WHERE n.server_id = v_server AND n.is_default;
+  END IF;
+
+  IF v_node IS NULL THEN RETURN; END IF;
+
+  -- First one in decides, and the conflict clause is the whole reason this is
+  -- one statement rather than a read and a write: two people opening the same
+  -- call in the same moment must not open it twice in two regions. The loser
+  -- of the race reads the winner's row below and joins them.
+  INSERT INTO voice_rooms (channel_id, node_id) VALUES (p_channel, v_node)
+    ON CONFLICT (channel_id) DO NOTHING;
+
+  RETURN QUERY
+  SELECT n.id, n.url, n.label
+    FROM voice_rooms vr
+    JOIN livekit_nodes n ON n.id = vr.node_id
+   WHERE vr.channel_id = p_channel;
+END $$;
+
+COMMENT ON FUNCTION app.claim_voice_node(UUID, UUID) IS
+  'Where this channel''s call is, creating that answer if there is not one '
+  'yet. Idempotent: everybody after the first gets what the first decided.';
+
+-- The other half. Until this runs the channel keeps the node it was last
+-- called on, and "automatic" would decide once in the channel's lifetime
+-- rather than once per call.
+--
+-- Called by `voice_roster`, which is already asking every node who is in each
+-- room and is therefore the only thing that finds out a call has ended. A row
+-- left behind is not a broken call — it sends the next caller to a node with
+-- no such room, and LiveKit makes one — so this is allowed to be late.
+CREATE OR REPLACE FUNCTION app.release_voice_node(p_channels UUID[])
+  RETURNS VOID
+  LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+  DELETE FROM voice_rooms
+   WHERE channel_id = ANY (COALESCE(p_channels, ARRAY[]::UUID[]));
+$$;
+
+COMMENT ON FUNCTION app.release_voice_node(UUID[]) IS
+  'Forget where these channels'' calls were, because they have ended. The '
+  'next call on them is decided afresh.';

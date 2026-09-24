@@ -253,6 +253,60 @@ CREATE TABLE IF NOT EXISTS server_secrets (
 );
 
 -- ============================================================
+-- Where voice runs
+-- ============================================================
+-- A server may have more than one LiveKit, so that a call is held near the
+-- people in it rather than near the database. Each row is one node, with a
+-- label the operator writes — "Frankfurt", "Singapore" — because only they
+-- know what their box is for.
+--
+-- **A room lives on exactly one node, and that is LiveKit's rule, not ours.**
+-- The open-source server binds a room to a single node; cross-node media is
+-- LiveKit Cloud's distributed mesh. So this is never "each person connects to
+-- their nearest": it is "the call is created on one of these, and everybody
+-- goes there". What multiple nodes buy is a better choice of *where*, and a
+-- server whose members are mostly in one place gets a call near them.
+--
+-- **Every node on a server shares that server's LiveKit key pair**
+-- (`server_secrets`). A LiveKit key is a line in each node's own
+-- `livekit.yaml`, written by the same operator who is adding the node here,
+-- so making them match is a setup instruction rather than a constraint that
+-- costs anything — and it keeps one secret per server instead of one per box.
+--
+-- The row mirroring `servers.livekit_url` is marked `is_default` and is kept
+-- in step with that column by a trigger in 004: it is the same address under
+-- two names, and every part of the stack that predates regions still reads
+-- the column.
+CREATE TABLE IF NOT EXISTS livekit_nodes (
+  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  server_id  UUID        NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+
+  -- What a channel manager picks from. Shown to members as the region a call
+  -- is in, so it is a place rather than a hostname.
+  label      TEXT        NOT NULL CHECK (length(btrim(label)) BETWEEN 1 AND 40),
+
+  -- `wss://` or `ws://`, the address a client connects to. Must be reachable
+  -- from the functions container as well, which is what mints against it.
+  url        TEXT        NOT NULL CHECK (url ~ '^wss?://[^ ]+$'),
+
+  -- The mirror of `servers.livekit_url`. Exactly one per server, maintained
+  -- by trigger; it cannot be deleted while the column exists.
+  is_default BOOLEAN     NOT NULL DEFAULT false,
+
+  UNIQUE (server_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS livekit_nodes_server ON livekit_nodes (server_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS livekit_nodes_one_default
+  ON livekit_nodes (server_id) WHERE is_default;
+
+COMMENT ON TABLE livekit_nodes IS
+  'The LiveKit servers a Rift server may hold a call on. A call lives on one '
+  'of them; see voice_rooms for which.';
+
+-- ============================================================
 -- Members
 -- ============================================================
 -- `users.id` IS the GoTrue uid, so every ownership rule anywhere in this
@@ -529,6 +583,16 @@ CREATE TABLE IF NOT EXISTS channels (
   history_cap    INTEGER,
   is_private   BOOLEAN      NOT NULL DEFAULT false,
   rotate_from_key_version INTEGER,
+
+  -- Which LiveKit a call here is held on. NULL is "automatic" — decide from
+  -- whoever opens the call, see `voice_rooms`. Set is the manager pinning it,
+  -- the way Discord's region override does, because automatic picking is a
+  -- guess and somebody occasionally knows better.
+  --
+  -- ON DELETE SET NULL: removing a node returns its channels to automatic
+  -- rather than leaving them pointing at nothing.
+  livekit_node_id UUID REFERENCES livekit_nodes(id) ON DELETE SET NULL,
+
   UNIQUE (server_id, name),
   CONSTRAINT channels_limits_sane CHECK (
     (retention_days IS NULL OR retention_days >= 0)
@@ -547,6 +611,10 @@ COMMENT ON COLUMN channels.history_cap IS
 COMMENT ON COLUMN channels.is_private IS
   'Visible only to channel_members and holders of a channel_role_access role. '
   'No admin override: an admin holds no key either way.';
+
+COMMENT ON COLUMN channels.livekit_node_id IS
+  'Pin voice here to one LiveKit node. NULL picks automatically from the '
+  'first person to open a call; see voice_rooms.';
 
 COMMENT ON COLUMN channels.rotate_from_key_version IS
   'Set when a channel opens up: the sweep must rotate past this version before '
@@ -590,6 +658,37 @@ CREATE TABLE IF NOT EXISTS channel_role_access (
 );
 
 CREATE INDEX IF NOT EXISTS channel_role_access_role ON channel_role_access (role_id);
+
+-- ============================================================
+-- Which node a live call is on
+-- ============================================================
+-- One row per channel that has a call up, naming the node its room was
+-- created on. This is the *answer*, where `channels.livekit_node_id` is the
+-- *preference*: a room cannot move once it exists, so the second person to
+-- join goes where the first one's room already is, whatever has been
+-- configured since.
+--
+-- Written by `get_channel_token` when it creates the room, and cleared when
+-- the call empties — `voice_roster` does it, because it is already asking
+-- every node who is in each room and is therefore the one thing that finds
+-- out. Without the clear, a channel would keep its first-ever node forever
+-- and "automatic" would only ever decide once.
+--
+-- A stale row is harmless in the direction that matters: it sends people to a
+-- node that has no such room, and LiveKit creates it there. It only costs a
+-- worse choice, never a broken call, which is why this is allowed to be
+-- eventually-consistent rather than transactional with LiveKit.
+CREATE TABLE IF NOT EXISTS voice_rooms (
+  channel_id UUID        PRIMARY KEY REFERENCES channels(id)      ON DELETE CASCADE,
+  node_id    UUID        NOT NULL    REFERENCES livekit_nodes(id) ON DELETE CASCADE,
+  opened_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS voice_rooms_node ON voice_rooms (node_id);
+
+COMMENT ON TABLE voice_rooms IS
+  'Where each live call actually is. The preference is channels.livekit_node_id; '
+  'this is what was decided when the room was created.';
 
 -- ============================================================
 -- Invites

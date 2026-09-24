@@ -44,6 +44,17 @@ GRANT UPDATE (display_name, chat_public_key, avatar_path) ON users TO authentica
 
 GRANT SELECT, INSERT, DELETE       ON channels TO authenticated;
 
+-- Everybody reads the node list: a member is told which region their call is
+-- in, and offers the nearest one when they are the first to open it. Only an
+-- admin changes it — the addresses are infrastructure, not channel settings.
+GRANT SELECT, INSERT, UPDATE, DELETE ON livekit_nodes TO authenticated;
+
+-- Read-only to everyone, and written by nobody here: `get_channel_token` sets
+-- it on the service role when it creates a room, and `voice_roster` clears it.
+-- A member who could write this could send the next caller to a node of their
+-- choosing.
+GRANT SELECT ON voice_rooms TO authenticated;
+
 GRANT SELECT, INSERT, DELETE       ON invites  TO authenticated;
 
 GRANT SELECT, INSERT, DELETE       ON messages TO authenticated;
@@ -141,7 +152,17 @@ GRANT EXECUTE ON FUNCTION moderate_user(UUID, BOOLEAN, BOOLEAN, BOOLEAN) TO auth
 -- Additive to the UPDATE (name) grant above. Who may write is still decided by
 -- `channels_update_managers`; this only widens which columns their UPDATE may
 -- name.
-GRANT UPDATE (retention_days, history_cap) ON channels TO authenticated;
+GRANT UPDATE (retention_days, history_cap, livekit_node_id) ON channels TO authenticated;
+
+-- Both are the service role's: `get_channel_token` claims a node when it
+-- creates a room, `voice_roster` releases it when the call has ended. A
+-- member who could call either would choose where everybody else's call is
+-- held, or move it out from under them.
+REVOKE ALL ON FUNCTION app.claim_voice_node(UUID, UUID)
+  FROM PUBLIC, anon, authenticated;
+
+REVOKE ALL ON FUNCTION app.release_voice_node(UUID[])
+  FROM PUBLIC, anon, authenticated;
 
 REVOKE ALL ON FUNCTION app.sync_server_bucket(UUID, BIGINT)
   FROM PUBLIC, anon, authenticated;
@@ -342,6 +363,37 @@ CREATE POLICY channels_update_managers ON channels FOR UPDATE TO authenticated
 DROP POLICY IF EXISTS channels_delete_managers ON channels;
 CREATE POLICY channels_delete_managers ON channels FOR DELETE TO authenticated
   USING (app.can_manage_channel(id));
+
+-- ---------- where voice runs ----------
+-- The list is server metadata, like the name and the icon: visible to any
+-- member, writable by an admin. It carries no secret — every node on a server
+-- authenticates with that server's one LiveKit key pair, which lives in
+-- `server_secrets` and is not reachable from here.
+
+DROP POLICY IF EXISTS livekit_nodes_read ON livekit_nodes;
+CREATE POLICY livekit_nodes_read ON livekit_nodes FOR SELECT TO authenticated
+  USING (server_id = app.server_id());
+
+DROP POLICY IF EXISTS livekit_nodes_write_admins ON livekit_nodes;
+CREATE POLICY livekit_nodes_write_admins ON livekit_nodes FOR INSERT TO authenticated
+  WITH CHECK (server_id = app.server_id() AND app.is_admin());
+
+DROP POLICY IF EXISTS livekit_nodes_update_admins ON livekit_nodes;
+CREATE POLICY livekit_nodes_update_admins ON livekit_nodes FOR UPDATE TO authenticated
+  USING (server_id = app.server_id() AND app.is_admin())
+  WITH CHECK (server_id = app.server_id() AND app.is_admin());
+
+-- The default node is refused by a trigger in 004 rather than here, so that
+-- the refusal says why.
+DROP POLICY IF EXISTS livekit_nodes_delete_admins ON livekit_nodes;
+CREATE POLICY livekit_nodes_delete_admins ON livekit_nodes FOR DELETE TO authenticated
+  USING (server_id = app.server_id() AND app.is_admin());
+
+-- Where a call is, for a channel the caller can see. No write policy at all:
+-- the grant above is SELECT only.
+DROP POLICY IF EXISTS voice_rooms_read ON voice_rooms;
+CREATE POLICY voice_rooms_read ON voice_rooms FOR SELECT TO authenticated
+  USING (app.can_see_channel(channel_id));
 
 DROP POLICY IF EXISTS messages_update_own ON messages;
 CREATE POLICY messages_update_own ON messages FOR UPDATE TO authenticated
@@ -901,6 +953,10 @@ ALTER TABLE server_secrets       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users                ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE channels             ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE livekit_nodes        ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE voice_rooms          ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE invites              ENABLE ROW LEVEL SECURITY;
 

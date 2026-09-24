@@ -5415,6 +5415,233 @@ UPDATE users SET avatar_path = NULL;
 DELETE FROM soundboard_sounds;
 
 -- ============================================================
+-- 18c. Where a call is held
+-- ============================================================
+-- A server's LiveKit nodes, who may change them, and the rule that a room
+-- cannot move once it exists.
+
+-- The mirror first: every server got a default node from its `livekit_url`,
+-- without anybody inserting one.
+RESET ROLE;
+DO $$
+DECLARE
+  v_url   TEXT;
+  v_count INTEGER;
+BEGIN
+  SELECT count(*) INTO v_count FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'FAIL: Alpha has % default nodes, wanted 1', v_count;
+  END IF;
+
+  SELECT url INTO v_url FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+  IF v_url <> 'ws://lan:7880' THEN
+    RAISE EXCEPTION 'FAIL: the default node is %, not the server url', v_url;
+  END IF;
+
+  -- And it follows the column rather than drifting from it.
+  UPDATE servers SET livekit_url = 'ws://lan:7999'
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  SELECT url INTO v_url FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+  IF v_url <> 'ws://lan:7999' THEN
+    RAISE EXCEPTION 'FAIL: the default node did not follow livekit_url, is %', v_url;
+  END IF;
+  UPDATE servers SET livekit_url = 'ws://lan:7880'
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  RAISE NOTICE 'ok  every server has a default node, and it is its livekit_url';
+END $$;
+
+-- It cannot be deleted while the server it mirrors is there: the column would
+-- then name an address absent from the list.
+DO $$
+BEGIN
+  BEGIN
+    DELETE FROM livekit_nodes
+     WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+    RAISE EXCEPTION 'FAIL: the default node was deleted';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%default_node_undeletable%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  the default node cannot be deleted out from under the column';
+END $$;
+
+-- A second node, added by an admin. Alice is one.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+DECLARE v_id UUID;
+BEGIN
+  INSERT INTO livekit_nodes (server_id, label, url)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Singapore', 'ws://sg:7880')
+  RETURNING id INTO v_id;
+  IF v_id IS NULL THEN
+    RAISE EXCEPTION 'FAIL: an admin could not add a node';
+  END IF;
+  RAISE NOTICE 'ok  an admin adds a node';
+END $$;
+
+-- Bob is an ordinary member: he reads the list and cannot touch it.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_count INTEGER;
+BEGIN
+  SELECT count(*) INTO v_count FROM livekit_nodes;
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a member sees % nodes on their server, wanted 2', v_count;
+  END IF;
+
+  BEGIN
+    INSERT INTO livekit_nodes (server_id, label, url)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Bobsville', 'ws://bob:7880');
+    RAISE EXCEPTION 'FAIL: a member added a node';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  UPDATE livekit_nodes SET url = 'ws://bob:7880' WHERE label = 'Singapore';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a member repointed a node';
+  END IF;
+
+  RAISE NOTICE 'ok  a member reads the node list and cannot write to it';
+END $$;
+
+-- Nothing of another server's, either — the node list is per server like
+-- everything else here.
+DO $$
+DECLARE v_count INTEGER;
+BEGIN
+  SELECT count(*) INTO v_count FROM livekit_nodes
+   WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001';
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'FAIL: Alpha''s member saw Beta''s nodes';
+  END IF;
+  RAISE NOTICE 'ok  a node list stops at its own server';
+END $$;
+
+-- The claim. Automatic, with nothing pinned, takes the caller's suggestion.
+RESET ROLE;
+DO $$
+DECLARE
+  v_sg   UUID;
+  v_def  UUID;
+  v_got  UUID;
+  v_url  TEXT;
+BEGIN
+  SELECT id INTO v_sg  FROM livekit_nodes WHERE label = 'Singapore';
+  SELECT id INTO v_def FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+
+  SELECT c.id, c.url INTO v_got, v_url
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', v_sg) c;
+  IF v_got <> v_sg THEN
+    RAISE EXCEPTION 'FAIL: the caller''s suggestion was not taken';
+  END IF;
+  IF v_url <> 'ws://sg:7880' THEN
+    RAISE EXCEPTION 'FAIL: the claim answered with url %', v_url;
+  END IF;
+
+  -- And the second person joins the first person's room, whatever they
+  -- themselves measured. This is the rule the whole table exists for.
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', v_def) c;
+  IF v_got <> v_sg THEN
+    RAISE EXCEPTION 'FAIL: a second caller moved a live room';
+  END IF;
+
+  -- Even pinning it somewhere else does not move a call that is already up.
+  UPDATE channels SET livekit_node_id = v_def
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', NULL) c;
+  IF v_got <> v_sg THEN
+    RAISE EXCEPTION 'FAIL: repinning moved a live room';
+  END IF;
+
+  RAISE NOTICE 'ok  the first caller decides, and a live room never moves';
+
+  -- Once the call ends, the pin is what answers.
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', v_sg) c;
+  IF v_got <> v_def THEN
+    RAISE EXCEPTION 'FAIL: a pinned channel ignored its pin';
+  END IF;
+  RAISE NOTICE 'ok  a pin outranks what the caller measured';
+
+  -- Unpinned and with nothing suggested, the default answers.
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+  UPDATE channels SET livekit_node_id = NULL
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', NULL) c;
+  IF v_got <> v_def THEN
+    RAISE EXCEPTION 'FAIL: nothing suggested did not fall back to the default';
+  END IF;
+
+  -- A node belonging to somebody else is a suggestion, not an instruction.
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001',
+                              '99999999-0000-4000-8000-000000000009') c;
+  IF v_got <> v_def THEN
+    RAISE EXCEPTION 'FAIL: an unknown node id was accepted';
+  END IF;
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+
+  RAISE NOTICE 'ok  the default answers when nothing else does, and a strange node does not';
+END $$;
+
+-- Removing a node returns its channels to automatic rather than leaving them
+-- pointing at nothing.
+DO $$
+DECLARE
+  v_sg  UUID;
+  v_pin UUID;
+BEGIN
+  SELECT id INTO v_sg FROM livekit_nodes WHERE label = 'Singapore';
+  UPDATE channels SET livekit_node_id = v_sg
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  DELETE FROM livekit_nodes WHERE id = v_sg;
+  SELECT livekit_node_id INTO v_pin FROM channels
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  IF v_pin IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a channel still points at a deleted node';
+  END IF;
+  RAISE NOTICE 'ok  deleting a node returns its channels to automatic';
+END $$;
+
+-- And neither helper is callable by a member: choosing where everybody
+-- else's call is held is not a member's to do.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', NULL);
+    RAISE EXCEPTION 'FAIL: a member claimed a voice node';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+    RAISE EXCEPTION 'FAIL: a member released a voice node';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  neither voice-node helper is a member''s to call';
+END $$;
+
+RESET ROLE;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

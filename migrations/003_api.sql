@@ -2090,11 +2090,28 @@ AS $$
              'retention_days', c.retention_days,
              'history_cap',    c.history_cap,
              'is_private',     c.is_private,
+             -- Which LiveKit voice here is pinned to, and where a call
+             -- actually is. Null and null is "automatic, nobody in it".
+             'livekit_node_id', c.livekit_node_id,
+             'voice_node_id',   (SELECT vr.node_id FROM voice_rooms vr
+                                  WHERE vr.channel_id = c.id),
              'can_manage',     c.is_private
                                  AND EXISTS (SELECT 1 FROM managed m
                                               WHERE m.channel_id = c.id))
              ORDER BY c.name) AS rows
       FROM channels c
+  ),
+  -- Every node this server can hold a call on. Members get the list too, not
+  -- just managers: a member is shown which region they are in, and picks the
+  -- nearest one to offer when they are the first to open a call.
+  nodes AS (
+    SELECT jsonb_agg(jsonb_build_object(
+             'id',         n.id,
+             'label',      n.label,
+             'url',        n.url,
+             'is_default', n.is_default)
+             ORDER BY n.is_default DESC, n.label) AS rows
+      FROM livekit_nodes n
   )
   SELECT CASE
     -- No row of our own: removed, or the server is gone. Either way there is
@@ -2153,7 +2170,8 @@ AS $$
                 -- free here: one indexed read, in the call the client already
                 -- makes. It is what lets the composer say a file will not fit
                 -- before somebody picks it, rather than after.
-                'storage_used', server_storage_used())
+                'storage_used', server_storage_used(),
+                'livekit_nodes', COALESCE((SELECT rows FROM nodes), '[]'::jsonb))
          END)
   END;
 $$;
