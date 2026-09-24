@@ -38,6 +38,39 @@ SELECT cron.schedule(
   $$SELECT app.enforce_retention()$$
 );
 
+-- ============================================================
+-- Every bucket, not only the attachments
+-- ============================================================
+-- This used to read `bucket_id LIKE 'chat-%'` and was named for it, and the
+-- two buckets it left out both leak by design:
+--
+--   * **avatars.** A new picture is written to a fresh random path and the old
+--     object is deliberately left behind, because somebody may still be drawing
+--     it from cache (`server_profile_api.dart`). Nothing ever came back for it,
+--     so every avatar anybody had ever set stayed on the disk forever — and
+--     since `avatars_insert` only requires the folder to be the caller's own
+--     id, a modified client could write under it in a loop. That bucket is not
+--     matched by `app.enforce_storage_cap` or `app.track_bucket_usage` either,
+--     both of which also say `chat-%`, so the bytes were uncapped, uncounted
+--     and uncollected at once. Measured: one member, 400 MB, nothing refused.
+--
+--   * **soundboard.** Removing a clip deletes its row and leaves its blob to
+--     the Storage API, which is what the policy suite asserts. The 48-clip
+--     ceiling counts rows, so deleting and re-adding walks past it a blob at a
+--     time.
+--
+-- So the question stops being "is this a chat bucket" and becomes the one it
+-- always meant: **does anything still point at this object.** Each bucket
+-- answers it from whatever holds its references — a message's timestamp, a
+-- `users.avatar_path`, a `soundboard_sounds.object_path` — and the grace
+-- period covers all three for the same reason, because in every case the blob
+-- is uploaded before the row that names it.
+--
+-- `avatars` is shared by every server on the project, unlike `chat-<id>`. That
+-- is safe to sweep from any server's call because the test is project-wide:
+-- an avatar is orphaned when *no* user row anywhere names it, which is not a
+-- fact about who asked.
+
 CREATE OR REPLACE FUNCTION app.orphaned_attachments(p_grace INTERVAL DEFAULT '1 hour')
   RETURNS TABLE (bucket TEXT, object_name TEXT)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
@@ -89,7 +122,23 @@ CREATE OR REPLACE FUNCTION app.orphaned_attachments(p_grace INTERVAL DEFAULT '1 
       -- than the watermark. Comparing against a bare `keep_from` would delete
       -- the attachments of the very message it was trying to protect, on every
       -- single sweep, silently.
-      OR obj.created_at < marks.keep_from - p_grace;
+      OR obj.created_at < marks.keep_from - p_grace
+
+  -- ---------- avatars ----------
+  UNION ALL
+  SELECT o.bucket_id, o.name
+    FROM storage.objects o
+   WHERE o.bucket_id = 'avatars'
+     AND o.created_at < now() - p_grace
+     AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar_path = o.name)
+
+  -- ---------- soundboard ----------
+  UNION ALL
+  SELECT o.bucket_id, o.name
+    FROM storage.objects o
+   WHERE o.bucket_id = 'soundboard'
+     AND o.created_at < now() - p_grace
+     AND NOT EXISTS (SELECT 1 FROM soundboard_sounds s WHERE s.object_path = o.name);
 $$;
 
 CREATE OR REPLACE FUNCTION sweep_attachments(p_limit INTEGER DEFAULT 1000)

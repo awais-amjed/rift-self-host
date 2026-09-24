@@ -5153,6 +5153,94 @@ BEGIN
   RAISE NOTICE 'ok  removing a clip leaves storage.objects to the Storage API';
 END $$;
 
+-- ---------- and the sweep is what comes back for them ----------
+-- Leaving the bytes to the Storage API is only half an answer: something has
+-- to be holding the list. The sweep used to look at `chat-%` and nothing else,
+-- so a deleted clip's blob and every avatar anybody had ever replaced stayed
+-- on the operator's disk for good. Both are unreferenced the moment their row
+-- stops naming them, which is the same question the chat half already asked.
+DO $$
+DECLARE v_orphans TEXT[];
+BEGIN
+  -- Old enough to be past the grace period: a blob is always uploaded before
+  -- the row that names it, here as everywhere else.
+  UPDATE storage.objects SET created_at = now() - interval '2 hours'
+   WHERE bucket_id = 'soundboard'
+     AND name = 'aaaa0000-0000-4000-8000-000000000001/horn.audio';
+
+  INSERT INTO storage.objects (bucket_id, name, metadata, created_at)
+  VALUES ('avatars', '11111111-aaaa-4aaa-8aaa-000000000002/old.img',
+          '{"size": 2000}'::jsonb, now() - interval '2 hours'),
+         ('avatars', '11111111-aaaa-4aaa-8aaa-000000000002/current.img',
+          '{"size": 2000}'::jsonb, now() - interval '2 hours');
+  UPDATE users SET avatar_path = '11111111-aaaa-4aaa-8aaa-000000000002/current.img'
+   WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+
+  SELECT array_agg(object_name ORDER BY object_name)
+    INTO v_orphans FROM app.orphaned_attachments()
+   WHERE bucket IN ('avatars', 'soundboard');
+
+  IF NOT ('aaaa0000-0000-4000-8000-000000000001/horn.audio' = ANY(v_orphans)) THEN
+    RAISE EXCEPTION 'FAIL: a clip nobody references is not swept';
+  END IF;
+  IF NOT ('11111111-aaaa-4aaa-8aaa-000000000002/old.img' = ANY(v_orphans)) THEN
+    RAISE EXCEPTION 'FAIL: a replaced avatar is not swept';
+  END IF;
+  -- The one somebody's row still points at has to survive, or changing your
+  -- picture would delete it a moment later.
+  IF '11111111-aaaa-4aaa-8aaa-000000000002/current.img' = ANY(v_orphans) THEN
+    RAISE EXCEPTION 'FAIL: the avatar in use was swept';
+  END IF;
+  RAISE NOTICE 'ok  and the sweep collects it, and the avatar nobody wears';
+END $$;
+
+-- ---------- and nothing piles up while it waits for one ----------
+-- The sweep runs on a clock. `avatars` is outside the byte cap in 006 and its
+-- write policy asks only that the folder is the caller's own id, so a member
+-- who wanted to fill the disk between two sweeps could. Measured before this
+-- existed: 200 objects, 400 MB, one member, nothing refused.
+DO $$
+DECLARE v_held INT;
+BEGIN
+  FOR i IN 1..app.avatars_per_member() LOOP
+    BEGIN
+      INSERT INTO storage.objects (bucket_id, name, metadata)
+      VALUES ('avatars',
+              '11111111-aaaa-4aaa-8aaa-000000000003/' || i || '.img',
+              '{"size": 2097152}'::jsonb);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'FAIL: refused avatar % of %, under the ceiling',
+        i, app.avatars_per_member();
+    END;
+  END LOOP;
+
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, metadata)
+    VALUES ('avatars', '11111111-aaaa-4aaa-8aaa-000000000003/over.img',
+            '{"size": 2097152}'::jsonb);
+    RAISE EXCEPTION 'FAIL: a member may hold avatars without bound';
+  EXCEPTION WHEN raise_exception OR disk_full THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+
+  SELECT count(*) INTO v_held FROM storage.objects
+   WHERE bucket_id = 'avatars'
+     AND (storage.foldername(name))[1] = '11111111-aaaa-4aaa-8aaa-000000000003';
+  IF v_held <> app.avatars_per_member() THEN
+    RAISE EXCEPTION 'FAIL: held % avatars, ceiling is %',
+      v_held, app.avatars_per_member();
+  END IF;
+
+  -- One member's ceiling is not another's.
+  INSERT INTO storage.objects (bucket_id, name, metadata)
+  VALUES ('avatars', '11111111-aaaa-4aaa-8aaa-000000000001/mine.img',
+          '{"size": 2000}'::jsonb);
+  RAISE NOTICE 'ok  a member holds app.avatars_per_member() avatars and no more';
+END $$;
+
+DELETE FROM storage.objects WHERE bucket_id = 'avatars';
+UPDATE users SET avatar_path = NULL;
+
 -- Cleared, so the sections after this one start from the library they expect.
 DELETE FROM soundboard_sounds;
 

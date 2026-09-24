@@ -9,6 +9,16 @@
 -- — an INSERT into that table — so the REST API, the attachment sweep, a
 -- moderator deleting a message and a service-role script all go through the
 -- same accounting. There is no fourth way in.
+--
+-- **The trigger is one way in; it was not one rule.** Everything above was
+-- written about `chat-<server id>`, and the byte cap, the running total and
+-- the orphan sweep all matched on that prefix — so `avatars` had no ceiling,
+-- no accounting and nothing collecting it, while its write policy accepted any
+-- path under the caller's own id. One member, 200 uploads, 400 MB, nothing
+-- refused. Each bucket now has a bound of its own kind and something that
+-- comes back for it: bytes per server for `chat-`, objects per member for
+-- `avatars`, rows per server for `soundboard`, and a sweep in 007 that asks of
+-- all three whether anything still points at the object.
 -- ============================================================
 
 -- ============================================================
@@ -155,7 +165,32 @@ DECLARE
   v_cap    BIGINT;
   v_used   BIGINT;
   v_size   BIGINT;
+  v_owner  TEXT;
 BEGIN
+  -- ---------- avatars, which are counted rather than weighed ----------
+  -- The byte cap below is per server, and `avatars` belongs to the project
+  -- rather than to any one of them, so there is no figure here to measure it
+  -- against. What there is instead is a ceiling on how many objects one member
+  -- may leave lying about: `avatars_insert` asks only that the folder is the
+  -- caller's own id, so a modified client could otherwise write 2 MB under it
+  -- for as long as it cared to and nothing — not this trigger, not
+  -- `app.track_bucket_usage`, not the sweep as it used to be — would have
+  -- noticed. The sweep in 007 now collects every avatar nobody's row names;
+  -- this is what bounds the pile between two runs of it.
+  IF NEW.bucket_id = 'avatars' THEN
+    v_owner := (storage.foldername(NEW.name))[1];
+    IF v_owner IS NOT NULL
+       AND (SELECT count(*) FROM storage.objects o
+             WHERE o.bucket_id = 'avatars'
+               AND (storage.foldername(o.name))[1] = v_owner)
+           >= app.avatars_per_member() THEN
+      RAISE EXCEPTION
+        'Too many avatars stored for this account — the old ones are cleared up shortly'
+        USING ERRCODE = 'disk_full';
+    END IF;
+    RETURN NEW;
+  END IF;
+
   -- Buckets are named `chat-<server id>`; anything else is not a server's
   -- attachments and is not this limit's business.
   IF NEW.bucket_id !~ '^chat-[0-9a-f-]{36}$' THEN

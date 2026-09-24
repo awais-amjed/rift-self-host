@@ -1594,6 +1594,23 @@ COMMENT ON TABLE soundboard_sounds IS
 CREATE OR REPLACE FUNCTION app.soundboard_max() RETURNS INTEGER
   LANGUAGE sql IMMUTABLE AS $$ SELECT 48 $$;
 
+-- How many avatar objects one member may have on the disk at once.
+--
+-- Not a limit on changing your picture: a new avatar is written to a fresh
+-- random path and the old object is left for whoever is still drawing it from
+-- cache, and the sweep in 007 takes every unreferenced one away. This is the
+-- ceiling on what can pile up *between* sweeps — the bound that does not
+-- depend on a timer having run, because `avatars` is outside the byte cap in
+-- 006 (`app.enforce_storage_cap` matches `chat-%`) and its write policy
+-- accepts any path under the caller's own id. Without a number here, a
+-- modified client uploads 2 MB in a loop for as long as it likes.
+--
+-- 16 is chosen against the sweep rather than against the feature: nobody
+-- changes their picture sixteen times in a day, and the worst a member who is
+-- trying to can hold is 32 MB.
+CREATE OR REPLACE FUNCTION app.avatars_per_member() RETURNS INTEGER
+  LANGUAGE sql IMMUTABLE AS $$ SELECT 16 $$;
+
 -- ============================================================
 -- Storage accounting
 -- ============================================================
