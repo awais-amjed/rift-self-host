@@ -5636,6 +5636,18 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a member released a voice node';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
+  -- Nor through the faces in `public`, which exist for PostgREST's benefit
+  -- and not as a way round the revoke above.
+  BEGIN
+    PERFORM claim_voice_node('aaaa1111-0000-4000-8000-000000000001', NULL);
+    RAISE EXCEPTION 'FAIL: a member claimed a voice node through public';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+    RAISE EXCEPTION 'FAIL: a member released a voice node through public';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
   RAISE NOTICE 'ok  neither voice-node helper is a member''s to call';
 END $$;
 

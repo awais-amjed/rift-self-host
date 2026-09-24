@@ -7,7 +7,12 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitCredentials, voiceUserId } from "../_shared/livekit.ts";
+import {
+  claimVoiceNode,
+  livekitCredentials,
+  normaliseHost,
+  voiceUserId,
+} from "../_shared/livekit.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -21,7 +26,8 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { channel_id, screen_share, sound_share, device_id } = await req.json();
+    const { channel_id, screen_share, sound_share, device_id, preferred_node_id } =
+      await req.json();
     const token = extractBearerToken(req);
 
     const auth = await authenticateToken(supabase, token);
@@ -208,10 +214,24 @@ Deno.serve(async (req) => {
     const maxVoice = Number(limits[DBSchema.servers.maxVoiceParticipants] ?? 0);
     const maxShareMbps = Number(limits[DBSchema.servers.maxShareMbps] ?? 0);
 
+    // Which LiveKit this call is on. A server may have several, and a room
+    // lives on exactly one of them — so this is decided once, by whoever gets
+    // here first, and everybody afterwards is told where that was.
+    //
+    // `preferred_node_id` is what the client measured. It is a suggestion:
+    // the database checks it is really one of this server's nodes, and it
+    // only counts at all when the channel is not pinned and there is no call
+    // up yet. A client that names somebody else's node, or a stale one, is
+    // answered with the default rather than refused — being sent to a working
+    // node is better than being told no.
+    const node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
+    const nodeUrl = node?.url ?? credentials.url;
+    const nodeHost = node ? normaliseHost(node.url) : credentials.host;
+
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
     // the edge function is the only thing that can create rooms.
-    const roomService = new RoomServiceClient(credentials.host, apiKey, apiSecret);
+    const roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
 
     // How full the call is (migration 028), asked only when there is a limit
     // to compare it against — a server that has not set one pays nothing.
@@ -317,7 +337,7 @@ Deno.serve(async (req) => {
     return CustomResponse.success({
       token: livekitToken,
       identity,
-      livekit_url: credentials.url,
+      livekit_url: nodeUrl,
       max_share_mbps: maxShareMbps,
     });
   } catch (err) {

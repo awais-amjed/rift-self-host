@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService, roomParticipants } from "../_shared/livekit.ts";
+import { livekitRoomServices, roomParticipantsAcross } from "../_shared/livekit.ts";
 import { livePermissions, micDenied, moderationMetadata } from "../_shared/moderation.ts";
 
 /**
@@ -142,8 +142,10 @@ async function applyToLiveRooms(
   isBanned: boolean,
 ): Promise<{ updated: number; error: string | null }> {
   try {
-    const roomService = await livekitRoomService(supabase, serverId);
-    if (!roomService) return { updated: 0, error: "credentials_missing" };
+    // One admin API per node: a muted member has to stay muted whichever
+    // LiveKit the call they are in happens to be on.
+    const services = await livekitRoomServices(supabase, serverId);
+    if (services.length === 0) return { updated: 0, error: "credentials_missing" };
 
     const { data: channels } = await supabase
       .from(DBSchema.channels.tableName)
@@ -155,9 +157,18 @@ async function applyToLiveRooms(
     );
     if (channelIds.length === 0) return { updated: 0, error: null };
 
-    // Only rooms that actually exist come back, so this is one call rather than
-    // one listParticipants per channel on a server where nobody is in voice.
-    const rooms = await roomService.listRooms(channelIds);
+    // Only rooms that actually exist come back, so this is one call per node
+    // rather than one listParticipants per channel on a server where nobody
+    // is in voice.
+    const rooms = (await Promise.all(
+      services.map(async ({ service }) => {
+        try {
+          return await service.listRooms(channelIds);
+        } catch {
+          return [];
+        }
+      }),
+    )).flat();
 
     const metadata = moderationMetadata(isMuted, isDeafened);
     const permission = livePermissions(isMuted, isDeafened);
@@ -165,10 +176,11 @@ async function applyToLiveRooms(
     // The identity is "<userId>~<device>", with a "_screenshare" suffix for
     // that device's share. Match on the user id so every device they are on
     // is covered, not just the one a moderator happened to click.
-    const mine = (await roomParticipants(roomService, rooms)).flatMap(({ room, participants }) =>
-      participants
-        .filter((p) => p.identity.split("~")[0] === targetUserId)
-        .map((participant) => ({ room, participant }))
+    const mine = (await roomParticipantsAcross(services, rooms)).flatMap(
+      ({ room, participants, service }) =>
+        participants
+          .filter((p) => p.identity.split("~")[0] === targetUserId)
+          .map((participant) => ({ room, participant, service }))
     );
 
     // Across connections at once — they are different rooms or different
@@ -178,13 +190,13 @@ async function applyToLiveRooms(
     // already flowing. Reversed, a track muted first can be raised again by
     // the client before its permission is gone.
     await Promise.all(
-      mine.map(async ({ room, participant }) => {
+      mine.map(async ({ room, participant, service }) => {
         if (isBanned) {
-          await roomService.removeParticipant(room, participant.identity);
+          await service.removeParticipant(room, participant.identity);
           return;
         }
 
-        await roomService.updateParticipant(room, participant.identity, {
+        await service.updateParticipant(room, participant.identity, {
           metadata,
           permission,
         });
@@ -194,7 +206,7 @@ async function applyToLiveRooms(
             (participant.tracks ?? [])
               .filter((track) => track.source === TrackSource.MICROPHONE && !track.muted)
               .map((track) =>
-                roomService.mutePublishedTrack(room, participant.identity, track.sid, true)
+                service.mutePublishedTrack(room, participant.identity, track.sid, true)
               ),
           );
         }

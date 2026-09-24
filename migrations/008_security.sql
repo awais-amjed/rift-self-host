@@ -164,6 +164,19 @@ REVOKE ALL ON FUNCTION app.claim_voice_node(UUID, UUID)
 REVOKE ALL ON FUNCTION app.release_voice_node(UUID[])
   FROM PUBLIC, anon, authenticated;
 
+-- Their faces in `public`, which exist only because PostgREST cannot see the
+-- `app` schema. The blanket revoke above already took them from `anon` and
+-- `authenticated`; these say so by name, because a wrapper that quietly
+-- became callable would hand a member the choice of where everybody's call
+-- is held.
+REVOKE ALL ON FUNCTION claim_voice_node(UUID, UUID)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION claim_voice_node(UUID, UUID) TO service_role;
+
+REVOKE ALL ON FUNCTION release_voice_node(UUID[])
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION release_voice_node(UUID[]) TO service_role;
+
 REVOKE ALL ON FUNCTION app.sync_server_bucket(UUID, BIGINT)
   FROM PUBLIC, anon, authenticated;
 

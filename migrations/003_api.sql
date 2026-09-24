@@ -2181,3 +2181,38 @@ COMMENT ON FUNCTION get_server_details() IS
   'channels the caller may see, and the caller''s own row with their '
   'permissions. Null when the caller has no row here. Answers the five reads '
   'that used to run one after another.';
+
+-- ============================================================
+-- Voice nodes, for the service role
+-- ============================================================
+-- Two wrappers over the helpers in 002, and they are here in `public` for one
+-- reason: PostgREST only exposes the schemas in `db_schema`, which is
+-- `public, graphql_public`. An edge function cannot reach `app.` at all, so a
+-- function it must call has to have a face in `public` even when no client
+-- may touch it.
+--
+-- Neither is a member's to call — 008 revokes both from `anon` and
+-- `authenticated`, leaving the service role, which is the only caller.
+-- `get_channel_token` claims; `voice_roster` releases.
+
+CREATE OR REPLACE FUNCTION claim_voice_node(
+  p_channel   UUID,
+  p_preferred UUID DEFAULT NULL
+) RETURNS TABLE (id UUID, url TEXT, label TEXT)
+  LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+  SELECT n.id, n.url, n.label FROM app.claim_voice_node(p_channel, p_preferred) n
+$$;
+
+COMMENT ON FUNCTION claim_voice_node(UUID, UUID) IS
+  'Service-role face of app.claim_voice_node: where this channel''s call is, '
+  'deciding it if there is no answer yet.';
+
+CREATE OR REPLACE FUNCTION release_voice_node(p_channels UUID[])
+  RETURNS VOID
+  LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+  SELECT app.release_voice_node(p_channels)
+$$;
+
+COMMENT ON FUNCTION release_voice_node(UUID[]) IS
+  'Service-role face of app.release_voice_node: these calls have ended, so '
+  'the next one on each channel is decided afresh.';

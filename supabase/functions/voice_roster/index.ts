@@ -4,7 +4,11 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService, roomParticipants, voiceUserId } from "../_shared/livekit.ts";
+import {
+  livekitRoomServices,
+  releaseVoiceNodes,
+  voiceUserId,
+} from "../_shared/livekit.ts";
 
 /**
  * Who is in which voice channel on this server, right now: `{userId: channelId}`.
@@ -34,8 +38,11 @@ Deno.serve(async (req) => {
     const auth = await authenticateToken(supabase, extractBearerToken(req));
     if (isAuthError(auth)) return auth;
 
-    const roomService = await livekitRoomService(supabase, auth.serverId);
-    if (!roomService) {
+    // One admin API per node. A server usually has one, and then this is
+    // exactly what it always was; with several, a room lives on one of them
+    // and the only way to find out which is to ask each.
+    const services = await livekitRoomServices(supabase, auth.serverId);
+    if (services.length === 0) {
       return CustomResponse.error(
         "LiveKit credentials not configured for this server",
         EC.SERVER_CREDENTIALS_MISSING,
@@ -62,20 +69,60 @@ Deno.serve(async (req) => {
     }
 
     // Rooms are named by channel id, and only rooms that exist come back — so
-    // an idle server costs one call, not one per channel.
-    const rooms = await roomService.listRooms(channelIds);
-
-    const rosters = await roomParticipants(roomService, rooms);
+    // an idle server costs one call per node, not one per channel.
+    const perNode = await Promise.all(
+      services.map(async ({ node, service }) => {
+        try {
+          const rooms = await service.listRooms(channelIds);
+          const rosters = await Promise.all(
+            rooms.map(async (room) => {
+              try {
+                return {
+                  room: room.name,
+                  participants: await service.listParticipants(room.name),
+                };
+              } catch {
+                return { room: room.name, participants: [] };
+              }
+            }),
+          );
+          return { node, rosters };
+        } catch {
+          // A node that is down answers with nothing rather than blanking the
+          // whole roster. Its calls go missing from the sidebar until it is
+          // back, which is what is true.
+          return { node, rosters: [] as { room: string; participants: unknown[] }[] };
+        }
+      }),
+    );
 
     const roster: Record<string, string> = {};
-    for (const { room, participants } of rosters) {
-      for (const participant of participants) {
-        const userId = voiceUserId(participant.identity);
-        // Someone joined from two devices in different channels lands here
-        // twice; the last room wins, and their own client is the only one that
-        // could say which is "theirs". Rare enough to leave alone.
-        if (userId) roster[userId] = room;
+    const busy = new Set<string>();
+    for (const { rosters } of perNode) {
+      for (const { room, participants } of rosters) {
+        if (participants.length > 0) busy.add(room);
+        for (const participant of participants as { identity: string }[]) {
+          const userId = voiceUserId(participant.identity);
+          // Someone joined from two devices in different channels lands here
+          // twice; the last room wins, and their own client is the only one that
+          // could say which is "theirs". Rare enough to leave alone.
+          if (userId) roster[userId] = room;
+        }
       }
+    }
+
+    // A call that has ended forgets where it was, so the next one on that
+    // channel is decided afresh rather than inheriting the first choice the
+    // channel ever made. This is the only place that finds out: nothing tells
+    // us a room emptied, we notice that it did.
+    //
+    // Only channels this caller can see, so a member's polling never speaks
+    // for a private channel they are not in — a stale row costs a worse
+    // choice next time, never a broken call, so being conservative here is
+    // free.
+    const ended = channelIds.filter((id) => !busy.has(id));
+    if (ended.length > 0) {
+      await releaseVoiceNodes(supabase, ended).catch(() => {});
     }
 
     return CustomResponse.success({ roster });

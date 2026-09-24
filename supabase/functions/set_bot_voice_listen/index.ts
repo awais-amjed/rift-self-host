@@ -4,7 +4,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService } from "../_shared/livekit.ts";
+import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
 
 /**
  * Let a bot hear a voice channel, or stop it hearing one.
@@ -121,7 +121,7 @@ async function applyToLiveRoom(
   listen: boolean,
 ): Promise<{ updated: number; error: string | null }> {
   try {
-    const roomService = await livekitRoomService(supabase, serverId);
+    const roomService = await livekitRoomServiceForChannel(supabase, serverId, channelId);
     if (!roomService) return { updated: 0, error: "credentials_missing" };
 
     // Rooms are named by channel id. Asking for the one room means an idle

@@ -6,7 +6,11 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService, roomParticipants, voiceUserId } from "../_shared/livekit.ts";
+import {
+  livekitRoomServices,
+  roomParticipantsAcross,
+  voiceUserId,
+} from "../_shared/livekit.ts";
 
 /**
  * Pull a member from the voice channel they're in into another one.
@@ -88,8 +92,13 @@ Deno.serve(async (req) => {
       );
     }
 
-    const roomService = await livekitRoomService(supabase, auth.serverId);
-    if (!roomService) {
+    // Only to find them: the move itself is a packet telling their client to
+    // rejoin elsewhere, and its next `get_channel_token` resolves the node
+    // for the destination. So a move between two channels on two different
+    // LiveKits needs nothing extra here — the client reconnects, which is
+    // what it was already doing.
+    const services = await livekitRoomServices(supabase, auth.serverId);
+    if (services.length === 0) {
       return CustomResponse.error(
         "LiveKit credentials not configured for this server",
         EC.SERVER_CREDENTIALS_MISSING,
@@ -105,9 +114,18 @@ Deno.serve(async (req) => {
       (c) => (c as Record<string, any>)[DBSchema.channels.id] as string,
     );
 
-    // Only rooms that exist come back, so this is one call rather than one
-    // listParticipants per channel on a server where nobody is in voice.
-    const rooms = await roomService.listRooms(channelIds);
+    // Only rooms that exist come back, so this is one call per node rather
+    // than one listParticipants per channel on a server where nobody is in
+    // voice.
+    const rooms = (await Promise.all(
+      services.map(async ({ service }) => {
+        try {
+          return await service.listRooms(channelIds);
+        } catch {
+          return [];
+        }
+      }),
+    )).flat();
 
     let foundAnywhere = false;
     let moved = 0;
@@ -120,9 +138,10 @@ Deno.serve(async (req) => {
       }),
     );
 
-    const found = (await roomParticipants(roomService, rooms))
-      .map(({ room, participants }) => ({
+    const found = (await roomParticipantsAcross(services, rooms))
+      .map(({ room, participants, service }) => ({
         room,
+        service,
         identities: voiceConnectionsOf(participants, target_user_id),
       }))
       .filter(({ identities }) => identities.length > 0);
@@ -131,8 +150,8 @@ Deno.serve(async (req) => {
     // Already where they're being sent — nothing to say to them.
     const toMove = found.filter(({ room }) => room !== channel_id);
     await Promise.all(
-      toMove.map(({ room, identities }) =>
-        roomService.sendData(room, payload, DataPacket_Kind.RELIABLE, {
+      toMove.map(({ room, identities, service }) =>
+        service.sendData(room, payload, DataPacket_Kind.RELIABLE, {
           destinationIdentities: identities,
           topic: MOVE_TOPIC,
         })

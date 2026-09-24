@@ -5,7 +5,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService } from "../_shared/livekit.ts";
+import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
 
 /**
  * Delete a channel, and the call going on inside it.
@@ -87,7 +87,7 @@ Deno.serve(async (req) => {
  */
 async function deleteRoom(serverId: string, channelId: string): Promise<string | null> {
   try {
-    const roomService = await livekitRoomService(supabase, serverId);
+    const roomService = await livekitRoomServiceForChannel(supabase, serverId, channelId);
     if (!roomService) return "credentials_missing";
 
     await roomService.deleteRoom(channelId);

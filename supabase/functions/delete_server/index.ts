@@ -5,7 +5,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService } from "../_shared/livekit.ts";
+import { livekitRoomServices } from "../_shared/livekit.ts";
 
 /**
  * Delete a server: everything it holds, and everything holding it up.
@@ -103,19 +103,29 @@ async function collectLeftovers(serverId: string) {
 async function deleteRooms(serverId: string, channelIds: string[]): Promise<string | null> {
   if (channelIds.length === 0) return null;
   try {
-    const roomService = await livekitRoomService(supabase, serverId);
-    if (!roomService) return "credentials_missing";
+    // Every node, because the server's calls may be spread across them and a
+    // deleted server must not leave one running anywhere.
+    const services = await livekitRoomServices(supabase, serverId);
+    if (services.length === 0) return "credentials_missing";
     // Ask which rooms exist before deleting any. Rooms are named by channel
     // id and most channels are text, so deleting by id blind meant a round
     // trip per channel and a "not found" for nearly all of them — a server
     // with two hundred channels paid two hundred of them, in series, while
     // the owner waited on a delete. `listRooms` answers for the whole list at
     // once, and what comes back is exactly what there is to delete.
-    const live = await roomService.listRooms(channelIds);
-    const failures = (await Promise.all(
-      live.map(async (room) => {
+    const live = (await Promise.all(
+      services.map(async ({ service }) => {
         try {
-          await roomService.deleteRoom(room.name);
+          return (await service.listRooms(channelIds)).map((room) => ({ room, service }));
+        } catch {
+          return [];
+        }
+      }),
+    )).flat();
+    const failures = (await Promise.all(
+      live.map(async ({ room, service }) => {
+        try {
+          await service.deleteRoom(room.name);
           return null;
         } catch (err) {
           // A call that emptied between the listing and here is already gone.

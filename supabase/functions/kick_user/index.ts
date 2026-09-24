@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomService, roomParticipants } from "../_shared/livekit.ts";
+import { livekitRoomServices, roomParticipantsAcross } from "../_shared/livekit.ts";
 
 /**
  * Disconnect a member from the voice channel they are in.
@@ -74,8 +74,11 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Admins cannot be disconnected", EC.PERMISSION_DENIED);
     }
 
-    const roomService = await livekitRoomService(supabase, auth.serverId);
-    if (!roomService) {
+    // A server may hold calls on more than one LiveKit, and a member kicked
+    // out of one must not be left sitting in another. Each node is asked; the
+    // ones not holding a given room answer empty.
+    const services = await livekitRoomServices(supabase, auth.serverId);
+    if (services.length === 0) {
       return CustomResponse.error(
         "LiveKit credentials not configured for this server",
         EC.SERVER_CREDENTIALS_MISSING,
@@ -94,18 +97,29 @@ Deno.serve(async (req) => {
       return CustomResponse.error("That member isn't in a voice channel", EC.USER_NOT_IN_VOICE);
     }
 
-    // Only rooms that exist come back, so this is one call rather than one
-    // listParticipants per channel on a server where nobody is in voice.
-    const rooms = await roomService.listRooms(channelIds);
+    // Only rooms that exist come back, so this is one call per node rather
+    // than one listParticipants per channel on a server where nobody is in
+    // voice.
+    const rooms = (await Promise.all(
+      services.map(async ({ service }) => {
+        try {
+          return await service.listRooms(channelIds);
+        } catch {
+          return [];
+        }
+      }),
+    )).flat();
 
     // Find them everywhere first, then remove everywhere: a member can be in
-    // two calls from two devices, and both go.
-    const rosters = await roomParticipants(roomService, rooms);
-    const toRemove = rosters.flatMap(({ room, participants }) =>
-      connectionsOf(participants, target_user_id).map((identity) => ({ room, identity }))
+    // two calls from two devices, and both go — now possibly on two nodes.
+    // The service comes back with each roster so the removal is sent to the
+    // node that actually has them.
+    const rosters = await roomParticipantsAcross(services, rooms);
+    const toRemove = rosters.flatMap(({ room, participants, service }) =>
+      connectionsOf(participants, target_user_id).map((identity) => ({ room, identity, service }))
     );
     await Promise.all(
-      toRemove.map(({ room, identity }) => roomService.removeParticipant(room, identity)),
+      toRemove.map(({ room, identity, service }) => service.removeParticipant(room, identity)),
     );
     const removed = toRemove.length;
 
