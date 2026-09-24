@@ -953,6 +953,18 @@ DROP TRIGGER IF EXISTS livekit_nodes_protect_default ON livekit_nodes;
 CREATE TRIGGER livekit_nodes_protect_default BEFORE DELETE ON livekit_nodes
   FOR EACH ROW WHEN (OLD.is_default) EXECUTE FUNCTION refuse_default_node_delete();
 
+-- The trigger keeps it true from here; this makes it true now. Both are
+-- needed, and the second is the one that is easy to forget: a trigger fires
+-- on writes, and a server that already exists is not a write. On a database
+-- built from these files in order there are no servers yet and this does
+-- nothing, which is exactly what it should do.
+INSERT INTO livekit_nodes (server_id, label, url, is_default)
+SELECT s.id, 'Default', s.livekit_url, true
+  FROM servers s
+ WHERE NOT EXISTS (
+   SELECT 1 FROM livekit_nodes n WHERE n.server_id = s.id AND n.is_default
+ );
+
 DROP TRIGGER IF EXISTS notification_prefs_stamp ON notification_prefs;
 CREATE TRIGGER notification_prefs_stamp BEFORE INSERT OR UPDATE ON notification_prefs
   FOR EACH ROW EXECUTE FUNCTION stamp_notification_pref();
