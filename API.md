@@ -31,7 +31,7 @@ An endpoint earns its place only if it holds a secret, or runs before the caller
 | `create_server` | `service_key` in body | Writes the LiveKit API secret. Also seeds a `general` text channel and a `voice` voice channel — they differ in name because `(server_id, name)` is unique. Returns `server_id`, `name`, `supabase_url`, `supabase_key`, `invite_code` (single-use admin invite) |
 | `update_server` | Bearer + `is_server_admin` | Writes the LiveKit API key/secret into `server_secrets`, which has no grant and no policy. Name, icon and the operator limits — including the DM overrides `dm_retention_days` / `dm_history_cap`, where **null is a value** meaning "inherit the server-wide number" and an omitted key means "leave it alone" — ride along rather than splitting one dialog across two transports. It does **not** touch storage: each server owns a `chat-<serverId>` bucket and a trigger moves that bucket's `file_size_limit` when the column changes, in the same statement. `max_voice_participants`, `max_share_mbps`, `max_members` and `max_storage_bytes` ride along the same way; all are 0 = off |
 | `sweep_attachments` | Bearer (any member) | Needs the **Storage API**, not a secret: `storage.protect_delete()` refuses a direct DELETE on `storage.objects`, so no database role can free an attachment blob. Applies the server's retention settings via the `sweep_attachments` RPC (service-role only) and removes the blobs whose messages are gone. Safe for any member — it removes only unreferenced objects |
-| `get_channel_token` | Bearer | Mints a LiveKit JWT with the API secret. Identity is `<userId>~<deviceId>`; `roomAdmin` for channel managers, 1 h TTL. **Moderation is enforced here at join time** — muted users get no `microphone` in `canPublishSources`, deafened users get `canSubscribe: false`. **A bot** gets `canSubscribe` only with a `bot_voice_grants` row, never `roomAdmin`, and is refused outright until a member has sealed it a media key (calls are E2E encrypted — BOTS.md §6b). **`max_voice_participants` is enforced here**: a new arrival past it is refused `voice_channel_full`, counted as *people* so a member's screen share does not use a place, and bots are exempt because a summoned bot is not what fills a call. The reply also carries `max_share_mbps`, which the client keeps — a LiveKit token has no bitrate field, so there is nothing here to clamp — and **`livekit_url`**, the address that token is good for |
+| `get_channel_token` | Bearer | Mints a LiveKit JWT with the API secret, on the node this channel's call is held on (see **More than one region**). Identity is `<userId>~<deviceId>`; `roomAdmin` for channel managers, 1 h TTL. **Moderation is enforced here at join time** — muted users get no `microphone` in `canPublishSources`, deafened users get `canSubscribe: false`. **A bot** gets `canSubscribe` only with a `bot_voice_grants` row, never `roomAdmin`, and is refused outright until a member has sealed it a media key (calls are E2E encrypted — BOTS.md §6b). **`max_voice_participants` is enforced here**: a new arrival past it is refused `voice_channel_full`, counted as *people* so a member's screen share does not use a place, and bots are exempt because a summoned bot is not what fills a call. The reply also carries `max_share_mbps`, which the client keeps — a LiveKit token has no bitrate field, so there is nothing here to clamp — and **`livekit_url`**, the address that token is good for |
 | `set_bot_voice_listen` | Bearer + `MANAGE_BOTS` (checked by the RPC) | Lets a bot hear a voice channel, or stops it. Calls `grant_bot_voice_listen` / `revoke_bot_voice_listen` with the caller's JWT, then pushes the new permission onto the bot's live connection with the API secret — the row alone is half the job, exactly as with `moderate_user`, because a token is good for its hour whatever the table says |
 | `moderate_user` | Bearer + `is_admin` (checked by the RPC) | Mute/deafen/ban. Calls the `moderate_user` RPC with the caller's JWT — the rules stay in the database — then uses the LiveKit API secret to push the new permissions and metadata onto every live connection the target holds. See below |
 | `delete_channel` | Bearer + `channels_delete_managers` (checked by the policy) | Deletes the row with the caller's JWT, and the LiveKit room with the API secret. Rooms are named by channel id, so without the second half everyone carries on talking in a room whose channel is gone. Deleting a room disconnects its participants — that **is** the kick |
@@ -411,20 +411,57 @@ use a LAN IP (e.g. `ws://192.168.1.6:7880`), never `localhost`. When running
 
 **The address comes back with the token, and that is the point.** `get_channel_token` answers
 with `livekit_url` alongside the JWT, and a client uses that in preference to the
-`servers.livekit_url` it already holds. Today the two are always the same string, so the field
-changes nothing — it exists so that *which* LiveKit a channel lives on is a decision this
-function makes rather than one compiled into every installed client.
-
-A server has one LiveKit and every channel on it answers with that address. Should that ever
-become one node per region, the room would still live on exactly one of them (LiveKit's
-open-source server binds a room to a single node — a call cannot span two), so the change would
-be about *which* node a channel's room is created on, not about splitting a call across several.
-The client work for that is then a latency probe and nothing else; without this field it would
-also be a new release that every member has to install before any of them can be moved.
+`servers.livekit_url` it already holds — because *which* LiveKit a channel lives on is a
+decision this function makes, not one compiled into every installed client.
 
 Two other connections follow the same answer: a screen share and a sound share each open a
 second connection into the call's own room, so they take the URL from their own token rather
 than from the server row. A share that went to a different node than the call would join a room
 of the same name with nobody in it.
 
-Older clients ignore the field and read the server row, which is the same address.
+Older clients ignore the field and read the server row, which is the same address on a server
+with one region.
+
+### More than one region
+
+A server may hold calls on several LiveKits. `livekit_nodes` is the list, an admin writes the
+labels, and `channels.livekit_node_id` pins a channel to one of them — NULL is automatic.
+
+**A room lives on exactly one node.** LiveKit's open-source server binds a room to a single
+node and cross-node media is a Cloud feature, so this is never "each person connects to their
+nearest". It is one decision, made when the room is created, and everybody who joins afterwards
+goes where it already is. What several nodes buy is a better choice of *where*, and a community
+mostly in one place gets its calls near itself.
+
+The order, in `app.claim_voice_node`:
+
+1. **where the call already is** (`voice_rooms`) — absolute, because a live room cannot move;
+2. **the channel's pin** (`channels.livekit_node_id`);
+3. **what the caller measured** — `preferred_node_id` on the request, checked against this
+   server's own list before it counts for anything;
+4. **the default node**, which mirrors `servers.livekit_url`.
+
+That claim is a single statement ending in `ON CONFLICT DO NOTHING`: two people opening the
+same call in the same moment must not open it in two regions, so the first writer wins and the
+second reads their row.
+
+`voice_roster` is the other half. Nothing announces that a room emptied, so the one thing
+already asking every node who is in each room is the only thing that finds out — it releases
+the channels it can see with nobody in them, and the next call on them is decided afresh.
+Without that, "automatic" would decide once in a channel's lifetime rather than once per call.
+
+The other functions that act on a room had one admin API per server, which was the same
+assumption from the other side. Two shapes replace it: a known channel resolves through
+`voice_rooms` to one node (`delete_channel`, `set_bot_voice_listen`, `set_bot_voice_summon`),
+and a search across channels asks every node and merges (`kick_user`, `moderate_user`,
+`move_user`, `delete_server`) — a node not holding a room answers empty, which is the same
+answer as an empty room.
+
+`move_user` needed nothing extra: it already sends a packet telling the client to rejoin, so
+the destination resolves on that client's next token request. A move between two regions is the
+reconnect it was always doing.
+
+**Every node shares the server's one LiveKit key pair** (`server_secrets`). A key is a line in
+each box's own `livekit.yaml`, written by the operator who is adding the node, so matching them
+is a setup step rather than a constraint that costs anything — and it keeps one secret per
+server instead of one per box.
