@@ -1451,6 +1451,7 @@ DECLARE
   v_channels JSONB := '{}'::jsonb;
   v_chan     RECORD;
   v_cursor   BIGINT;
+  v_first    BIGINT;
   v_n        INTEGER;
 BEGIN
   -- SECURITY INVOKER, so this is the channels the caller may see and no
@@ -1464,6 +1465,32 @@ BEGIN
        AND r.scope_id = v_chan.id;
     v_cursor := COALESCE(v_cursor, 0);
 
+    -- Where this channel's unread mail actually starts, taken off
+    -- `idx_messages_channel` and used as a floor below.
+    --
+    -- It changes nothing about the answer — nothing in this channel sits
+    -- between the cursor and its own first row above it — and everything
+    -- about the plan. `id > cursor ORDER BY id LIMIT cap` can be served by
+    -- the primary key, which walks ids upwards from the cursor discarding
+    -- every other channel's messages, and for a cursor left in a channel
+    -- that has since gone quiet that is the whole server's traffic since:
+    -- 714 ms and a million rows against 5,000,000. With the floor, 0.57 ms.
+    --
+    -- Today the policy happens to hide that: its quals make the primary-key
+    -- path expensive enough per row that the planner picks the right index
+    -- anyway. That is luck, not design — the same query with the policy
+    -- stripped takes the bad plan — and this function runs on every app
+    -- open, once per channel.
+    SELECT min(m.id) INTO v_first
+      FROM messages m
+     WHERE m.channel_id = v_chan.id AND m.id > v_cursor;
+
+    -- Nothing here since the cursor, which is the usual case for most
+    -- channels most of the time: no badge, and no second statement either.
+    IF v_first IS NULL THEN
+      CONTINUE;
+    END IF;
+
     -- A constant channel and a constant cursor, which is what lets the
     -- planner use `idx_messages_channel (channel_id, id)` as a range: start
     -- at the cursor, walk forward, stop at the cap. Written as a correlated
@@ -1473,6 +1500,7 @@ BEGIN
       SELECT 1 FROM messages m
        WHERE m.channel_id = v_chan.id
          AND m.id > v_cursor
+         AND m.id >= v_first
          -- IS DISTINCT FROM, not <>. A webhook's sender is NULL, and `NULL <>
          -- uid` is NULL rather than true — so every webhook message was
          -- dropped from this count in silence.
