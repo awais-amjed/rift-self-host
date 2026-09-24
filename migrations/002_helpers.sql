@@ -1336,3 +1336,47 @@ $$;
 COMMENT ON FUNCTION app.release_voice_node(UUID[]) IS
   'Forget where these channels'' calls were, because they have ended. The '
   'next call on them is decided afresh.';
+
+-- Moving a call that is already up.
+--
+-- `claim_voice_node` will not do this, deliberately: its first rule is that a
+-- live room wins, because a room cannot migrate and a caller who disagreed
+-- with where the call is would otherwise split it in two. This is the
+-- override, and it is only safe because the endpoint that calls it does the
+-- other half — telling everybody in the room to reconnect, so that they all
+-- arrive at the new node together.
+--
+-- A channel with no call has nothing to move: the row is not created here,
+-- because the next caller will claim one anyway and creating it now would
+-- pin an empty channel to a node nobody chose.
+CREATE OR REPLACE FUNCTION app.move_voice_node(
+  p_channel UUID,
+  p_node    UUID
+) RETURNS TABLE (id UUID, url TEXT, label TEXT)
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
+BEGIN
+  SELECT c.server_id INTO v_server FROM channels c WHERE c.id = p_channel;
+  IF v_server IS NULL THEN RETURN; END IF;
+
+  -- The node has to be this server's. The id comes from a client.
+  IF NOT EXISTS (
+    SELECT 1 FROM livekit_nodes n WHERE n.id = p_node AND n.server_id = v_server
+  ) THEN
+    RETURN;
+  END IF;
+
+  UPDATE voice_rooms vr
+     SET node_id = p_node, opened_at = now()
+   WHERE vr.channel_id = p_channel;
+
+  IF NOT FOUND THEN RETURN; END IF;
+
+  RETURN QUERY
+  SELECT n.id, n.url, n.label FROM livekit_nodes n WHERE n.id = p_node;
+END $$;
+
+COMMENT ON FUNCTION app.move_voice_node(UUID, UUID) IS
+  'Point a live call at a different node. Answers nothing when there is no '
+  'call to move, or the node is not this server''s.';

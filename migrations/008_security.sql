@@ -177,6 +177,13 @@ REVOKE ALL ON FUNCTION release_voice_node(UUID[])
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION release_voice_node(UUID[]) TO service_role;
 
+REVOKE ALL ON FUNCTION app.move_voice_node(UUID, UUID)
+  FROM PUBLIC, anon, authenticated;
+
+REVOKE ALL ON FUNCTION move_voice_node(UUID, UUID)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION move_voice_node(UUID, UUID) TO service_role;
+
 REVOKE ALL ON FUNCTION app.sync_server_bucket(UUID, BIGINT)
   FROM PUBLIC, anon, authenticated;
 

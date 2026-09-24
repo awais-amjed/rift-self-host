@@ -2216,3 +2216,13 @@ $$;
 COMMENT ON FUNCTION release_voice_node(UUID[]) IS
   'Service-role face of app.release_voice_node: these calls have ended, so '
   'the next one on each channel is decided afresh.';
+
+CREATE OR REPLACE FUNCTION move_voice_node(p_channel UUID, p_node UUID)
+  RETURNS TABLE (id UUID, url TEXT, label TEXT)
+  LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+  SELECT n.id, n.url, n.label FROM app.move_voice_node(p_channel, p_node) n
+$$;
+
+COMMENT ON FUNCTION move_voice_node(UUID, UUID) IS
+  'Service-role face of app.move_voice_node, for the endpoint that moves a '
+  'live call and tells the room to reconnect.';
