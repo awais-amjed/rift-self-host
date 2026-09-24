@@ -64,19 +64,41 @@ export async function fetchServerContext(
     };
   }
 
-  // Fetch channels
-  const { data: channelsData } = await supabase
-    .from(DBSchema.channels.tableName)
-    .select(
-      `${DBSchema.channels.id}, ${DBSchema.channels.name}, ${DBSchema.channels.channelType}`,
-    )
-    .eq(DBSchema.channels.serverId, opts.serverId);
+  // Fetch channels — the ones this caller may see, and no others.
+  //
+  // This runs on the service role, so `channels_select` does not: the filter
+  // that policy applies (`NOT is_private OR app.in_channel(...)`) has to be
+  // applied here by hand or not at all. It was not, and the only caller is
+  // `register` — so the first thing a brand-new member received was the id and
+  // name of every private channel on the server, which is the one thing a
+  // private channel is for. `get_server_details`, which answers the same
+  // question on every later refresh, runs as the caller and was always right;
+  // this is the join path catching up with it.
+  //
+  // `visible_channels` is the same answer the policy gives, asked of the
+  // database rather than reimplemented here.
+  const { data: visibleData } = await supabase.rpc("visible_channels", {
+    p_user: opts.userId,
+  });
+  const visibleIds = ((visibleData ?? []) as Record<string, any>[])
+    .map((c) => c.channel_id as string);
 
-  const channels = (channelsData || []).map((c: Record<string, any>) => ({
-    id: c[DBSchema.channels.id],
-    name: c[DBSchema.channels.name],
-    channel_type: c[DBSchema.channels.channelType],
-  }));
+  let channels: Record<string, unknown>[] = [];
+  if (visibleIds.length > 0) {
+    const { data: channelsData } = await supabase
+      .from(DBSchema.channels.tableName)
+      .select(
+        `${DBSchema.channels.id}, ${DBSchema.channels.name}, ${DBSchema.channels.channelType}`,
+      )
+      .eq(DBSchema.channels.serverId, opts.serverId)
+      .in(DBSchema.channels.id, visibleIds);
+
+    channels = (channelsData || []).map((c: Record<string, any>) => ({
+      id: c[DBSchema.channels.id],
+      name: c[DBSchema.channels.name],
+      channel_type: c[DBSchema.channels.channelType],
+    }));
+  }
 
   return {
     server_id: opts.serverId,
