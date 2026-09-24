@@ -41,7 +41,10 @@ input {
    panel — so the browser centres the tick in the middle of the form, above a
    label it no longer looks attached to. That is what the setup page's toggles
    did for want of a class, so the base rule says it too: forgetting
-   `label.check` now costs an uppercase label, not a checkbox adrift. */
+   label.check now costs an uppercase label, not a checkbox adrift.
+
+   No backticks in here, ever: this whole stylesheet is one template literal,
+   so a backtick in a CSS comment closes it and the module stops parsing. */
 input[type="checkbox"], input[type="radio"] {
   width: auto; padding: 0; accent-color: var(--accent);
 }
