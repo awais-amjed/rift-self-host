@@ -75,8 +75,9 @@ export function setupPage(fields: OptionField[], values: SetupOptions): string {
 
 <div class="panel" id="done" style="display:none">
   <h2 style="margin-top:0">Your server is running</h2>
-  <p>Paste this into the app's Join form. It is a single-use admin invite:
-    whoever uses it first becomes the server's administrator.</p>
+  <p>In the app, choose <strong>Add server &rarr; Join server</strong> and paste
+    this. It is a single-use admin invite: whoever uses it first becomes the
+    server's administrator.</p>
   <div class="invite" id="invite"></div>
 
   <h2>Console password</h2>

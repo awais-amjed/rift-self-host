@@ -210,7 +210,7 @@ export const fields: OptionField[] = [
     kind: "number",
     advanced: false,
     only: "proxy",
-    hint: "Where Kong is published on 127.0.0.1 for your proxy to reach. " +
+    hint: "Where the API is published on 127.0.0.1 for your proxy to reach. " +
       "LiveKit's signalling goes to 127.0.0.1:7880 beside it.",
   },
   {
