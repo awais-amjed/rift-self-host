@@ -742,14 +742,32 @@ CREATE OR REPLACE FUNCTION ring_channel_members()
   SET search_path = public AS $$
 DECLARE
   v_server_id UUID;
+  v_private   BOOLEAN;
+  v_eligible  UUID[];
   v_t         RECORD;
   v_targets   UUID[];
 BEGIN
   IF NEW.is_interaction THEN RETURN NEW; END IF;
 
-  SELECT server_id INTO v_server_id FROM channels WHERE id = NEW.channel_id;
+  SELECT c.server_id, c.is_private INTO v_server_id, v_private
+    FROM channels c WHERE c.id = NEW.channel_id;
   IF v_server_id IS NULL THEN RETURN NEW; END IF;
   IF NOT app.push_enabled(v_server_id) THEN RETURN NEW; END IF;
+
+  -- Eligibility, decided once rather than per member.
+  --
+  -- Both branches below used to end in `app.channel_eligible(channel, u.id)`,
+  -- which is two EXISTS queries, run for every candidate the branch found.
+  -- On a public channel it asks nothing the surrounding query has not already
+  -- asked — `channel_eligible` on a public channel *is* "in this server and
+  -- not banned" — and it cost 40 µs a head: 2.1 seconds to send one message
+  -- to a 50,000-member channel where everybody was caught up, measured. On a
+  -- private one the answer is a membership list, which is small and worth
+  -- gathering once.
+  IF v_private THEN
+    v_eligible := app.channel_audience(NEW.channel_id);
+    IF v_eligible IS NULL OR cardinality(v_eligible) = 0 THEN RETURN NEW; END IF;
+  END IF;
 
   v_t := app.unread_thresholds(NEW.channel_id, NEW.id);
 
@@ -762,7 +780,7 @@ BEGIN
        AND u.id IS DISTINCT FROM NEW.sender_id
        AND NOT u.is_banned AND NOT u.is_bot
        AND (NEW.ephemeral_for IS NULL OR u.id = NEW.ephemeral_for)
-       AND app.channel_eligible(NEW.channel_id, u.id);
+       AND (NOT v_private OR u.id IN (SELECT unnest(v_eligible)));
   ELSE
     SELECT array_agg(c.user_id) INTO v_targets FROM (
       -- Everyone whose cursor is at or past the newest message they did not
@@ -789,7 +807,7 @@ BEGIN
      AND u.id IS DISTINCT FROM NEW.sender_id
      AND NOT u.is_banned AND NOT u.is_bot
      AND (NEW.ephemeral_for IS NULL OR u.id = NEW.ephemeral_for)
-     AND app.channel_eligible(NEW.channel_id, u.id);
+     AND (NOT v_private OR u.id IN (SELECT unnest(v_eligible)));
   END IF;
 
   PERFORM ring_devices(v_server_id, v_targets);

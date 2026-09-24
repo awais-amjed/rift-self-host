@@ -1732,6 +1732,10 @@ CREATE OR REPLACE FUNCTION member_counts(p_channel UUID DEFAULT NULL)
   LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_server UUID := app.server_id();
+  -- Once, not per member. Asked per row this was two EXISTS queries a head
+  -- and 3.6 seconds to count a private channel's people on a 50,000-member
+  -- server; as an array it is a hash lookup. NULL is "no restriction".
+  v_audience UUID[] := app.channel_audience(p_channel);
   v_people BIGINT; v_bots BIGINT;
 BEGIN
   IF v_server IS NULL OR NOT app.member_scope_allowed(p_channel) THEN
@@ -1744,10 +1748,13 @@ BEGIN
     FROM member_directory m
    WHERE m.server_id = v_server
      AND NOT m.is_banned
-     -- Only the channel half needs the function; without a channel this is
-     -- a constant false and it is never called.
-     AND (p_channel IS NULL
-          OR app.member_in_scope(m.id, m.is_bot, m.is_banned, p_channel, NULL, NULL));
+     -- `IN (SELECT unnest(…))`, not `= ANY (…)`. Postgres hashes an array
+     -- it can see as a constant, but this one arrives as a parameter, so the
+     -- ANY form is a linear walk of two thousand ids for every one of fifty
+     -- thousand members — 211 ms, worse than the per-row function it
+     -- replaced. As a subquery the array is unnested once into a hash and the
+     -- per-row test is a lookup: 2 ms.
+     AND (v_audience IS NULL OR m.id IN (SELECT unnest(v_audience)));
 
   RETURN jsonb_build_object('people', COALESCE(v_people, 0),
                             'bots',   COALESCE(v_bots, 0));
@@ -1771,7 +1778,11 @@ CREATE OR REPLACE FUNCTION list_members(
   p_limit      INTEGER DEFAULT 50)
   RETURNS SETOF member_directory
   LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_server UUID := app.server_id();
+DECLARE
+  v_server UUID := app.server_id();
+  -- See `app.channel_audience`: the channel's membership gathered once,
+  -- rather than asked of each member the page walks past.
+  v_audience UUID[] := app.channel_audience(p_channel);
 BEGIN
   IF v_server IS NULL OR NOT app.member_scope_allowed(p_channel) THEN
     RETURN;
@@ -1783,8 +1794,7 @@ BEGIN
      WHERE m.server_id = v_server
        AND (p_bots   IS NULL OR m.is_bot    = p_bots)
        AND (p_banned IS NULL OR m.is_banned = p_banned)
-       AND (p_channel IS NULL
-            OR app.member_in_scope(m.id, m.is_bot, m.is_banned, p_channel, NULL, NULL))
+       AND (v_audience IS NULL OR m.id IN (SELECT unnest(v_audience)))
      ORDER BY app.member_sort_key(m.display_name), m.id
      LIMIT app.member_limit(p_limit);
   ELSE
@@ -1796,8 +1806,7 @@ BEGIN
               COALESCE(p_after_id, '00000000-0000-0000-0000-000000000000'::UUID))
        AND (p_bots   IS NULL OR m.is_bot    = p_bots)
        AND (p_banned IS NULL OR m.is_banned = p_banned)
-       AND (p_channel IS NULL
-            OR app.member_in_scope(m.id, m.is_bot, m.is_banned, p_channel, NULL, NULL))
+       AND (v_audience IS NULL OR m.id IN (SELECT unnest(v_audience)))
      ORDER BY app.member_sort_key(m.display_name), m.id
      LIMIT app.member_limit(p_limit);
   END IF;

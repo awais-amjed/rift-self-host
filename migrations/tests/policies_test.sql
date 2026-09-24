@@ -3088,6 +3088,56 @@ BEGIN
   RAISE NOTICE 'ok  an outsider asking gets an empty answer, not a roster';
 END $$;
 
+-- The set itself, which the answers above are now made of.
+--
+-- `app.channel_audience` is what a private channel's membership costs when it
+-- is gathered once instead of asked per member, and it carries the whole
+-- distinction the callers rely on: NULL is "no restriction", an empty array is
+-- "nobody". Collapse those two and a private channel with no members becomes
+-- one everybody can see the roster of.
+RESET ROLE;
+DO $$
+DECLARE v_pub UUID[]; v_priv UUID[]; v_empty UUID[]; v_none UUID[];
+BEGIN
+  v_pub  := app.channel_audience('aaaa1111-0000-4000-8000-000000000001');
+  v_priv := app.channel_audience('aaaa1111-0000-4000-8000-0000000000a0');
+  v_none := app.channel_audience(NULL);
+
+  IF v_pub IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a public channel came back with an audience';
+  END IF;
+  IF v_none IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: no channel came back with an audience';
+  END IF;
+  IF v_priv IS NULL THEN
+    RAISE EXCEPTION 'FAIL: a private channel came back as unrestricted';
+  END IF;
+  -- Carol is seated by name, alice only by role: the resolution is the part
+  -- a caller could not do for itself.
+  IF NOT ('11111111-aaaa-4aaa-8aaa-000000000003' = ANY(v_priv))
+     OR NOT ('11111111-aaaa-4aaa-8aaa-000000000001' = ANY(v_priv)) THEN
+    RAISE EXCEPTION 'FAIL: the audience missed a member or a role grant';
+  END IF;
+  IF '11111111-aaaa-4aaa-8aaa-0000000000a1' = ANY(v_priv) THEN
+    RAISE EXCEPTION 'FAIL: an outsider is in the audience';
+  END IF;
+
+  -- The empty case is not reachable and that is the schema's doing, not
+  -- luck: `channel_members_reassign` closes a private channel the moment its
+  -- last member leaves, so there is no private channel with nobody in it to
+  -- ask about. Emptying one here deleted the channel, which is why this
+  -- asserts the ceiling rather than the floor — the COALESCE in
+  -- `channel_audience` is there so that if that rule ever changes, "nobody"
+  -- arrives as an empty array and not as "no restriction".
+  v_empty := app.channel_audience('00000000-0000-4000-8000-00000000dead');
+  IF v_empty IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a channel that does not exist has an audience';
+  END IF;
+
+  RAISE NOTICE 'ok  the audience is a set, and a public channel has none';
+END $$;
+SET LOCAL ROLE authenticated;
+
 -- ============================================================
 -- 19. What a granted bot actually reads (035)
 -- ============================================================

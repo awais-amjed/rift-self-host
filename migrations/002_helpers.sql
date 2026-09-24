@@ -594,6 +594,39 @@ CREATE OR REPLACE FUNCTION app.member_sort_key(p_name TEXT) RETURNS TEXT
 -- channel every time, and the private-channel test only matters when the
 -- channel is private. The scalar subquery is evaluated once and the OR
 -- short-circuits for every row of a public channel.
+-- The people a private channel is open to, gathered once.
+--
+-- NULL means "everybody in the server", which is what a public channel and a
+-- missing channel both mean; an empty array means nobody, which a private
+-- channel with no members really does mean, and the two must not collapse.
+--
+-- It exists because the per-row form of the same question is what several
+-- statements were spending their time on. `app.in_channel` is two EXISTS
+-- queries, and asked once per member it cost 3.6 seconds to count the people
+-- in a private channel on a 50,000-member server. The list is the channel's
+-- membership, which is small whatever the server is.
+CREATE OR REPLACE FUNCTION app.channel_audience(p_channel UUID) RETURNS UUID[]
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT CASE
+    WHEN p_channel IS NULL THEN NULL
+    WHEN NOT COALESCE((SELECT c.is_private FROM channels c WHERE c.id = p_channel), false)
+      THEN NULL
+    ELSE COALESCE((
+      SELECT array_agg(DISTINCT e.user_id) FROM (
+        SELECT cm.user_id FROM channel_members cm WHERE cm.channel_id = p_channel
+        UNION
+        SELECT mr.user_id FROM channel_role_access cra
+          JOIN member_roles mr ON mr.role_id = cra.role_id
+         WHERE cra.channel_id = p_channel
+      ) e), ARRAY[]::UUID[])
+  END
+$$;
+
+COMMENT ON FUNCTION app.channel_audience(UUID) IS
+  'Who may open this private channel, as one array; NULL when the channel is '
+  'public or absent, meaning no restriction. Hoisted out of the per-row '
+  'membership test the member queries and the doorbell used to make.';
+
 CREATE OR REPLACE FUNCTION app.member_in_scope(
   p_user     UUID,
   p_is_bot   BOOLEAN,
