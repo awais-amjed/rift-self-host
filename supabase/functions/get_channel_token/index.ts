@@ -307,9 +307,17 @@ Deno.serve(async (req) => {
     // publisher either. Deliberate — this is a limit about cost rather than
     // about trust, and the case it exists for is somebody left on the 10 Mbps
     // default who does not know it costs that per watcher.
+    // `livekit_url` rides along with the token for the same reason
+    // `max_share_mbps` does: the client has it at the moment it needs it, and
+    // it is this function that decides it. A client that takes its address
+    // from here rather than from `servers.livekit_url` can be sent to a
+    // different node per channel without being rebuilt — see
+    // `LiveKitCredentials.url`. Older clients ignore the field and read the
+    // server row, which is the same address today.
     return CustomResponse.success({
       token: livekitToken,
       identity,
+      livekit_url: credentials.url,
       max_share_mbps: maxShareMbps,
     });
   } catch (err) {

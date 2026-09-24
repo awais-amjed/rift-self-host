@@ -13,6 +13,20 @@ export interface LiveKitCredentials {
   host: string;
   apiKey: string;
   apiSecret: string;
+
+  /**
+   * The stored `wss://` URL, unchanged — what a *client* connects to, where
+   * [host] is the `https://` form the admin API wants.
+   *
+   * Handed back to the client with its token rather than read from
+   * `servers.livekit_url` on the client side, so that which LiveKit a channel
+   * lives on is decided here. Today every channel on a server answers with the
+   * same address; the point is that a client asking for a token is already
+   * being told where to take it, so moving a channel to a different node
+   * later is a server-side change rather than one every installed client has
+   * to be updated for.
+   */
+  url: string;
 }
 
 /**
@@ -51,7 +65,7 @@ export async function livekitCredentials(
   const livekitUrl: string = (server as Record<string, any>)[DBSchema.servers.livekitUrl] ?? "";
   if (!apiKey || !apiSecret || !livekitUrl) return null;
 
-  return { host: normaliseHost(livekitUrl), apiKey, apiSecret };
+  return { host: normaliseHost(livekitUrl), apiKey, apiSecret, url: livekitUrl };
 }
 
 /** `wss://` → `https://`, `ws://` → `http://`; anything else is left alone. */
