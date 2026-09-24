@@ -75,7 +75,11 @@ Deno.test("every field the form renders is a real option", () => {
  */
 Deno.test("a field applies exactly where the stack has one", () => {
   const field = (key: string) => fields.find((f) => f.key === key)!;
-  const local: SetupOptions = { ...defaults, localTesting: true, localAddress: "192.168.1.6" };
+  const local: SetupOptions = {
+    ...defaults,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+  };
   const caddy: SetupOptions = { ...defaults, domain: "chat.example.com" };
   const proxied: SetupOptions = { ...caddy, ownProxy: true };
 
@@ -111,8 +115,16 @@ Deno.test("a field applies exactly where the stack has one", () => {
 Deno.test("a stack made only of the fields that apply is a valid one", () => {
   // The page posts nothing it is hiding, so whatever survives `applies` has
   // to be enough on its own.
-  const local: SetupOptions = { ...defaults, localTesting: true, localAddress: "192.168.1.6" };
-  const proxied: SetupOptions = { ...defaults, domain: "chat.example.com", ownProxy: true };
+  const local: SetupOptions = {
+    ...defaults,
+    localTesting: true,
+    localAddress: "192.168.1.6",
+  };
+  const proxied: SetupOptions = {
+    ...defaults,
+    domain: "chat.example.com",
+    ownProxy: true,
+  };
   for (const options of [local, proxied]) {
     const posted: Record<string, unknown> = { ...defaults };
     for (const f of fields) {
