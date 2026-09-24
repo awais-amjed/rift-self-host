@@ -18,8 +18,9 @@ import * as EC from "../_shared/error_codes.ts";
  * This function is deliberately thin. The lookup, the rate check and the insert
  * are one statement inside the database (migration 013) so nothing can sit
  * between them, and so the rule survives the next thing that learns to write a
- * message. All that is left out here is the part only an edge function can do:
- * being reachable without a JWT, and ringing the doorbell afterwards.
+ * message. All that is left out here is the one part only an edge function can
+ * do: being reachable without a JWT. The doorbell is the database's, like
+ * every other message's.
  *
  * `content` is accepted alongside `text` on purpose. It is the field Discord's
  * webhooks use, so anything already configured to post to one — a CI job, a
@@ -72,26 +73,6 @@ async function textFrom(req: Request): Promise<string | null> {
   }
 }
 
-/**
- * Tell anyone with the channel open that something arrived.
- *
- * Best-effort, and never allowed to fail the request: the message is already
- * stored by the time this runs, every client re-reads on open, and the unread
- * badge comes from the row itself. A webhook that got a 500 because a doorbell
- * did not ring would be retried by its caller and post the message twice.
- */
-async function ringDoorbell(channelId: string): Promise<void> {
-  try {
-    await supabase.channel(`chat:${channelId}`).send({
-      type: "broadcast",
-      event: "new_message",
-      payload: {},
-    });
-  } catch (err) {
-    console.error("[webhook] doorbell failed (message was still stored):", err);
-  }
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -141,8 +122,24 @@ Deno.serve(async (req) => {
       return CustomResponse.error(failure.message, reason, undefined, failure.status);
     }
 
+    // Nothing is rung from here, and that is the fix rather than an omission.
+    //
+    // There used to be a `ringDoorbell` that broadcast `new_message` on
+    // `chat:<channel id>`, and it did nothing twice over. Clients join that
+    // topic with `private: true`, and Realtime keeps private and public
+    // broadcasts apart — measured: a private send reaches a public subscriber
+    // of the same topic not at all. No client listens for `new_message`
+    // either; the event a channel actually waits on is `message`.
+    //
+    // What it did do was open `chat:<channel id>` as a *public* topic, which
+    // needs no policy to join. Any authenticated caller could sit on the
+    // public side of a private channel's topic and learn, each time the
+    // payload arrived, that the room had just been posted in.
+    //
+    // The doorbell was already ringing anyway: `messages_announce` fires on
+    // the insert whoever made it, and sends to `server:` or `channel:` with
+    // the private flag set, which is the path every client is actually on.
     const row = data as Record<string, string>;
-    await ringDoorbell(row.channel_id);
 
     return CustomResponse.success({ message_id: row.message_id });
   } catch (err) {
