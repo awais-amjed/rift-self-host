@@ -153,7 +153,7 @@ REVOKE ALL ON FUNCTION sweep_attachments(INTEGER) FROM PUBLIC, anon, authenticat
 
 GRANT EXECUTE ON FUNCTION sweep_attachments(INTEGER) TO service_role;
 
-REVOKE ALL ON FUNCTION app.enforce_retention() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.enforce_retention(INTEGER) FROM PUBLIC, anon, authenticated;
 
 REVOKE ALL ON device_tokens FROM anon;
 

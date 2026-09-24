@@ -167,7 +167,13 @@ END; $$;
 -- All four blocks read the same way: COALESCE the per-scope override onto the
 -- server-wide number, so NULL inherits it and 0 opts out of it.
 
-CREATE OR REPLACE FUNCTION app.enforce_retention() RETURNS VOID
+-- The signature gained a parameter, so the old one has to go first:
+-- CREATE OR REPLACE cannot change it, and leaving both would make an
+-- argument-less call ambiguous.
+DROP FUNCTION IF EXISTS app.enforce_retention();
+
+CREATE OR REPLACE FUNCTION app.enforce_retention(p_limit INTEGER DEFAULT 500000)
+  RETURNS VOID
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   -- Four statements, each guarded by "has anybody asked for this at all".
@@ -178,19 +184,45 @@ BEGIN
   -- somebody sets one — paid a full scan of its history every night for
   -- nothing: 965 ms against 5,000,000 messages, and it grows with the table.
   -- The guards read two tiny tables and are false on almost every server.
+  --
+  -- And each is bounded by `p_limit`, because the day somebody turns a limit
+  -- on is the day this has the most to do. A server holding 5,000,000
+  -- messages that sets a 1,000-per-channel cap has 4,960,000 rows to lose,
+  -- and deleting them in one statement means one transaction, its whole WAL,
+  -- and every index and cascade rewritten before anything commits. Bounded,
+  -- the same server converges over a few nights and each night's work is a
+  -- size somebody chose.
+  --
+  -- 500,000 measured at 24 s a run, which is ten nights for that backlog.
+  -- Smaller batches cost more per row rather than less: 100,000 took 8.6 s,
+  -- because most of a run is the *finding* rather than the deleting, and the
+  -- finding costs the same whatever the batch. So the number is high enough
+  -- that an operator who switches a cap on sees it converging, and low
+  -- enough that one night's work is a size and not a number of hours.
+  --
+  -- Oldest first, in all four, so that what a member sees meanwhile is a
+  -- history that ends earlier rather than one with holes punched through it.
+  --
+  -- What this does **not** bound is that finding: the two by-count statements
+  -- rank the whole table to learn which rows are past the cap, which is
+  -- 1.6–4.3 s at 5,000,000 however few rows come back. That is a read, once a
+  -- night, and it is survivable; the delete was not.
 
   -- ---------- channel messages, by age ----------
   -- COALESCE is the inherit rule: the channel's number when it set one, the
   -- server's when it didn't.
   IF EXISTS (SELECT 1 FROM servers s WHERE COALESCE(s.message_retention_days, 0) > 0)
      OR EXISTS (SELECT 1 FROM channels c WHERE COALESCE(c.retention_days, 0) > 0) THEN
-  DELETE FROM messages m
-   USING channels c, servers s
-   WHERE m.channel_id = c.id
-     AND c.server_id  = s.id
-     AND COALESCE(c.retention_days, s.message_retention_days) > 0
-     AND m.created_at < now() - make_interval(
-           days => COALESCE(c.retention_days, s.message_retention_days));
+  DELETE FROM messages WHERE id IN (
+    SELECT m.id
+      FROM messages m
+      JOIN channels c ON c.id = m.channel_id
+      JOIN servers  s ON s.id = c.server_id
+     WHERE COALESCE(c.retention_days, s.message_retention_days) > 0
+       AND m.created_at < now() - make_interval(
+             days => COALESCE(c.retention_days, s.message_retention_days))
+     ORDER BY m.id
+     LIMIT p_limit);
   END IF;
 
   -- ---------- DM messages, by age ----------
@@ -200,13 +232,16 @@ BEGIN
   -- per-server DM one, and it reads exactly like a channel's.
   IF EXISTS (SELECT 1 FROM servers s
               WHERE COALESCE(s.dm_retention_days, s.message_retention_days, 0) > 0) THEN
-  DELETE FROM dm_messages d
-   USING users u, servers s
-   WHERE d.sender_id  = u.id
-     AND u.server_id  = s.id
-     AND COALESCE(s.dm_retention_days, s.message_retention_days) > 0
-     AND d.created_at < now() - make_interval(
-           days => COALESCE(s.dm_retention_days, s.message_retention_days));
+  DELETE FROM dm_messages WHERE id IN (
+    SELECT d.id
+      FROM dm_messages d
+      JOIN users   u ON u.id = d.sender_id
+      JOIN servers s ON s.id = u.server_id
+     WHERE COALESCE(s.dm_retention_days, s.message_retention_days) > 0
+       AND d.created_at < now() - make_interval(
+             days => COALESCE(s.dm_retention_days, s.message_retention_days))
+     ORDER BY d.id
+     LIMIT p_limit);
   END IF;
 
   -- ---------- channel messages, by count ----------
@@ -222,6 +257,8 @@ BEGIN
         JOIN servers  s ON s.id = c.server_id
        WHERE COALESCE(c.history_cap, s.message_history_cap) > 0
     ) ranked WHERE rn > cap
+     ORDER BY rn DESC
+     LIMIT p_limit
   );
   END IF;
 
@@ -245,6 +282,8 @@ BEGIN
         JOIN servers s ON s.id = u.server_id
        WHERE COALESCE(s.dm_history_cap, s.message_history_cap) > 0
     ) ranked WHERE rn > cap
+     ORDER BY rn DESC
+     LIMIT p_limit
   );
   END IF;
 END; $$;
