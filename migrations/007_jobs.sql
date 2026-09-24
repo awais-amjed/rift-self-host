@@ -170,9 +170,20 @@ END; $$;
 CREATE OR REPLACE FUNCTION app.enforce_retention() RETURNS VOID
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
+  -- Four statements, each guarded by "has anybody asked for this at all".
+  --
+  -- Without the guards every one of them still has to join `messages` to
+  -- `channels` to `servers` before it can discover that the answer is no, so
+  -- a server with retention off and no cap — which is every server until
+  -- somebody sets one — paid a full scan of its history every night for
+  -- nothing: 965 ms against 5,000,000 messages, and it grows with the table.
+  -- The guards read two tiny tables and are false on almost every server.
+
   -- ---------- channel messages, by age ----------
   -- COALESCE is the inherit rule: the channel's number when it set one, the
   -- server's when it didn't.
+  IF EXISTS (SELECT 1 FROM servers s WHERE COALESCE(s.message_retention_days, 0) > 0)
+     OR EXISTS (SELECT 1 FROM channels c WHERE COALESCE(c.retention_days, 0) > 0) THEN
   DELETE FROM messages m
    USING channels c, servers s
    WHERE m.channel_id = c.id
@@ -180,12 +191,15 @@ BEGIN
      AND COALESCE(c.retention_days, s.message_retention_days) > 0
      AND m.created_at < now() - make_interval(
            days => COALESCE(c.retention_days, s.message_retention_days));
+  END IF;
 
   -- ---------- DM messages, by age ----------
   -- A DM's server is its sender's; the CHECK on `dm_messages` and
   -- `can_receive_dm` both keep a pair inside one server, so either end answers.
   -- There is no per-conversation override to consult, but there is now a
   -- per-server DM one, and it reads exactly like a channel's.
+  IF EXISTS (SELECT 1 FROM servers s
+              WHERE COALESCE(s.dm_retention_days, s.message_retention_days, 0) > 0) THEN
   DELETE FROM dm_messages d
    USING users u, servers s
    WHERE d.sender_id  = u.id
@@ -193,8 +207,11 @@ BEGIN
      AND COALESCE(s.dm_retention_days, s.message_retention_days) > 0
      AND d.created_at < now() - make_interval(
            days => COALESCE(s.dm_retention_days, s.message_retention_days));
+  END IF;
 
   -- ---------- channel messages, by count ----------
+  IF EXISTS (SELECT 1 FROM servers s WHERE COALESCE(s.message_history_cap, 0) > 0)
+     OR EXISTS (SELECT 1 FROM channels c WHERE COALESCE(c.history_cap, 0) > 0) THEN
   DELETE FROM messages WHERE id IN (
     SELECT id FROM (
       SELECT m.id,
@@ -206,11 +223,14 @@ BEGIN
        WHERE COALESCE(c.history_cap, s.message_history_cap) > 0
     ) ranked WHERE rn > cap
   );
+  END IF;
 
   -- ---------- DM messages, by count ----------
   -- Order-independent pair, matching `idx_dm_messages_pair` and central's
   -- equivalent sweep: a conversation is one bucket seen from either side, and
   -- the cap counts both people's messages together.
+  IF EXISTS (SELECT 1 FROM servers s
+              WHERE COALESCE(s.dm_history_cap, s.message_history_cap, 0) > 0) THEN
   DELETE FROM dm_messages WHERE id IN (
     SELECT id FROM (
       SELECT d.id,
@@ -226,6 +246,7 @@ BEGIN
        WHERE COALESCE(s.dm_history_cap, s.message_history_cap) > 0
     ) ranked WHERE rn > cap
   );
+  END IF;
 END; $$;
 
 -- ---------- forgetting a device ----------
