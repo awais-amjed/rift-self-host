@@ -223,6 +223,24 @@ END; $$;
 -- A private channel has exactly the same shape and deserves the same answer:
 -- a client that wraps a key for somebody who is not in the room believes it did
 -- something, and would otherwise carry on believing it.
+--
+-- **Both ends of the row, not just one.** Every check below used to ask about
+-- `user_id` — who the key is *for* — and nothing asked about `wrapped_by`, who
+-- decided what it says. That was only ever safe because the policy asks:
+-- `channel_keyring_insert` requires `app.can_see_channel`, so a member had no
+-- way to reach the table for a room they were not in.
+--
+-- But the policy is not the only way in. `post_channel_keys` writes these rows
+-- on the service role, where RLS does not apply, and a check it forgets is a
+-- check nothing makes. It forgot this one: any member of the server could name
+-- any channel — including a private one they had never been in — and seal
+-- version n+1 to its real members with bytes of their own choosing. First
+-- writer wins and there is no ON CONFLICT, so the room's key became whatever
+-- an outsider said it was, and the people in it could not re-wrap it.
+--
+-- So the writer is asked about here, where every path has to pass. An
+-- eligibility test on `wrapped_by` is the same question the policy asks, in
+-- the one place the service role cannot skip.
 
 CREATE OR REPLACE FUNCTION refuse_ineligible_keyring()
   RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
@@ -230,6 +248,13 @@ CREATE OR REPLACE FUNCTION refuse_ineligible_keyring()
 DECLARE
   v_from INTEGER;
 BEGIN
+  -- First, and for every row: a key is only as trustworthy as whoever sealed
+  -- it. A bot never wraps — it is wrapped *for* — so this is a plain member
+  -- test whatever `user_id` turns out to be.
+  IF NOT app.channel_eligible(NEW.channel_id, NEW.wrapped_by) THEN
+    RAISE EXCEPTION 'wrapper_not_a_channel_member';
+  END IF;
+
   IF EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.user_id AND u.is_bot) THEN
     SELECT from_key_version INTO v_from FROM bot_channel_keys
      WHERE channel_id = NEW.channel_id AND bot_id = NEW.user_id;

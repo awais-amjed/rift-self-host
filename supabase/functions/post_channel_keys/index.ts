@@ -39,6 +39,33 @@ Deno.serve(async (req) => {
     const channel = await checkChannel(supabase, channel_id, auth.serverId);
     if (channel instanceof Response) return channel;
 
+    // The same gate `get_channel_key` puts in front of the read, in front of
+    // the write — which is the half that was missing.
+    //
+    // `checkChannel` only asks whether the channel is on this server. That is
+    // the whole of what a channel id proves, and this function runs on the
+    // service role, where the policy that would have asked the rest
+    // (`channel_keyring_insert`, via `app.can_see_channel`) does not apply. So
+    // a member who was never in a private channel could name it, seal version
+    // n+1 to the people who are, and — because the insert below has no
+    // ON CONFLICT and nobody holds DELETE on the keyring — leave them a
+    // current version they cannot open and cannot replace.
+    //
+    // Answered as "not found" rather than "forbidden", like every other
+    // refusal about a room you cannot see. The version arithmetic below is
+    // past this on purpose: `key_version N skips ahead (current is M)` names
+    // M, and M is a fact about a private channel's key.
+    const { data: visible, error: visibleError } = await supabase.rpc(
+      "channel_visible_to",
+      { p_channel: channel_id, p_user: auth.userId },
+    );
+    if (visibleError) {
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, visibleError);
+    }
+    if (visible !== true) {
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    }
+
     if (!Number.isInteger(key_version) || key_version < 1) {
       return CustomResponse.error("Invalid key_version", EC.ENVELOPE_INVALID);
     }

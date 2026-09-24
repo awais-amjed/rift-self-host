@@ -2112,6 +2112,46 @@ BEGIN
   RAISE NOTICE 'ok  a key cannot be wrapped for a non-member';
 END $$;
 
+-- And the other end of the same row. The rule above is about who a key is
+-- *for*; this is about who said what it contains.
+--
+-- It is tested on the service role on purpose, because that is where it was
+-- broken. `post_channel_keys` writes the keyring with the service key, so
+-- `channel_keyring_insert` — the policy that asks `app.can_see_channel` —
+-- never runs on the path a client actually takes. Alice could name a private
+-- channel she had never been in, seal version n+1 to Bob, and win: the insert
+-- carries no ON CONFLICT and nobody holds DELETE here, so Bob's room had a
+-- current key he could not open and could not replace.
+--
+-- The function asks now, and so does the row, which is the half that survives
+-- the next endpoint.
+DO $$
+BEGIN
+  RESET ROLE;  -- the service role: RLS is not what stops this
+  BEGIN
+    INSERT INTO channel_keyring
+      (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 2,
+            '11111111-aaaa-4aaa-8aaa-000000000002',   -- for Bob, who is in it
+            '11111111-aaaa-4aaa-8aaa-000000000001',   -- by Alice, who is not
+            'eph', 'attacker-chosen', 'n');
+    RAISE EXCEPTION 'FAIL: an outsider sealed a key into a private channel';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+    IF SQLERRM <> 'wrapper_not_a_channel_member' THEN
+      RAISE EXCEPTION 'FAIL: refused, but for the wrong reason: %', SQLERRM;
+    END IF;
+  END;
+  -- The version the members hold is still the one a member wrapped.
+  IF EXISTS (SELECT 1 FROM channel_keyring
+              WHERE channel_id = 'aaaa1111-0000-4000-8000-00000000ffff'
+                AND key_version > 1) THEN
+    RAISE EXCEPTION 'FAIL: the outsider''s version landed anyway';
+  END IF;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  and cannot be wrapped BY one, even off the policy path';
+END $$;
+
 DO $$
 BEGIN
   BEGIN
