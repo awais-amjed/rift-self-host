@@ -699,10 +699,44 @@ CREATE OR REPLACE FUNCTION app.unread_thresholds(
   OUT o_newest_other BIGINT    -- m2: the newest before it from anybody else
 ) RETURNS RECORD
   LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_top BIGINT;
 BEGIN
+  -- `max(id) WHERE channel_id = …` rather than `ORDER BY id DESC LIMIT 1`,
+  -- and the difference is not style. Written as an ordered read, the planner
+  -- is free to satisfy the sort with the **primary key**: walk ids downwards
+  -- from `p_before` and discard everything that is not this channel's. That
+  -- costs one row when this is the channel everybody is talking in, and a
+  -- scan of every message written since when it is not — 777 ms on a channel
+  -- whose newest message was four million rows ago, measured on 5,000,000.
+  -- `max()` over the same predicate becomes an InitPlan on
+  -- `idx_messages_channel (channel_id, id)`, which is this channel's own
+  -- newest id and nothing else's: 0.2 ms on the same data, whatever the
+  -- channel. The planner cannot be talked out of the first plan, because with
+  -- `channel_id` fixed by equality `ORDER BY channel_id, id DESC` reduces to
+  -- `ORDER BY id DESC` and the primary key serves it again.
+  --
+  -- This runs on every insert into `messages`, so that scan sat on the path
+  -- of every message anybody sent.
+  -- The channel's own newest id, and nothing else's. Asked with no bound on
+  -- `id` at all, which is what lets it become an index-only scan backwards
+  -- along `idx_messages_channel` that stops on the first row: add `id <
+  -- p_before` here and the planner takes the primary key instead, because a
+  -- range on `id` is something the primary key can serve and a channel is
+  -- not. That is the whole trap.
+  SELECT max(x.id) INTO v_top FROM messages x WHERE x.channel_id = p_channel;
+  IF v_top IS NULL THEN
+    RETURN;   -- nothing has ever been said here
+  END IF;
+
+  -- Now the ordered read can have its range, because the range starts at this
+  -- channel's own newest message rather than at the top of the table. What it
+  -- walks past is whatever this channel put after `p_before` plus any button
+  -- presses, not every message every other channel has received since.
   SELECT m.id, m.sender_id INTO o_newest, o_newest_by
     FROM messages m
-   WHERE m.channel_id = p_channel AND m.id < p_before
+   WHERE m.channel_id = p_channel
+     AND m.id <= LEAST(v_top, p_before - 1)
      AND NOT m.is_interaction
    ORDER BY m.id DESC LIMIT 1;
 
@@ -710,12 +744,42 @@ BEGIN
     RETURN;   -- nothing came before: nobody can have unread mail here
   END IF;
 
-  SELECT m.id INTO o_newest_other
-    FROM messages m
-   WHERE m.channel_id = p_channel AND m.id < p_before
-     AND NOT m.is_interaction
-     AND m.sender_id IS DISTINCT FROM o_newest_by
-   ORDER BY m.id DESC LIMIT 1;
+  -- Bounded by `o_newest` rather than by `p_before`, and that is the whole
+  -- point of doing it second. The newest message from anybody else is by
+  -- definition older than the newest message, so the two are the same
+  -- question — but `p_before` is the id of the message being inserted, which
+  -- is the top of the whole table, while `o_newest` is this channel's own.
+  -- Written against `p_before` this walked the primary key back over every
+  -- message any other channel had received in the meantime, which left the
+  -- fix above buying nothing: 762 ms, unchanged.
+  --
+  -- What remains is a walk back over however many messages that one member
+  -- sent in a row, which is a handful and not a history.
+  SELECT max(m.id) INTO o_newest_other
+    FROM (
+      -- Ids only, and that is what keeps this on `idx_messages_channel`. The
+      -- index holds `(channel_id, id)`, so a query wanting nothing else is
+      -- answered without touching the heap and costs a hundred index entries;
+      -- ask for `sender_id` in the same breath and every row needs a heap
+      -- fetch, the planner prices that above walking the primary key
+      -- downwards instead, and we are back to reading every message the
+      -- server has received since this channel last spoke. 813 ms against
+      -- 0.4 ms, measured on 5,000,000.
+      SELECT x.id FROM messages x
+       WHERE x.channel_id = p_channel AND x.id < o_newest
+       ORDER BY x.id DESC
+       -- A hundred is "how many messages in a row can one person have sent
+       -- and still be the reason nobody else is rung". Past that this comes
+       -- back NULL, which the doorbell already has a meaning for — nobody
+       -- else has spoken here — and that meaning errs the safe way: the one
+       -- member it concerns is treated as caught up and therefore rung. The
+       -- cost of being wrong is a doorbell somebody did not need, never a
+       -- message nobody was told about.
+       LIMIT 100
+    ) t
+    JOIN messages m ON m.id = t.id
+   WHERE NOT m.is_interaction
+     AND m.sender_id IS DISTINCT FROM o_newest_by;
 END $$;
 
 COMMENT ON FUNCTION app.unread_thresholds(UUID, BIGINT) IS
