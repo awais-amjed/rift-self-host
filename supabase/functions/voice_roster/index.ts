@@ -30,29 +30,43 @@ const supabase = createClient(
 );
 
 /**
- * How busy one region is, from the room list it already answered with.
+ * Where a region's load turns from low to medium, and from medium to high,
+ * in forwarded streams.
  *
- * `streams` is the number that matters and the reason people is not enough:
- * an SFU copies rather than mixes, so the work is publishers × subscribers.
- * Twenty people listening to nobody is almost free; six people with one
- * screen share between them is not. Counting heads would show the first as
- * busy and the second as idle, which is backwards.
+ * Pegged to the one measurement there is: four cores forwarded 2,500 streams
+ * with no loss (docs.joinrift.app/sizing/#calls). High starts well short of
+ * that, because a box is rarely only a LiveKit and a screen share is worth
+ * hundreds of voice streams in bandwidth.
+ */
+const MEDIUM_FROM = 500;
+const HIGH_FROM = 1500;
+
+/**
+ * How busy one region is, as a level: `low`, `medium` or `high`.
+ *
+ * **A level, never a count.** The figure is taken over every room on the node,
+ * because a region is as busy as everything on it — private channels, and on
+ * a LiveKit shared across a project, other servers' calls. Exact numbers from
+ * that let any member see that a call they cannot see had started, and how
+ * many were in it. A level says only what choosing a region needs.
+ *
+ * There is deliberately no `idle`. A region that read idle and then low would
+ * announce the first hidden call to start on it; one or two people talking
+ * are a handful of streams, and read as low exactly as nobody does.
+ *
+ * `streams` is what the level is taken from, and the reason heads are not
+ * enough: an SFU copies rather than mixes, so the work is publishers ×
+ * subscribers. Twenty people listening to nobody is almost free; six people
+ * with one screen share between them is not.
  */
 function summarise(
   node: { id: string; label: string },
   rooms: { numParticipants: number; numPublishers: number }[],
 ) {
-  let people = 0;
-  let publishers = 0;
   let streams = 0;
-  let calls = 0;
-
   for (const room of rooms) {
     const inRoom = room.numParticipants ?? 0;
     const sending = room.numPublishers ?? 0;
-    if (inRoom > 0) calls++;
-    people += inRoom;
-    publishers += sending;
     // Each publisher's media goes to everybody else in the room.
     streams += sending * Math.max(inRoom - 1, 0);
   }
@@ -60,10 +74,7 @@ function summarise(
   return {
     id: node.id,
     label: node.label,
-    calls,
-    people,
-    publishers,
-    streams,
+    load: streams >= HIGH_FROM ? "high" : streams >= MEDIUM_FROM ? "medium" : "low",
     reachable: true,
   };
 }
@@ -110,11 +121,9 @@ Deno.serve(async (req) => {
     // One unfiltered `listRooms` per node, which is both halves of this
     // answer: the roster below, and how busy each region is.
     //
-    // Unfiltered because the load figure is about the *region*, and a region
-    // is as busy as everything on it — including channels this caller cannot
-    // see. What goes back is only totals, never a name, so a private channel
-    // remains as invisible as it was; that somewhere is busy is already
-    // obvious to anyone in a call there.
+    // Unfiltered because the load is about the *region*, and a region is as
+    // busy as everything on it — including channels this caller cannot see.
+    // Which is why what goes back is a level and not a count: see summarise.
     //
     // `listRooms` carries `numParticipants` and `numPublishers` per room, so
     // the load costs no request of its own — and skipping `listParticipants`
@@ -151,7 +160,7 @@ Deno.serve(async (req) => {
           return {
             node,
             rosters: [] as { room: string; participants: unknown[] }[],
-            load: { ...summarise(node, []), reachable: false },
+            load: { id: node.id, label: node.label, load: null, reachable: false },
           };
         }
       }),
