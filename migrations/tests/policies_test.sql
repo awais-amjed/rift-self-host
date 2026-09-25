@@ -5454,6 +5454,39 @@ BEGIN
   RAISE NOTICE 'ok  every server has a default node, and it is its livekit_url';
 END $$;
 
+-- Renaming it sticks, including across a change of address. The label is the
+-- operator's — "Default" is only what it is born as, and the node every
+-- server has is the one most likely to need a real name — so the mirror must
+-- carry the URL and nothing else.
+DO $$
+DECLARE
+  v_label TEXT;
+  v_url   TEXT;
+BEGIN
+  UPDATE livekit_nodes SET label = 'Frankfurt'
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+
+  UPDATE servers SET livekit_url = 'ws://lan:7001'
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  SELECT label, url INTO v_label, v_url FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+
+  IF v_label <> 'Frankfurt' THEN
+    RAISE EXCEPTION 'FAIL: the mirror overwrote the operator''s name with %', v_label;
+  END IF;
+  IF v_url <> 'ws://lan:7001' THEN
+    RAISE EXCEPTION 'FAIL: the mirror did not carry the new address, is %', v_url;
+  END IF;
+
+  UPDATE servers SET livekit_url = 'ws://lan:7880'
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  UPDATE livekit_nodes SET label = 'Default'
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+
+  RAISE NOTICE 'ok  the default node can be renamed, and keeps its name';
+END $$;
+
 -- It cannot be deleted while the server it mirrors is there: the column would
 -- then name an address absent from the list.
 DO $$
