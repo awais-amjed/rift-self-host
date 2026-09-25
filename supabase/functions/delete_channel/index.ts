@@ -42,6 +42,30 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Missing required field: channel_id", EC.MISSING_FIELDS);
     }
 
+    // Asked before anything is touched, because the room goes first and the
+    // policy below only ever judged the row. This used to delete the room and
+    // *then* find out whether the caller could delete the channel — so any
+    // member could end any call on the server, a private one included, by
+    // asking to delete its channel and being refused. The refusal was true
+    // and the call was already over.
+    //
+    // `channel_manageable_by` is `channels_delete_managers` asked about this
+    // caller; the delete below still runs as them, so the policy has the last
+    // word on the row either way.
+    const { data: manageable, error: manageError } = await supabase.rpc(
+      "channel_manageable_by",
+      { p_channel: channel_id, p_user: auth.userId },
+    );
+    if (manageError) {
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, manageError);
+    }
+    if (manageable !== true) {
+      return CustomResponse.error(
+        "Channel not found, or not yours to delete",
+        EC.PERMISSION_DENIED,
+      );
+    }
+
     // The room goes first. If the delete below is refused the room comes back
     // the moment someone rejoins (get_channel_token recreates it), whereas the
     // other order can leave a live room with no channel behind it.
