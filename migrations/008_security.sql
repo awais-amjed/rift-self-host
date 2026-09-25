@@ -158,7 +158,7 @@ GRANT UPDATE (retention_days, history_cap, livekit_node_id) ON channels TO authe
 -- creates a room, `voice_roster` releases it when the call has ended. A
 -- member who could call either would choose where everybody else's call is
 -- held, or move it out from under them.
-REVOKE ALL ON FUNCTION app.claim_voice_node(UUID, UUID)
+REVOKE ALL ON FUNCTION app.claim_voice_node(UUID, UUID, BOOLEAN)
   FROM PUBLIC, anon, authenticated;
 
 REVOKE ALL ON FUNCTION app.release_voice_node(UUID[])
@@ -169,9 +169,9 @@ REVOKE ALL ON FUNCTION app.release_voice_node(UUID[])
 -- `authenticated`; these say so by name, because a wrapper that quietly
 -- became callable would hand a member the choice of where everybody's call
 -- is held.
-REVOKE ALL ON FUNCTION claim_voice_node(UUID, UUID)
+REVOKE ALL ON FUNCTION claim_voice_node(UUID, UUID, BOOLEAN)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION claim_voice_node(UUID, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION claim_voice_node(UUID, UUID, BOOLEAN) TO service_role;
 
 REVOKE ALL ON FUNCTION release_voice_node(UUID[])
   FROM PUBLIC, anon, authenticated;

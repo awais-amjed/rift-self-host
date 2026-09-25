@@ -20,6 +20,25 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+/**
+ * Open the room on [service], answering whether the region was there.
+ *
+ * Idempotent — LiveKit is happy to be told to create a room that exists — so
+ * this doubles as the liveness check, and a caller can try a second region
+ * without having to undo anything.
+ */
+async function openRoom(
+  service: RoomServiceClient,
+  room: string,
+): Promise<boolean> {
+  try {
+    await service.createRoom({ name: room });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -215,6 +234,19 @@ Deno.serve(async (req) => {
     const maxVoice = Number(limits[DBSchema.servers.maxVoiceParticipants] ?? 0);
     const maxShareMbps = Number(limits[DBSchema.servers.maxShareMbps] ?? 0);
 
+    // The channel's pinned region, needed only to know whether a failure to
+    // open the room is the *pin* failing — which is the one case that falls
+    // back to automatic below.
+    const { data: channelRow } = await supabase
+      .from(DBSchema.channels.tableName)
+      .select(DBSchema.channels.livekitNodeId)
+      .eq(DBSchema.channels.id, channel_id)
+      .maybeSingle();
+    const pinnedNodeId =
+      (channelRow as Record<string, any> | null)?.[
+        DBSchema.channels.livekitNodeId
+      ] as string | null ?? null;
+
     // Which LiveKit this call is on. A server may have several, and a room
     // lives on exactly one of them — so this is decided once, by whoever gets
     // here first, and everybody afterwards is told where that was.
@@ -225,14 +257,14 @@ Deno.serve(async (req) => {
     // up yet. A client that names somebody else's node, or a stale one, is
     // answered with the default rather than refused — being sent to a working
     // node is better than being told no.
-    const node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
-    const nodeUrl = node?.url ?? credentials.url;
-    const nodeHost = node ? normaliseHost(node.url) : credentials.host;
+    let node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
+    let nodeUrl = node?.url ?? credentials.url;
+    let nodeHost = node ? normaliseHost(node.url) : credentials.host;
 
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
     // the edge function is the only thing that can create rooms.
-    const roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
+    let roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
 
     // How full the call is (migration 028), asked only when there is a limit
     // to compare it against — a server that has not set one pays nothing.
@@ -269,9 +301,38 @@ Deno.serve(async (req) => {
         // would turn a bandwidth limit into an outage.
       }
     }
-    try {
-      await roomService.createRoom({ name: room });
-    } catch (roomErr) {
+    // Opening the room is also how the region is asked whether it is there.
+    //
+    // **A pinned region that does not answer falls back to automatic, for
+    // this call only.** The pin is an operator's decision and stays in the
+    // channel's row — the settings dialog goes on showing it, and when the
+    // region comes back the next call goes there again with nobody having
+    // touched anything. What must not happen is everybody being stranded in
+    // the meantime because the person who could repin is asleep.
+    //
+    // Only from the pin, and only once. An automatic choice that fails has
+    // nothing better to fall back to, and a second failure is a server with
+    // no region answering at all.
+    let opened = await openRoom(roomService, room);
+
+    if (!opened && node && pinnedNodeId && node.id === pinnedNodeId) {
+      await releaseVoiceNodes(supabase, [channel_id]).catch(() => {});
+      const fallback = await claimVoiceNode(
+        supabase,
+        channel_id,
+        preferred_node_id ?? null,
+        true,
+      );
+      if (fallback && fallback.id !== pinnedNodeId) {
+        node = fallback;
+        nodeUrl = fallback.url;
+        nodeHost = normaliseHost(fallback.url);
+        roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
+        opened = await openRoom(roomService, room);
+      }
+    }
+
+    if (!opened) {
       // The region is not answering. Two things follow, and the second is the
       // one that matters: let go of the claim.
       //
@@ -294,7 +355,6 @@ Deno.serve(async (req) => {
           ? `${node.label} is not answering, so this call could not be opened`
           : "Failed to ensure LiveKit room exists",
         EC.UNEXPECTED_ERROR,
-        roomErr,
       );
     }
 

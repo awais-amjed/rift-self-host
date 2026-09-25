@@ -140,15 +140,21 @@ export interface LiveKitNode {
  * against the server's own list before it counts for anything. The database
  * decides; see `app.claim_voice_node`, which is one statement so that two
  * people opening the same call at once cannot open it in two places.
+ *
+ * [ignorePin] is for the second attempt, after the pinned region has been
+ * found unreachable. It changes this call only — the pin stays in the
+ * channel's row, and the next call tries it again.
  */
 export async function claimVoiceNode(
   supabase: SupabaseClient,
   channelId: string,
   preferredNodeId: string | null,
+  ignorePin = false,
 ): Promise<LiveKitNode | null> {
   const { data } = await supabase.rpc("claim_voice_node", {
     p_channel: channelId,
     p_preferred: preferredNodeId,
+    p_ignore_pin: ignorePin,
   });
   const row = Array.isArray(data) ? data[0] : data;
   if (!row?.id || !row?.url) return null;

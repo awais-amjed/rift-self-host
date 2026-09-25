@@ -1272,9 +1272,19 @@ COMMENT ON VIEW member_role_list IS
 -- claim than the one above it, and the first is absolute because a live room
 -- cannot be moved.
 
+-- `p_ignore_pin` is the fallback, and it is deliberately a *runtime* one: the
+-- pin stays in the channel's row and stays what the settings dialog shows.
+-- A region that is down should not silently rewrite an operator's decision —
+-- they may be asleep, and the region may be back in ten minutes — but neither
+-- should it strand everybody who wanted to talk. So the pin is tried first,
+-- always, and only the attempt falls back. When the region returns, the very
+-- next call goes there again with nobody having touched anything.
+DROP FUNCTION IF EXISTS app.claim_voice_node(UUID, UUID);
+
 CREATE OR REPLACE FUNCTION app.claim_voice_node(
-  p_channel   UUID,
-  p_preferred UUID DEFAULT NULL
+  p_channel    UUID,
+  p_preferred  UUID DEFAULT NULL,
+  p_ignore_pin BOOLEAN DEFAULT false
 ) RETURNS TABLE (id UUID, url TEXT, label TEXT)
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -1285,6 +1295,9 @@ BEGIN
     FROM channels c WHERE c.id = p_channel;
 
   IF v_server IS NULL THEN RETURN; END IF;
+
+  -- Asked to disregard the pin, because the pinned region did not answer.
+  IF p_ignore_pin THEN v_node := NULL; END IF;
 
   -- What the caller measured, but only if it is really one of ours. The id
   -- arrives from a client, so it is a suggestion until this says otherwise.
@@ -1314,9 +1327,11 @@ BEGIN
    WHERE vr.channel_id = p_channel;
 END $$;
 
-COMMENT ON FUNCTION app.claim_voice_node(UUID, UUID) IS
+COMMENT ON FUNCTION app.claim_voice_node(UUID, UUID, BOOLEAN) IS
   'Where this channel''s call is, creating that answer if there is not one '
-  'yet. Idempotent: everybody after the first gets what the first decided.';
+  'yet. Idempotent: everybody after the first gets what the first decided. '
+  'p_ignore_pin skips the channel''s pinned region for this attempt only, '
+  'for a caller that has just found it unreachable.';
 
 -- The other half. Until this runs the channel keeps the node it was last
 -- called on, and "automatic" would decide once in the channel's lifetime

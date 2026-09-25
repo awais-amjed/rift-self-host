@@ -2195,15 +2195,19 @@ COMMENT ON FUNCTION get_server_details() IS
 -- `authenticated`, leaving the service role, which is the only caller.
 -- `get_channel_token` claims; `voice_roster` releases.
 
+DROP FUNCTION IF EXISTS claim_voice_node(UUID, UUID);
+
 CREATE OR REPLACE FUNCTION claim_voice_node(
-  p_channel   UUID,
-  p_preferred UUID DEFAULT NULL
+  p_channel    UUID,
+  p_preferred  UUID DEFAULT NULL,
+  p_ignore_pin BOOLEAN DEFAULT false
 ) RETURNS TABLE (id UUID, url TEXT, label TEXT)
   LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
-  SELECT n.id, n.url, n.label FROM app.claim_voice_node(p_channel, p_preferred) n
+  SELECT n.id, n.url, n.label
+    FROM app.claim_voice_node(p_channel, p_preferred, p_ignore_pin) n
 $$;
 
-COMMENT ON FUNCTION claim_voice_node(UUID, UUID) IS
+COMMENT ON FUNCTION claim_voice_node(UUID, UUID, BOOLEAN) IS
   'Service-role face of app.claim_voice_node: where this channel''s call is, '
   'deciding it if there is no answer yet.';
 

@@ -5632,6 +5632,51 @@ BEGIN
   RAISE NOTICE 'ok  the default answers when nothing else does, and a strange node does not';
 END $$;
 
+-- The pin is skipped on request, and only on request. This is what lets a
+-- caller that has just found the pinned region unreachable fall back to
+-- automatic *for that attempt* while the pin itself stays put — an operator's
+-- decision is not rewritten because their box was down for ten minutes.
+DO $$
+DECLARE
+  v_sg  UUID;
+  v_def UUID;
+  v_got UUID;
+  v_pin UUID;
+BEGIN
+  SELECT id INTO v_sg  FROM livekit_nodes WHERE label = 'Singapore';
+  SELECT id INTO v_def FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+
+  UPDATE channels SET livekit_node_id = v_sg
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', NULL, true) c;
+  IF v_got <> v_def THEN
+    RAISE EXCEPTION 'FAIL: ignoring the pin did not fall back to the default';
+  END IF;
+
+  SELECT livekit_node_id INTO v_pin FROM channels
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  IF v_pin <> v_sg THEN
+    RAISE EXCEPTION 'FAIL: falling back rewrote the pin';
+  END IF;
+
+  -- And the next call, asked normally, goes back to the pin.
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+  SELECT c.id INTO v_got
+    FROM app.claim_voice_node('aaaa1111-0000-4000-8000-000000000001', NULL) c;
+  IF v_got <> v_sg THEN
+    RAISE EXCEPTION 'FAIL: the pin did not take effect again';
+  END IF;
+
+  PERFORM app.release_voice_node(ARRAY['aaaa1111-0000-4000-8000-000000000001']::UUID[]);
+  UPDATE channels SET livekit_node_id = NULL
+   WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+  RAISE NOTICE 'ok  a pin can be skipped for one call without being changed';
+END $$;
+
 -- Removing a node returns its channels to automatic rather than leaving them
 -- pointing at nothing.
 DO $$

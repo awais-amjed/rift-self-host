@@ -83,6 +83,8 @@ const DBSchema = {
     // 0 explicitly opts this channel out of a server-wide sweep.
     retentionDays: "retention_days",
     historyCap: "history_cap",
+    // Which LiveKit region calls here are pinned to. NULL is automatic.
+    livekitNodeId: "livekit_node_id",
   },
   // Where each member's phones can be reached, and the credential this server
   // rings them over (migration 010). `push_config` has no grant and no policy:
