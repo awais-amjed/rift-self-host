@@ -6065,6 +6065,362 @@ END $$;
 RESET ROLE;
 
 -- ============================================================
+-- 29. Pins and polls
+-- ============================================================
+-- Both are written only through functions, because each has a rule no policy
+-- can state: pins have a cap, and a vote has to land in an open poll on a real
+-- option. So the tests are mostly about what those functions refuse.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000f9',
+   'aaaa0000-0000-4000-8000-000000000001', 'pinning', 'text');
+
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature,
+                      key_version)
+SELECT 9600 + g, 'aaaa1111-0000-4000-8000-0000000000f9',
+       '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1
+  FROM generate_series(0, 51) AS g;
+
+INSERT INTO dm_messages (id, sender_id, recipient_id, ciphertext, nonce,
+                         signature, key_version)
+VALUES (8601, '11111111-aaaa-4aaa-8aaa-000000000002', '11111111-aaaa-4aaa-8aaa-000000000001', 'c', 'n', 's', 1);
+
+DO $$
+BEGIN
+  IF (SELECT permissions & app.perm('PIN_MESSAGES') FROM roles
+       WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+         AND name = 'Moderator') = 0 THEN
+    RAISE EXCEPTION 'FAIL: a new server''s Moderator cannot pin';
+  END IF;
+  IF (SELECT permissions & app.perm('PIN_MESSAGES') FROM roles
+       WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+         AND is_everyone) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: everybody may pin by default';
+  END IF;
+  IF (app.perm_all() & app.perm('PIN_MESSAGES')) = 0 THEN
+    RAISE EXCEPTION 'FAIL: PIN_MESSAGES is outside perm_all';
+  END IF;
+  RAISE NOTICE 'ok  pinning is a Moderator''s by default, and nobody else''s';
+END $$;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM set_pinned('channel', 9600, true);
+    RAISE EXCEPTION 'FAIL: a member without PIN_MESSAGES pinned';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_pin' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO message_pins (message_id, channel_id, pinned_by)
+    VALUES (9600, 'aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002');
+    RAISE EXCEPTION 'FAIL: a member wrote a pin by hand';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  pinning takes PIN_MESSAGES, and the function';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  PERFORM set_pinned('channel', 9600, true);
+  PERFORM set_pinned('channel', 9600, true);
+  IF (SELECT count(*) FROM message_pins WHERE message_id = 9600) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: the pin did not land once';
+  END IF;
+  IF (SELECT pinned_by FROM message_pins WHERE message_id = 9600) <> '11111111-aaaa-4aaa-8aaa-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: the pin is not credited to whoever pinned it';
+  END IF;
+  RAISE NOTICE 'ok  an administrator pins, and pinning twice is one pin';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM message_pins WHERE message_id = 9600) THEN
+    RAISE EXCEPTION 'FAIL: a member of the channel cannot see its pins';
+  END IF;
+  RAISE NOTICE 'ok  the channel sees what is pinned in it';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM message_pins WHERE message_id = 9600) THEN
+    RAISE EXCEPTION 'FAIL: another server''s member can see a pin';
+  END IF;
+  BEGIN
+    PERFORM set_pinned('channel', 9600, false);
+    RAISE EXCEPTION 'FAIL: another server''s member unpinned';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'message_not_found' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  and nobody outside it sees or touches them';
+END $$;
+
+-- The cap. Forty-nine more by hand, so the fifty-first is the one refused.
+RESET ROLE;
+INSERT INTO message_pins (message_id, channel_id, pinned_by)
+SELECT 9601 + g, 'aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000001'
+  FROM generate_series(0, 48) AS g;
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM set_pinned('channel', 9651, true);
+    RAISE EXCEPTION 'FAIL: a fifty-first pin landed';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'pin_limit' THEN RAISE; END IF;
+  END;
+  -- Re-pinning one already there is not a new pin, and must not trip it.
+  PERFORM set_pinned('channel', 9600, true);
+  PERFORM set_pinned('channel', 9600, false);
+  PERFORM set_pinned('channel', 9651, true);
+  IF EXISTS (SELECT 1 FROM message_pins WHERE message_id = 9600)
+     OR NOT EXISTS (SELECT 1 FROM message_pins WHERE message_id = 9651) THEN
+    RAISE EXCEPTION 'FAIL: unpinning did not make room';
+  END IF;
+  RAISE NOTICE 'ok  fifty pins a channel, and unpinning makes room';
+END $$;
+
+-- ── DMs ─────────────────────────────────────────────────────
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  PERFORM set_pinned('dm', 8601, true);
+  IF (SELECT user_low::TEXT || user_high::TEXT FROM dm_message_pins
+       WHERE message_id = 8601) <> '11111111-aaaa-4aaa-8aaa-00000000000111111111-aaaa-4aaa-8aaa-000000000002' THEN
+    RAISE EXCEPTION 'FAIL: a DM pin does not name its pair, sorted';
+  END IF;
+  RAISE NOTICE 'ok  either side of a DM pins, with no permission to hold';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM dm_message_pins WHERE message_id = 8601) THEN
+    RAISE EXCEPTION 'FAIL: the other side cannot see the pin';
+  END IF;
+  PERFORM set_pinned('dm', 8601, false);
+  PERFORM set_pinned('dm', 8601, true);
+  RAISE NOTICE 'ok  and the other side sees it, and may take it down';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM dm_message_pins WHERE message_id = 8601) THEN
+    RAISE EXCEPTION 'FAIL: a third person can see a DM pin';
+  END IF;
+  BEGIN
+    PERFORM set_pinned('dm', 8601, false);
+    RAISE EXCEPTION 'FAIL: a third person unpinned a DM';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'message_not_found' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  and nobody else sees or touches a DM''s pins';
+END $$;
+
+-- ── Polls ───────────────────────────────────────────────────
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_id BIGINT;
+BEGIN
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                        key_version, poll)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1,
+          jsonb_build_object('options', 3, 'multiple', false,
+                             'closes_at', (now() + interval '1 day')::TEXT))
+  RETURNING id INTO v_id;
+  PERFORM set_config('rift_test.poll', v_id::TEXT, true);
+  RAISE NOTICE 'ok  a member posts a poll';
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                          key_version, poll)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1,
+            jsonb_build_object('options', 3, 'multiple', false,
+                               'closes_at', (now() - interval '1 minute')::TEXT));
+    RAISE EXCEPTION 'FAIL: a poll that had already closed was posted';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_bad_close' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                          key_version, poll)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1,
+            jsonb_build_object('options', 3, 'multiple', false,
+                               'closes_at', (now() + interval '90 days')::TEXT));
+    RAISE EXCEPTION 'FAIL: a poll running for three months was posted';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_bad_close' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                          key_version, poll)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1,
+            jsonb_build_object('options', 11, 'multiple', false,
+                               'closes_at', (now() + interval '1 day')::TEXT));
+    RAISE EXCEPTION 'FAIL: a poll with eleven options was posted';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                          key_version, poll)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1,
+            jsonb_build_object('options', 2, 'multiple', false,
+                               'closes_at', (now() + interval '1 day')::TEXT,
+                               'question', 'in the clear'));
+    RAISE EXCEPTION 'FAIL: a poll carried a key it has no business carrying';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a poll''s rules are three keys, closing within a month';
+END $$;
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := vote_poll(current_setting('rift_test.poll')::BIGINT, ARRAY[1]::SMALLINT[]);
+  IF v -> 'counts' <> '[0, 1, 0]'::jsonb OR (v ->> 'voters')::INT <> 1
+     OR v -> 'mine' <> '[1]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: the first vote reads back as %', v;
+  END IF;
+  RAISE NOTICE 'ok  a vote is counted, and the voter is told it is theirs';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE
+  v_id BIGINT := current_setting('rift_test.poll')::BIGINT;
+  v    JSONB;
+BEGIN
+  v := vote_poll(v_id, ARRAY[1]::SMALLINT[]);
+  IF v -> 'counts' <> '[0, 2, 0]'::jsonb OR v -> 'mine' <> '[1]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a second voter reads back as %', v;
+  END IF;
+  IF (SELECT count(*) FROM poll_votes WHERE message_id = v_id) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a member can read somebody else''s ballot';
+  END IF;
+  BEGIN
+    PERFORM vote_poll(v_id, ARRAY[0, 2]::SMALLINT[]);
+    RAISE EXCEPTION 'FAIL: two picks on a single-choice poll';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_single_choice' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM vote_poll(v_id, ARRAY[3]::SMALLINT[]);
+    RAISE EXCEPTION 'FAIL: a vote for an option that does not exist';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_bad_option' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO poll_votes (message_id, user_id, option) VALUES (v_id, '11111111-aaaa-4aaa-8aaa-000000000001', 2);
+    RAISE EXCEPTION 'FAIL: a member wrote a vote by hand';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- Changing a vote, then taking it back.
+  v := vote_poll(v_id, ARRAY[2]::SMALLINT[]);
+  IF v -> 'counts' <> '[0, 1, 1]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a changed vote reads back as %', v;
+  END IF;
+  v := vote_poll(v_id, ARRAY[]::SMALLINT[]);
+  IF v -> 'counts' <> '[0, 1, 0]'::jsonb OR (v ->> 'voters')::INT <> 1
+     OR v -> 'mine' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a withdrawn vote reads back as %', v;
+  END IF;
+  RAISE NOTICE 'ok  counts, never ballots; one pick, a real one, and changeable';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_id BIGINT := current_setting('rift_test.poll')::BIGINT;
+BEGIN
+  IF poll_tallies(ARRAY[v_id]) <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: another server''s member read a tally';
+  END IF;
+  BEGIN
+    PERFORM vote_poll(v_id, ARRAY[0]::SMALLINT[]);
+    RAISE EXCEPTION 'FAIL: another server''s member voted';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_not_found' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  and nobody outside the channel reads or votes';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM close_poll(current_setting('rift_test.poll')::BIGINT);
+    RAISE EXCEPTION 'FAIL: somebody else closed the poll';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_poll_author' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  only its author ends a poll early';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_id BIGINT := current_setting('rift_test.poll')::BIGINT;
+BEGIN
+  BEGIN
+    UPDATE messages SET ciphertext = 'rewritten' WHERE id = v_id;
+    RAISE EXCEPTION 'FAIL: a poll''s words were edited';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_cannot_be_edited' THEN RAISE; END IF;
+  END;
+  BEGIN
+    UPDATE messages SET poll = jsonb_set(poll, '{options}', '2') WHERE id = v_id;
+    RAISE EXCEPTION 'FAIL: a poll''s rules were rewritten by hand';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  PERFORM close_poll(v_id);
+  BEGIN
+    PERFORM vote_poll(v_id, ARRAY[0]::SMALLINT[]);
+    RAISE EXCEPTION 'FAIL: a vote landed in a closed poll';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'poll_closed' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  its author ends it, and it takes no more votes';
+END $$;
+
+RESET ROLE;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

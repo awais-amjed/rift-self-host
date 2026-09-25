@@ -251,6 +251,20 @@ CREATE OR REPLACE FUNCTION app.can_manage_channel(p_channel UUID) RETURNS BOOLEA
                  ELSE app.has_perm('MANAGE_CHANNELS') END))
 $$;
 
+-- Pinning answers to its own bit, not to managing channels: deciding what a
+-- room keeps at the top is a moderator's call, and renaming the room is not.
+-- The one exception is a private channel, which the holders of any server-wide
+-- bit may not be inside — there its own managers pin as well.
+CREATE OR REPLACE FUNCTION app.can_pin_in(p_channel UUID) RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT app.can_see_channel(p_channel)
+     AND (app.has_perm('PIN_MESSAGES')
+          OR EXISTS (SELECT 1 FROM channels c
+                       JOIN channel_members cm ON cm.channel_id = c.id
+                      WHERE c.id = p_channel AND c.is_private
+                        AND cm.user_id = auth.uid() AND cm.can_manage))
+$$;
+
 CREATE OR REPLACE FUNCTION app.can_see_message(p_message BIGINT) RETURNS BOOLEAN
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS (SELECT 1 FROM messages m
@@ -529,12 +543,13 @@ CREATE OR REPLACE FUNCTION app.perm_bit(p_name TEXT) RETURNS BIGINT
     WHEN 'SUMMON_BOTS'            THEN 1::BIGINT << 23  -- bring one into a call
     WHEN 'MANAGE_SOUNDBOARD'      THEN 1::BIGINT << 24  -- add and remove clips
     WHEN 'USE_SOUNDBOARD'         THEN 1::BIGINT << 25  -- fire one in a call
+    WHEN 'PIN_MESSAGES'           THEN 1::BIGINT << 26  -- pin and unpin
     ELSE NULL
   END
 $$;
 
 CREATE OR REPLACE FUNCTION app.perm_all() RETURNS BIGINT
-  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 26) - 1 $$;
+  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 27) - 1 $$;
 
 CREATE OR REPLACE FUNCTION app.bot_summoned_to(p_channel UUID, p_bot UUID)
   RETURNS BOOLEAN

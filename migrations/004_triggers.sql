@@ -89,6 +89,47 @@ BEGIN
   RETURN NEW;
 END; $$;
 
+-- A poll's rules are set once, when it is posted.
+--
+-- `closes_at` has to be a time, in the future, and within a month: a poll
+-- that is already over is a message that asks nothing, and one that runs for
+-- a year is a poll nobody remembers to read. It is rewritten in one canonical
+-- spelling so every reader parses the same string.
+--
+-- An edit to a poll's words is refused, like a bot command's. People voted for
+-- what the options said; rewriting option 2 afterwards would move every vote
+-- cast for it onto whatever it says now.
+--
+-- The column itself cannot be changed by a member at all — it is not in the
+-- UPDATE grant — so the only writer after this is `close_poll`.
+CREATE OR REPLACE FUNCTION check_poll()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+DECLARE
+  v_closes TIMESTAMPTZ;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.poll IS NOT NULL AND auth.uid() IS NOT NULL
+       AND NEW.ciphertext IS DISTINCT FROM OLD.ciphertext THEN
+      RAISE EXCEPTION 'poll_cannot_be_edited';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.poll IS NULL OR auth.uid() IS NULL THEN
+    RETURN NEW;
+  END IF;
+  BEGIN
+    v_closes := (NEW.poll ->> 'closes_at')::timestamptz;
+  EXCEPTION WHEN others THEN
+    RAISE EXCEPTION 'poll_bad_close';
+  END;
+  IF v_closes <= now() OR v_closes > now() + interval '32 days' THEN
+    RAISE EXCEPTION 'poll_bad_close';
+  END IF;
+  NEW.poll := jsonb_set(NEW.poll, '{closes_at}', to_jsonb(v_closes));
+  RETURN NEW;
+END; $$;
+
 -- `@everyone` is implicit, so a row naming it would be a second answer to a
 -- question that already has one — and the two would drift.
 CREATE OR REPLACE FUNCTION refuse_everyone_assignment()
@@ -613,7 +654,7 @@ BEGIN
      | app.perm('MUTE_MEMBERS')    | app.perm('DEAFEN_MEMBERS')
      | app.perm('MOVE_MEMBERS')    | app.perm('ADD_BOTS')
      | app.perm('CREATE_PRIVATE_CHANNEL')
-     | app.perm('MANAGE_SOUNDBOARD'), false, false),
+     | app.perm('MANAGE_SOUNDBOARD') | app.perm('PIN_MESSAGES'), false, false),
     (NEW.id, 'Admin',     300, app.perm('ADMINISTRATOR'), false, false),
     (NEW.id, 'Owner',     400, app.perm('ADMINISTRATOR'), false, true)
   ON CONFLICT (server_id, name) DO NOTHING;
@@ -1172,3 +1213,6 @@ DROP TRIGGER IF EXISTS soundboard_sounds_cap ON soundboard_sounds;
 CREATE TRIGGER soundboard_sounds_cap BEFORE INSERT ON soundboard_sounds
   FOR EACH ROW EXECUTE FUNCTION enforce_soundboard_max();
 
+DROP TRIGGER IF EXISTS messages_check_poll ON messages;
+CREATE TRIGGER messages_check_poll BEFORE INSERT OR UPDATE ON messages
+  FOR EACH ROW EXECUTE FUNCTION check_poll();

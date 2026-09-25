@@ -1163,6 +1163,247 @@ COMMENT ON FUNCTION message_reaction_tallies(read_scope, BIGINT[]) IS
   'response cap and silently read low. Ordered by emoji so two clients drawing '
   'the same message draw it the same way.';
 
+-- ============================================================
+-- Pins
+-- ============================================================
+-- One call for both directions and both kinds of conversation, because the
+-- client asks one question — "should this be pinned" — and the answer is the
+-- same shape everywhere.
+--
+-- **Capped at fifty per conversation.** The list is fetched whole and every
+-- row in it is a message to decrypt, so an unbounded one is a list that gets
+-- slower to open the longer a channel lives. Fifty is what Discord settled on,
+-- and it is a lot of messages to have decided are the important ones.
+--
+-- A pin names a message, never its words. What the list shows is the message
+-- row itself, read through `messages_select` / `dm_messages_select` and
+-- decrypted by the client like any other.
+
+CREATE OR REPLACE FUNCTION set_pinned(
+  p_scope   read_scope,
+  p_message BIGINT,
+  p_pinned  BOOLEAN
+) RETURNS VOID
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_channel UUID;
+  v_low     UUID;
+  v_high    UUID;
+BEGIN
+  IF p_scope = 'channel' THEN
+    -- Neither a press nor a reply only one person can see: both are rows most
+    -- of the channel cannot read, and a pin is a thing the whole channel sees.
+    SELECT m.channel_id INTO v_channel
+      FROM messages m
+     WHERE m.id = p_message
+       AND NOT m.is_interaction AND m.ephemeral_for IS NULL;
+    IF v_channel IS NULL OR NOT app.can_see_message(p_message) THEN
+      RAISE EXCEPTION 'message_not_found';
+    END IF;
+    IF NOT app.can_pin_in(v_channel) THEN
+      RAISE EXCEPTION 'cannot_pin';
+    END IF;
+
+    IF p_pinned THEN
+      IF NOT EXISTS (SELECT 1 FROM message_pins WHERE message_id = p_message)
+         AND (SELECT count(*) FROM message_pins WHERE channel_id = v_channel) >= 50
+      THEN
+        RAISE EXCEPTION 'pin_limit';
+      END IF;
+      INSERT INTO message_pins (message_id, channel_id, pinned_by)
+      VALUES (p_message, v_channel, auth.uid())
+      ON CONFLICT (message_id) DO NOTHING;
+    ELSE
+      DELETE FROM message_pins WHERE message_id = p_message;
+    END IF;
+
+    IF app.realtime_ready() THEN
+      PERFORM app.announce_to_channel(v_channel, 'pin',
+        jsonb_build_object('message_id', p_message, 'channel_id', v_channel));
+    END IF;
+    RETURN;
+  END IF;
+
+  -- A DM: either of the two, and nobody else.
+  SELECT LEAST(d.sender_id, d.recipient_id), GREATEST(d.sender_id, d.recipient_id)
+    INTO v_low, v_high
+    FROM dm_messages d
+   WHERE d.id = p_message AND auth.uid() IN (d.sender_id, d.recipient_id);
+  IF v_low IS NULL THEN
+    RAISE EXCEPTION 'message_not_found';
+  END IF;
+
+  IF p_pinned THEN
+    IF NOT EXISTS (SELECT 1 FROM dm_message_pins WHERE message_id = p_message)
+       AND (SELECT count(*) FROM dm_message_pins
+             WHERE user_low = v_low AND user_high = v_high) >= 50
+    THEN
+      RAISE EXCEPTION 'pin_limit';
+    END IF;
+    INSERT INTO dm_message_pins (message_id, user_low, user_high, pinned_by)
+    VALUES (p_message, v_low, v_high, auth.uid())
+    ON CONFLICT (message_id) DO NOTHING;
+  ELSE
+    DELETE FROM dm_message_pins WHERE message_id = p_message;
+  END IF;
+
+  -- Both sides, the pinner included: their other devices have the same list
+  -- open, and a phone should not have to be told by its owner's desktop.
+  IF app.realtime_ready() THEN
+    PERFORM realtime.send(
+      jsonb_build_object('message_id', p_message,
+                         'user_low', v_low, 'user_high', v_high),
+      'dm_pin', 'user:' || u, true)
+      FROM unnest(ARRAY[v_low, v_high]) AS u;
+  END IF;
+END; $$;
+
+COMMENT ON FUNCTION set_pinned(read_scope, BIGINT, BOOLEAN) IS
+  'Pin or unpin a message. In a channel it takes PIN_MESSAGES (or managing '
+  'a private channel); in a DM either of the two may. Fifty per conversation; '
+  'the fifty-first raises pin_limit. Rings `pin` / `dm_pin` with the id.';
+
+-- ============================================================
+-- Polls
+-- ============================================================
+-- The poll is posted as a message: its words in the ciphertext, its rules in
+-- `messages.poll`. What is here is everything that happens after — voting,
+-- counting, and ending it early — and all three are functions rather than
+-- table writes, because each has a rule a policy cannot say (is it still
+-- open, is that a real option, is a second pick allowed).
+--
+-- **Counts, not voters.** `poll_tallies` answers how many picked each option,
+-- how many people voted, and which options the *caller* picked. Nothing here
+-- tells a member who somebody else voted for. Whoever runs the server can
+-- still read `poll_votes`, and the client does not pretend otherwise.
+
+CREATE OR REPLACE FUNCTION poll_tallies(p_ids BIGINT[]) RETURNS JSONB
+  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_ids  BIGINT[];
+  v_rows JSONB;
+BEGIN
+  -- The same cap as reactions, for the same reason.
+  v_ids := (SELECT array_agg(id) FROM (
+              SELECT unnest(COALESCE(p_ids, ARRAY[]::BIGINT[])) AS id
+               LIMIT 100) capped);
+  IF v_ids IS NULL THEN RETURN '{}'::jsonb; END IF;
+
+  -- SECURITY DEFINER because the votes table shows a member only their own
+  -- rows, and a count has to see everybody's. Visibility is therefore asked
+  -- by hand, per message, with the same question `messages_select` asks.
+  SELECT jsonb_object_agg(m.id::TEXT, jsonb_build_object(
+           'counts', (SELECT jsonb_agg(COALESCE(c.n, 0) ORDER BY g.o)
+                        FROM generate_series(0, (m.poll ->> 'options')::INT - 1) AS g(o)
+                        LEFT JOIN (SELECT v.option, count(*) AS n
+                                     FROM poll_votes v
+                                    WHERE v.message_id = m.id
+                                    GROUP BY v.option) c ON c.option = g.o),
+           'voters', (SELECT count(DISTINCT v.user_id)
+                        FROM poll_votes v WHERE v.message_id = m.id),
+           'mine',   COALESCE((SELECT jsonb_agg(v.option ORDER BY v.option)
+                                 FROM poll_votes v
+                                WHERE v.message_id = m.id
+                                  AND v.user_id = auth.uid()), '[]'::jsonb)))
+    INTO v_rows
+    FROM messages m
+   WHERE m.id = ANY (v_ids)
+     AND m.poll IS NOT NULL
+     AND app.can_see_message(m.id);
+
+  RETURN COALESCE(v_rows, '{}'::jsonb);
+END; $$;
+
+COMMENT ON FUNCTION poll_tallies(BIGINT[]) IS
+  'Results for the polls among these messages, as {message_id: {counts: '
+  '[per option], voters, mine: [the caller''s options]}}. Never who voted '
+  'for what.';
+
+CREATE OR REPLACE FUNCTION vote_poll(p_message BIGINT, p_options SMALLINT[])
+  RETURNS JSONB
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_poll    JSONB;
+  v_channel UUID;
+  v_options SMALLINT[];
+BEGIN
+  SELECT m.poll, m.channel_id INTO v_poll, v_channel
+    FROM messages m WHERE m.id = p_message;
+  IF v_poll IS NULL OR NOT app.can_see_message(p_message) THEN
+    RAISE EXCEPTION 'poll_not_found';
+  END IF;
+  -- A bot reads what it is given; it does not get a say.
+  IF app.is_bot() THEN
+    RAISE EXCEPTION 'poll_not_found';
+  END IF;
+  IF (v_poll ->> 'closes_at')::timestamptz <= now() THEN
+    RAISE EXCEPTION 'poll_closed';
+  END IF;
+
+  v_options := ARRAY(SELECT DISTINCT o
+                       FROM unnest(COALESCE(p_options, ARRAY[]::SMALLINT[])) AS o
+                      ORDER BY o);
+  IF EXISTS (SELECT 1 FROM unnest(v_options) AS o
+              WHERE o IS NULL OR o < 0 OR o >= (v_poll ->> 'options')::INT) THEN
+    RAISE EXCEPTION 'poll_bad_option';
+  END IF;
+  IF NOT (v_poll ->> 'multiple')::BOOLEAN AND cardinality(v_options) > 1 THEN
+    RAISE EXCEPTION 'poll_single_choice';
+  END IF;
+
+  -- The ballot replaces the last one, so changing a vote and taking it back
+  -- (an empty array) are the same call as casting it.
+  DELETE FROM poll_votes
+   WHERE message_id = p_message AND user_id = auth.uid()
+     AND option <> ALL (v_options);
+  INSERT INTO poll_votes (message_id, user_id, option)
+  SELECT p_message, auth.uid(), o FROM unnest(v_options) AS o
+  ON CONFLICT DO NOTHING;
+
+  -- Says that the count moved, not whose vote moved it.
+  IF app.realtime_ready() THEN
+    PERFORM app.announce_to_channel(v_channel, 'poll',
+      jsonb_build_object('message_id', p_message, 'channel_id', v_channel));
+  END IF;
+
+  RETURN poll_tallies(ARRAY[p_message]) -> p_message::TEXT;
+END; $$;
+
+COMMENT ON FUNCTION vote_poll(BIGINT, SMALLINT[]) IS
+  'Replace the caller''s ballot on a poll: every option they want picked, or '
+  'none to take the vote back. Returns the new tally. Raises poll_closed, '
+  'poll_bad_option or poll_single_choice.';
+
+-- Ending a poll early is the author's, and it moves `closes_at` to now rather
+-- than setting a second flag: "voting has stopped" is one fact, and a poll
+-- that closed early and one that ran its course read the same afterwards.
+-- The UPDATE rings `message_changed` through the ordinary trigger, which is
+-- how every reader learns the rules changed.
+CREATE OR REPLACE FUNCTION close_poll(p_message BIGINT) RETURNS VOID
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_poll   JSONB;
+  v_sender UUID;
+BEGIN
+  SELECT m.poll, m.sender_id INTO v_poll, v_sender
+    FROM messages m WHERE m.id = p_message;
+  IF v_poll IS NULL OR NOT app.can_see_message(p_message) THEN
+    RAISE EXCEPTION 'poll_not_found';
+  END IF;
+  IF v_sender IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'not_poll_author';
+  END IF;
+  IF (v_poll ->> 'closes_at')::timestamptz <= now() THEN
+    RETURN;
+  END IF;
+  UPDATE messages
+     SET poll = jsonb_set(poll, '{closes_at}', to_jsonb(now()))
+   WHERE id = p_message;
+END; $$;
+
+COMMENT ON FUNCTION close_poll(BIGINT) IS
+  'End a poll now. Its author only; closing a closed poll does nothing.';
+
 -- ---------- issuing ----------
 -- Called by the `listing_token` edge function, which has already established
 -- that the caller is an admin of this server. The check is repeated here

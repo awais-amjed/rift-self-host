@@ -103,6 +103,15 @@ GRANT SELECT, INSERT, DELETE       ON message_reactions    TO authenticated;
 
 GRANT SELECT, INSERT, DELETE       ON dm_message_reactions TO authenticated;
 
+-- Read-only. Pinning is `set_pinned` and voting is `vote_poll`: each has a
+-- rule a policy cannot state (the cap, whether the poll is still open), and a
+-- table that could also be written directly would be one that skips it.
+GRANT SELECT ON message_pins    TO authenticated;
+
+GRANT SELECT ON dm_message_pins TO authenticated;
+
+GRANT SELECT ON poll_votes      TO authenticated;
+
 -- A keyring row is written once and never edited: a rewrap is a new version.
 GRANT SELECT, INSERT               ON channel_keyring TO authenticated;
 
@@ -149,6 +158,20 @@ CREATE POLICY message_reactions_insert ON message_reactions FOR INSERT TO authen
 DROP POLICY IF EXISTS message_reactions_delete_own ON message_reactions;
 CREATE POLICY message_reactions_delete_own ON message_reactions FOR DELETE TO authenticated
   USING (user_id = auth.uid());
+
+-- A pin is visible to whoever can see the message it names.
+DROP POLICY IF EXISTS message_pins_select ON message_pins;
+CREATE POLICY message_pins_select ON message_pins FOR SELECT TO authenticated
+  USING (app.can_see_message(message_id));
+
+DROP POLICY IF EXISTS dm_message_pins_select ON dm_message_pins;
+CREATE POLICY dm_message_pins_select ON dm_message_pins FOR SELECT TO authenticated
+  USING ((SELECT auth.uid()) IN (user_low, user_high));
+
+-- Your own ballot and nobody else's. The totals are `poll_tallies`.
+DROP POLICY IF EXISTS poll_votes_select_own ON poll_votes;
+CREATE POLICY poll_votes_select_own ON poll_votes FOR SELECT TO authenticated
+  USING (user_id = (SELECT auth.uid()));
 
 DROP POLICY IF EXISTS dm_reactions_select ON dm_message_reactions;
 CREATE POLICY dm_reactions_select ON dm_message_reactions FOR SELECT TO authenticated
@@ -580,7 +603,7 @@ REVOKE ALL ON FUNCTION app.post_system_message(UUID, TEXT) FROM PUBLIC;
 -- skipped the policy.
 GRANT INSERT (channel_id, sender_id, ciphertext, nonce, signature, key_version,
               mentions, mentions_all, to_bot, reply_to, ephemeral_for,
-              blocks, is_interaction, action_id, action_value)
+              blocks, is_interaction, action_id, action_value, poll)
   ON messages TO authenticated;
 
 -- Editing a panel is editing a message: `messages_update_own` already scopes
@@ -606,6 +629,9 @@ CREATE POLICY messages_insert ON messages FOR INSERT TO authenticated
     -- ...and only a person presses one. A bot pressing its own button is a
     -- loop, and nothing in the design needs it.
     AND (NOT is_interaction OR NOT app.is_bot())
+    -- A poll is a member asking the channel. A bot has panels for asking, and
+    -- a poll addressed to one bot is a question only it could see answered.
+    AND (poll IS NULL OR (NOT app.is_bot() AND to_bot IS NULL))
   );
 
 REVOKE ALL ON bot_server_grants FROM anon, authenticated;
@@ -777,6 +803,22 @@ GRANT EXECUTE ON FUNCTION members_by_usernames(TEXT[], UUID) TO authenticated;
 REVOKE ALL ON FUNCTION message_reaction_tallies(read_scope, BIGINT[]) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION message_reaction_tallies(read_scope, BIGINT[]) TO authenticated;
+
+REVOKE ALL ON FUNCTION set_pinned(read_scope, BIGINT, BOOLEAN) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION set_pinned(read_scope, BIGINT, BOOLEAN) TO authenticated;
+
+REVOKE ALL ON FUNCTION poll_tallies(BIGINT[]) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION poll_tallies(BIGINT[]) TO authenticated;
+
+REVOKE ALL ON FUNCTION vote_poll(BIGINT, SMALLINT[]) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION vote_poll(BIGINT, SMALLINT[]) TO authenticated;
+
+REVOKE ALL ON FUNCTION close_poll(BIGINT) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION close_poll(BIGINT) TO authenticated;
 
 REVOKE ALL ON FUNCTION channel_messages(UUID, BIGINT, BIGINT, INTEGER) FROM PUBLIC;
 
@@ -1060,6 +1102,12 @@ ALTER TABLE dm_messages          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE message_reactions    ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE dm_message_reactions ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE message_pins         ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE dm_message_pins      ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE poll_votes           ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE channel_keyring      ENABLE ROW LEVEL SECURITY;
 

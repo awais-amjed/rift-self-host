@@ -896,6 +896,12 @@ CREATE TABLE IF NOT EXISTS messages (
   action_id     TEXT,
   action_value  TEXT,
 
+  -- ── Polls ──
+  -- The rules of a poll, in the clear, because the server enforces them: how
+  -- many options there are, whether a voter may pick several, and when voting
+  -- stops. The question and the options themselves are in the ciphertext.
+  poll          JSONB,
+
   -- Exactly one origin. Both set is a message pretending to be two things;
   -- neither is a message from nobody.
   CONSTRAINT messages_one_origin
@@ -925,7 +931,22 @@ CREATE TABLE IF NOT EXISTS messages (
   CONSTRAINT messages_action_id_len
     CHECK (action_id IS NULL OR length(action_id) BETWEEN 1 AND 64),
   CONSTRAINT messages_action_value_len
-    CHECK (action_value IS NULL OR length(action_value) <= 256)
+    CHECK (action_value IS NULL OR length(action_value) <= 256),
+  -- Only a sealed message carries a poll: its options are words, and a poll
+  -- whose words are in the clear would be the one kind of message a member
+  -- writes that the server can read.
+  CONSTRAINT messages_poll_sealed CHECK (poll IS NULL OR key_version >= 1),
+  -- Exactly these three keys. `closes_at` is checked as a time by
+  -- `check_poll`, which can ask what time it is; a CHECK cannot.
+  CONSTRAINT messages_poll_shape CHECK (
+    poll IS NULL
+    OR (jsonb_typeof(poll) = 'object'
+        AND jsonb_typeof(poll -> 'options') = 'number'
+        AND (poll ->> 'options')::numeric IN (2, 3, 4, 5, 6, 7, 8, 9, 10)
+        AND jsonb_typeof(poll -> 'multiple') = 'boolean'
+        AND jsonb_typeof(poll -> 'closes_at') = 'string'
+        AND poll - 'options' - 'multiple' - 'closes_at' = '{}'::jsonb)
+  )
 );
 
 COMMENT ON COLUMN messages.mentions IS
@@ -993,6 +1014,50 @@ CREATE TABLE IF NOT EXISTS message_reactions (
 );
 
 -- ============================================================
+-- Pins
+-- ============================================================
+-- Which messages a channel keeps at hand. Not E2E, for the same reason as a
+-- reaction: the server sees *that* a message was pinned and by whom, never
+-- what it says. `channel_id` is copied off the message so the list is one
+-- index range, and so the cap (`set_pinned`) can count it.
+--
+-- Written only by `set_pinned`, which checks `PIN_MESSAGES` and rings the
+-- channel; there is no client INSERT or DELETE.
+
+CREATE TABLE IF NOT EXISTS message_pins (
+  message_id BIGINT      PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  channel_id UUID        NOT NULL REFERENCES channels(id)   ON DELETE CASCADE,
+  pinned_by  UUID        REFERENCES users(id)               ON DELETE SET NULL,
+  pinned_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_pins_channel
+  ON message_pins (channel_id, pinned_at DESC);
+
+-- ============================================================
+-- Poll votes
+-- ============================================================
+-- One row per voter per option picked. The server can read these — it has to,
+-- to count them — but only as option *numbers*: what option 2 says is inside
+-- the message's ciphertext.
+--
+-- Members see counts, not voters. The select policy shows a member their own
+-- rows and nobody else's, and `poll_tallies` is how the totals are read. That
+-- hides a vote from the other members, not from whoever runs the server, and
+-- the client says so.
+--
+-- Written only by `vote_poll`, which enforces the poll's rules: open, a real
+-- option, and one pick unless the poll allows several.
+
+CREATE TABLE IF NOT EXISTS poll_votes (
+  message_id BIGINT      NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id    UUID        NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
+  option     SMALLINT    NOT NULL CHECK (option BETWEEN 0 AND 9),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (message_id, user_id, option)
+);
+
+-- ============================================================
 -- Direct messages
 -- ============================================================
 
@@ -1024,6 +1089,22 @@ CREATE TABLE IF NOT EXISTS dm_message_reactions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (message_id, user_id, emoji)
 );
+
+-- A DM's pins. Either of the two may pin, so there is no permission to check —
+-- only that the message is theirs to see. The pair is copied off the message,
+-- sorted, so a conversation's list and its cap are one index range whichever
+-- side asks.
+CREATE TABLE IF NOT EXISTS dm_message_pins (
+  message_id BIGINT      PRIMARY KEY REFERENCES dm_messages(id) ON DELETE CASCADE,
+  user_low   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_high  UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pinned_by  UUID        REFERENCES users(id) ON DELETE SET NULL,
+  pinned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (user_low < user_high)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dm_message_pins_pair
+  ON dm_message_pins (user_low, user_high, pinned_at DESC);
 
 -- ============================================================
 -- A conversation knows its own newest message
