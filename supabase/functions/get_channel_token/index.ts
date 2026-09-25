@@ -324,13 +324,19 @@ Deno.serve(async (req) => {
 
     if (!opened && node && pinnedNodeId && node.id === pinnedNodeId) {
       await releaseVoiceNodes(supabase, [channel_id]).catch(() => {});
-      const fallback = await claimVoiceNode(
-        supabase,
-        channel_id,
-        preferred_node_id ?? null,
-        true,
-      );
-      if (fallback && fallback.id !== pinnedNodeId) {
+      // **Nothing suggested**, which is what makes this a fallback rather
+      // than a second go at the same answer. Passing the client's measured
+      // preference here sent the call straight back to the region that had
+      // just refused it: the pin was ignored, so the preference was next in
+      // line — and a region whose *key* is wrong answers the probe perfectly
+      // well, so it is still the one the client measured as best. Without a
+      // preference the claim falls through to the default node, which is the
+      // honest meaning of "put this call up somewhere that works".
+      const fallback = await claimVoiceNode(supabase, channel_id, null, true);
+      // Against the region that just failed, not against the pin. They are
+      // the same here, and naming the failure is what stays true if this ever
+      // runs for a region that was not pinned.
+      if (fallback && fallback.id !== node.id) {
         node = fallback;
         nodeUrl = fallback.url;
         nodeHost = normaliseHost(fallback.url);
