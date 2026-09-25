@@ -5873,6 +5873,39 @@ END $$;
 
 RESET ROLE;
 
+-- A channel is pinned to one of its own server's regions and no other. The
+-- foreign key only says the node exists, and a project holds many servers:
+-- Alice pinning Alpha's channel to a region Beta added would open every call
+-- there on Beta's box, signed with Beta's key.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_beta UUID;
+BEGIN
+  SELECT id INTO v_beta FROM livekit_nodes
+   WHERE server_id = 'bbbb0000-0000-4000-8000-000000000001' AND is_default;
+
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    UPDATE channels SET livekit_node_id = v_beta
+     WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: a channel was pinned to another server''s region';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+  RESET ROLE;
+
+  -- Nor by anybody else: the rule is the data's, not the policy's.
+  BEGIN
+    UPDATE channels SET livekit_node_id = v_beta
+     WHERE id = 'aaaa1111-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: the service role pinned a channel to another server''s region';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a channel cannot be pinned to another server''s region';
+END $$;
+
+
 -- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================

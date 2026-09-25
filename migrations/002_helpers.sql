@@ -1296,8 +1296,14 @@ DECLARE
   v_server UUID;
   v_node   UUID;
 BEGIN
-  SELECT c.server_id, c.livekit_node_id INTO v_server, v_node
-    FROM channels c WHERE c.id = p_channel;
+  -- The pin only if the node is this server's. `channels_pin_own_node` in
+  -- 004 refuses writing one that is not, and this is the same rule where it
+  -- matters: the pin is the second rule of resolution, and a stranger's node
+  -- here would have the call opened on their box with their key.
+  SELECT c.server_id, n.id INTO v_server, v_node
+    FROM channels c
+    LEFT JOIN livekit_nodes n ON n.id = c.livekit_node_id AND n.server_id = c.server_id
+   WHERE c.id = p_channel;
 
   IF v_server IS NULL THEN RETURN; END IF;
 

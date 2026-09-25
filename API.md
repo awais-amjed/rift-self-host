@@ -436,7 +436,10 @@ mostly in one place gets its calls near itself.
 The order, in `app.claim_voice_node`:
 
 1. **where the call already is** (`voice_rooms`) — absolute, because a live room cannot move;
-2. **the channel's pin** (`channels.livekit_node_id`);
+2. **the channel's pin** (`channels.livekit_node_id`) — only ever one of the channel's own
+   server's regions: a trigger refuses any other on write, and the claim ignores one on read,
+   because a project holds many servers and a stranger's node would open the call on their box
+   with their key;
 3. **what the caller measured** — `preferred_node_id` on the request, checked against this
    server's own list before it counts for anything;
 4. **the default node**, which mirrors `servers.livekit_url`.

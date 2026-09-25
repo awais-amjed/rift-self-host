@@ -939,6 +939,36 @@ BEGIN
   RETURN OLD;
 END; $$;
 
+-- A channel may only be pinned to one of its own server's regions.
+--
+-- The foreign key says the node exists; it cannot say whose it is, and a
+-- project holds many servers. `claim_voice_node` checks where a *suggested*
+-- node and a *move* belong, because both arrive from a client — but the pin
+-- also arrives from a client, as a plain column write under
+-- `channels_update_managers`, and nothing asked about it. A manager on one
+-- server could pin their channel to a region another server added, and every
+-- call there would then be opened on that server's box and signed with that
+-- region's own key: somebody else's LiveKit, carrying calls it never agreed
+-- to. The node id is not secret enough to lean on — anybody who is also a
+-- member of the other server reads it from `get_server_details`.
+--
+-- A trigger rather than a policy, so it binds the service role too, and
+-- SECURITY DEFINER so the answer does not depend on which nodes the writer
+-- happens to be able to read.
+CREATE OR REPLACE FUNCTION refuse_foreign_node_pin()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  IF NEW.livekit_node_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM livekit_nodes n
+     WHERE n.id = NEW.livekit_node_id AND n.server_id = NEW.server_id
+  ) THEN
+    RAISE EXCEPTION 'That region is not one of this server''s'
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+  RETURN NEW;
+END; $$;
+
 -- ============================================================
 -- Whose clip it is, a ceiling, and no blob left behind.
 --
@@ -1020,6 +1050,11 @@ CREATE TRIGGER livekit_node_secrets_not_default
 DROP TRIGGER IF EXISTS livekit_nodes_protect_default ON livekit_nodes;
 CREATE TRIGGER livekit_nodes_protect_default BEFORE DELETE ON livekit_nodes
   FOR EACH ROW WHEN (OLD.is_default) EXECUTE FUNCTION refuse_default_node_delete();
+
+DROP TRIGGER IF EXISTS channels_pin_own_node ON channels;
+CREATE TRIGGER channels_pin_own_node
+  BEFORE INSERT OR UPDATE OF livekit_node_id, server_id ON channels
+  FOR EACH ROW EXECUTE FUNCTION refuse_foreign_node_pin();
 
 -- The trigger keeps it true from here; this makes it true now. Both are
 -- needed, and the second is the one that is easy to forget: a trigger fires
