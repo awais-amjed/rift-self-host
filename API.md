@@ -523,8 +523,3 @@ does not answer must not be *recorded* as holding anything.
 A call already running on a region that goes down is between those clients
 and LiveKit; nothing here can reconnect them, and the next join decides
 afresh.
-
-**Every node shares the server's one LiveKit key pair** (`server_secrets`). A key is a line in
-each box's own `livekit.yaml`, written by the operator who is adding the node, so matching them
-is a setup step rather than a constraint that costs anything — and it keeps one secret per
-server instead of one per box.
