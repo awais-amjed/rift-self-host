@@ -11,3 +11,8 @@
 # The Supabase CLI's link state. Not the whole `supabase/` directory — that is
 # where the endpoints live, and the layout the CLI deploys from.
 supabase/.temp/
+
+# Deno writes an npm cache beside each function when one is checked or run
+# locally. The edge runtime resolves the same packages from `deno.lock`, and
+# `COPY supabase/functions` would otherwise bake 33 MB of it into the image.
+node_modules/
