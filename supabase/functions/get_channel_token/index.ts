@@ -403,7 +403,13 @@ Deno.serve(async (req) => {
       canPublish: true,
       // undefined = all sources. Deafened denies the mic as well as the ears.
       canPublishSources: grantSources(isMuted, isDeafened),
-      canSubscribe: !isDeafened && mayListen,
+      // Never on a share connection. A share only publishes — the desktop's
+      // is a Rust session that listens for nothing — and the roster skips
+      // `_screenshare` / `_soundshare` identities, because they are the same
+      // person's second connection. So a share token that could subscribe
+      // was a way to sit in a call hearing everything while appearing
+      // nowhere: ask for a screen share, publish nothing.
+      canSubscribe: !isDeafened && mayListen && !wantsShare,
       // Lets a client publish its own state as participant attributes — today
       // just "deafened", which nothing else broadcasts: a muted microphone is
       // visible as an unpublished track, but deafening is a decision made
