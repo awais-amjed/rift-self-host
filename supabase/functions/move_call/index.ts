@@ -57,12 +57,26 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Where a call is held is a channel setting, so this follows the same
-    // permission that changes one: managers and admins. A member who could
-    // call this would be able to interrupt everybody else's conversation.
-    if (!auth.isServerAdmin && !auth.isChannelManager) {
+    // Where a call is held is a channel setting, so this asks the question
+    // that changes one — `app.can_manage_channel`, for this caller. It asked
+    // "admin or channel manager" instead, which is the rule for a public
+    // channel only: a private one answers to its own managers, so a server
+    // admin who is not in it could move its call, and learn from `moved` how
+    // many people were in it.
+    //
+    // One refusal for both "no such channel" and "not yours", as
+    // `get_channel_token` does, so a private channel's id is not confirmed to
+    // somebody who cannot see it.
+    const { data: manageable, error: manageError } = await supabase.rpc(
+      "channel_manageable_by",
+      { p_channel: channel_id, p_user: auth.userId },
+    );
+    if (manageError) {
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, manageError);
+    }
+    if (manageable !== true) {
       return CustomResponse.error(
-        "Not allowed to move this call",
+        "Channel not found, or not yours to move",
         EC.PERMISSION_DENIED,
       );
     }

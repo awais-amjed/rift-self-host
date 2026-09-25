@@ -657,6 +657,10 @@ REVOKE ALL ON FUNCTION channel_joinable_by(UUID, UUID) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION channel_joinable_by(UUID, UUID) TO service_role;
 
+REVOKE ALL ON FUNCTION channel_manageable_by(UUID, UUID) FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION channel_manageable_by(UUID, UUID) TO service_role;
+
 REVOKE ALL ON FUNCTION summon_bot_to_voice(UUID, UUID)    FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION dismiss_bot_from_voice(UUID, UUID) FROM PUBLIC;

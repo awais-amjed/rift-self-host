@@ -5905,6 +5905,65 @@ BEGIN
   RAISE NOTICE 'ok  a channel cannot be pinned to another server''s region';
 END $$;
 
+-- `channel_manageable_by` is what `move_call` and `delete_channel` ask before
+-- touching a room, and it must give `can_manage_channel`'s answer: a public
+-- channel answers to MANAGE_CHANNELS, a private one only to its own managers
+-- — which is exactly where "admin or channel manager" went wrong.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000b0', 'aaaa0000-0000-4000-8000-000000000001',
+   'bobs-private-call', 'voice', true);
+
+-- Somebody with no role at all. The fixture members have collected
+-- permissions from the sections above, so none of them is "plain" any more.
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b1');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id)
+VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b1', 'aaaa0000-0000-4000-8000-000000000001',
+        'nia', 'Nia', 'pk-nia', 'sid-nia');
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-0000000000b1');
+
+DO $$
+DECLARE
+  c_pub  CONSTANT UUID := 'aaaa1111-0000-4000-8000-000000000001';
+  c_priv CONSTANT UUID := 'aaaa1111-0000-4000-8000-0000000000b0';
+  alice  CONSTANT UUID := '11111111-aaaa-4aaa-8aaa-000000000001';
+  bob    CONSTANT UUID := '11111111-aaaa-4aaa-8aaa-000000000002';
+  nia    CONSTANT UUID := '11111111-aaaa-4aaa-8aaa-0000000000b1';
+  mal    CONSTANT UUID := '22222222-bbbb-4bbb-8bbb-000000000001';
+BEGIN
+  IF NOT channel_manageable_by(c_pub, alice) THEN
+    RAISE EXCEPTION 'FAIL: an admin may not manage a public channel';
+  END IF;
+  IF channel_manageable_by(c_pub, nia) THEN
+    RAISE EXCEPTION 'FAIL: a plain member may manage a public channel';
+  END IF;
+  IF NOT channel_manageable_by(c_priv, bob) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s own manager may not manage it';
+  END IF;
+  IF channel_manageable_by(c_priv, alice) THEN
+    RAISE EXCEPTION 'FAIL: a server admin outside a private channel may manage it';
+  END IF;
+  IF channel_manageable_by(c_pub, mal) THEN
+    RAISE EXCEPTION 'FAIL: another server''s member may manage this one''s channel';
+  END IF;
+  RAISE NOTICE 'ok  channel_manageable_by is can_manage_channel, private channels included';
+END $$;
+
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM channel_manageable_by('aaaa1111-0000-4000-8000-000000000001',
+                                  '11111111-aaaa-4aaa-8aaa-000000000001');
+    RAISE EXCEPTION 'FAIL: a member can ask channel_manageable_by about anybody';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  channel_manageable_by is the service role''s alone';
+END $$;
+
+RESET ROLE;
 
 -- ============================================================
 -- 19. One owner per server (013)

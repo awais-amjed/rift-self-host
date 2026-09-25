@@ -893,6 +893,37 @@ CREATE OR REPLACE FUNCTION channel_joinable_by(p_channel UUID, p_user UUID)
           AND app.bot_summoned_to(p_channel, p_user))
 $$;
 
+-- `app.can_manage_channel` for a named person, because an edge function on
+-- the service role has no `auth.uid()` to ask it with. It is the question
+-- `move_call` and `delete_channel` have to put before they touch a room, and
+-- it was being answered in TypeScript as "is this an admin or a channel
+-- manager" — which is the rule for a *public* channel. A private one answers
+-- to its own managers and nobody else, so a server admin who is not in it
+-- could move its call, learn how many were in it, or end it outright.
+--
+-- Written once here rather than rebuilt in each function, for the reason
+-- `channel_joinable_by` is: the rule is the database's.
+CREATE OR REPLACE FUNCTION channel_manageable_by(p_channel UUID, p_user UUID)
+  RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM channels c
+      JOIN users u ON u.id = p_user AND u.server_id = c.server_id
+     WHERE c.id = p_channel
+       AND NOT u.is_banned
+       AND (CASE WHEN c.is_private
+                 THEN EXISTS (SELECT 1 FROM channel_members cm
+                               WHERE cm.channel_id = p_channel
+                                 AND cm.user_id = p_user
+                                 AND cm.can_manage)
+                 ELSE user_has_permission(p_user, 'MANAGE_CHANNELS') END))
+$$;
+
+COMMENT ON FUNCTION channel_manageable_by(UUID, UUID) IS
+  'Service-role only. Whether this person may manage this channel — '
+  'app.can_manage_channel for somebody other than the caller. A private '
+  'channel answers to its own managers, never to a server-wide permission.';
+
 -- ============================================================
 -- 3. Asking, and asking it to leave
 -- ============================================================
