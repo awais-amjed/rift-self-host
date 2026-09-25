@@ -11,6 +11,7 @@ import {
   claimVoiceNode,
   livekitCredentials,
   normaliseHost,
+  releaseVoiceNodes,
   voiceUserId,
 } from "../_shared/livekit.ts";
 
@@ -271,7 +272,30 @@ Deno.serve(async (req) => {
     try {
       await roomService.createRoom({ name: room });
     } catch (roomErr) {
-      return CustomResponse.error("Failed to ensure LiveKit room exists", EC.UNEXPECTED_ERROR, roomErr);
+      // The region is not answering. Two things follow, and the second is the
+      // one that matters: let go of the claim.
+      //
+      // Claiming happens before the room is opened, because the claim is what
+      // stops two simultaneous joiners opening the call in two places. So a
+      // region that is down leaves a claim naming it — and a claim is the
+      // *first* rule of resolution, above the pin and above what anybody
+      // measured. Left behind, it would go on sending people to a node that
+      // is not there long after an automatic channel would otherwise have
+      // picked the one that is.
+      //
+      // A pinned channel will simply claim it again and fail again, which is
+      // correct: the operator said where these calls go, and the answer to a
+      // region being down is to fix it or to pin somewhere else.
+      if (node) {
+        await releaseVoiceNodes(supabase, [channel_id]).catch(() => {});
+      }
+      return CustomResponse.error(
+        node
+          ? `${node.label} is not answering, so this call could not be opened`
+          : "Failed to ensure LiveKit room exists",
+        EC.UNEXPECTED_ERROR,
+        roomErr,
+      );
     }
 
     // Create LiveKit access token. Moderation flags are enforced here — a

@@ -115,27 +115,33 @@ Deno.serve(async (req) => {
     const fromUrl = (Array.isArray(fromNode) ? fromNode[0]?.url : fromNode?.url) ??
       credentials.url;
 
-    // Re-point first. If the packet below fails to reach somebody, they stay
-    // in a working call on the old node and the *next* joiner still goes to
-    // the right one — which is the failure worth having.
-    const { data: moved, error: moveError } = await supabase.rpc("move_voice_node", {
-      p_channel: channel_id,
-      p_node: node_id,
-    });
-    const target = Array.isArray(moved) ? moved[0] : moved;
-    if (moveError || !target?.url) {
+    // The region has to be this server's, and it has to answer, *before*
+    // anything is written down. Re-pointing first and opening the room second
+    // is the obvious order and the wrong one: a region that is offline left
+    // `voice_rooms` naming it while everybody carried on in the old room, so
+    // the next person to join was sent to a node that was not there — and the
+    // mover had been told the move failed.
+    const { data: target, error: lookupError } = await supabase
+      .from("livekit_nodes")
+      .select("id, url, label")
+      .eq("id", node_id)
+      .eq("server_id", auth.serverId)
+      .maybeSingle();
+
+    const to = target as Record<string, any> | null;
+    if (lookupError || !to?.url) {
       return CustomResponse.error(
         "That region is not one of this server's",
         EC.PERMISSION_DENIED,
-        moveError,
+        lookupError,
       );
     }
 
-    // Make the room on the new node before anybody is sent to it, the same
-    // way `get_channel_token` does — so the first arrival does not race the
-    // second into two different rooms of the same name.
+    // Opening the room is also how the region is asked whether it is there.
+    // Idempotent, the same call `get_channel_token` makes, and it means the
+    // first arrival cannot race the second into two rooms of one name.
     const toService = new RoomServiceClient(
-      normaliseHost(target.url),
+      normaliseHost(to.url),
       credentials.apiKey,
       credentials.apiSecret,
     );
@@ -143,9 +149,24 @@ Deno.serve(async (req) => {
       await toService.createRoom({ name: channel_id });
     } catch (roomErr) {
       return CustomResponse.error(
-        "Failed to open the call on that region",
+        `${to.label} did not answer, so the call was left where it is`,
         EC.UNEXPECTED_ERROR,
         roomErr,
+      );
+    }
+
+    // Only now is it true. If the packet below fails to reach somebody, they
+    // stay in a working call on the old node and the *next* joiner goes to
+    // the new one — which is the failure worth having.
+    const { data: moved, error: moveError } = await supabase.rpc("move_voice_node", {
+      p_channel: channel_id,
+      p_node: node_id,
+    });
+    if (moveError || !(Array.isArray(moved) ? moved[0] : moved)?.url) {
+      return CustomResponse.error(
+        "Could not record the move",
+        EC.UNEXPECTED_ERROR,
+        moveError,
       );
     }
 
@@ -185,8 +206,8 @@ Deno.serve(async (req) => {
     return CustomResponse.success({
       moved: told,
       from: fromUrl,
-      to: target.url,
-      region: target.label,
+      to: to.url,
+      region: to.label,
     });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
