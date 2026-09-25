@@ -2109,7 +2109,10 @@ AS $$
              'id',         n.id,
              'label',      n.label,
              'url',        n.url,
-             'is_default', n.is_default)
+             'is_default', n.is_default,
+             -- Whether it signs with its own key. Not the key: that is in a
+             -- table this function, which runs as the caller, cannot read.
+             'has_own_key', n.has_own_key)
              ORDER BY n.is_default DESC, n.label) AS rows
       FROM livekit_nodes n
   )
@@ -2181,6 +2184,71 @@ COMMENT ON FUNCTION get_server_details() IS
   'channels the caller may see, and the caller''s own row with their '
   'permissions. Null when the caller has no row here. Answers the five reads '
   'that used to run one after another.';
+
+-- ============================================================
+-- A region's own LiveKit key
+-- ============================================================
+-- The one function here an *administrator* calls, and it exists because the
+-- table it writes is one nobody may touch: `livekit_node_secrets` has no
+-- policy and no grant, so the write has to be a SECURITY DEFINER function
+-- that checks the caller itself.
+--
+-- Both secrets null clears the row, which puts the region back on the
+-- server's pair — the same state as a region that never had one. That is the
+-- undo, and it is why this is one function rather than a set and a clear.
+
+CREATE OR REPLACE FUNCTION set_voice_region_credentials(
+  p_node    UUID,
+  p_api_key TEXT DEFAULT NULL,
+  p_secret  TEXT DEFAULT NULL
+) RETURNS VOID
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_default BOOLEAN;
+BEGIN
+  -- The node has to be one of *this* server's, checked here rather than left
+  -- to a policy: SECURITY DEFINER means the usual reason a stranger's node is
+  -- out of reach does not apply.
+  SELECT n.is_default INTO v_default
+    FROM livekit_nodes n
+   WHERE n.id = p_node AND n.server_id = app.server_id();
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'No such region on this server' USING ERRCODE = 'no_data_found';
+  END IF;
+  IF NOT app.is_admin() THEN
+    RAISE EXCEPTION 'Only an administrator may change a region''s credentials'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF v_default THEN
+    RAISE EXCEPTION 'The default region uses the server''s own LiveKit key'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  IF btrim(COALESCE(p_api_key, '')) = '' AND btrim(COALESCE(p_secret, '')) = '' THEN
+    DELETE FROM livekit_node_secrets WHERE node_id = p_node;
+    RETURN;
+  END IF;
+
+  -- One without the other is a half-configured node that would mint tokens
+  -- nothing accepts, so it is refused rather than merged with what is
+  -- already stored.
+  IF btrim(COALESCE(p_api_key, '')) = '' OR btrim(COALESCE(p_secret, '')) = '' THEN
+    RAISE EXCEPTION 'A region needs both an API key and a secret, or neither'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
+  VALUES (p_node, btrim(p_api_key), btrim(p_secret))
+  ON CONFLICT (node_id) DO UPDATE
+    SET livekit_api_key    = EXCLUDED.livekit_api_key,
+        livekit_secret_key = EXCLUDED.livekit_secret_key;
+END; $$;
+
+COMMENT ON FUNCTION set_voice_region_credentials(UUID, TEXT, TEXT) IS
+  'Give a region its own LiveKit API key and secret, or pass neither to put '
+  'it back on the server''s pair. Administrators only; never the default '
+  'region, whose key is the server''s.';
 
 -- ============================================================
 -- Voice nodes, for the service role

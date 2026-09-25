@@ -267,11 +267,16 @@ CREATE TABLE IF NOT EXISTS server_secrets (
 -- goes there". What multiple nodes buy is a better choice of *where*, and a
 -- server whose members are mostly in one place gets a call near them.
 --
--- **Every node on a server shares that server's LiveKit key pair**
--- (`server_secrets`). A LiveKit key is a line in each node's own
--- `livekit.yaml`, written by the same operator who is adding the node here,
--- so making them match is a setup instruction rather than a constraint that
--- costs anything — and it keeps one secret per server instead of one per box.
+-- **Each node may hold its own LiveKit key pair**, in `livekit_node_secrets`
+-- below; a node without one uses the server's (`server_secrets`), which is
+-- what the default node always does. One shared pair was the first design and
+-- the reasoning was setup convenience — a LiveKit key is a line in each box's
+-- own `livekit.yaml`, so making them match costs nothing. What that missed is
+-- blast radius: the pair is *on* every box, so compromising the cheapest VPS
+-- in the list yields the key that mints tokens for all of them, including the
+-- one the server itself runs on. Calls are end-to-end encrypted, so that buys
+-- metadata and disruption rather than audio — but it is still every room on
+-- every node, and rotating the answer meant a flag day across the estate.
 --
 -- The row mirroring `servers.livekit_url` is marked `is_default` and is kept
 -- in step with that column by a trigger in 004: it is the same address under
@@ -294,6 +299,13 @@ CREATE TABLE IF NOT EXISTS livekit_nodes (
   -- by trigger; it cannot be deleted while the column exists.
   is_default BOOLEAN     NOT NULL DEFAULT false,
 
+  -- Whether this node authenticates with its own key pair rather than the
+  -- server's. Kept in step with `livekit_node_secrets` by a trigger in 004,
+  -- and it is *not* a secret: it says a key exists, never what it is. Here
+  -- rather than computed in `get_server_details`, because that function runs
+  -- as the caller and the table holding the answer is one no caller may read.
+  has_own_key BOOLEAN    NOT NULL DEFAULT false,
+
   UNIQUE (server_id, label)
 );
 
@@ -305,6 +317,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS livekit_nodes_one_default
 COMMENT ON TABLE livekit_nodes IS
   'The LiveKit servers a Rift server may hold a call on. A call lives on one '
   'of them; see voice_rooms for which.';
+
+-- A node's own LiveKit credentials, split off for the same reason
+-- `server_secrets` is: `livekit_nodes` is ordinary metadata every member
+-- reads, and a secret on that row would ride along with every read of it.
+--
+-- No policy and no grant — only `get_channel_token` and its neighbours, on
+-- the service role, ever read this, and the only way to write it is
+-- `set_voice_region_credentials`, which is an admin-checked SECURITY DEFINER
+-- function because no client can reach the table directly.
+--
+-- Absent means "use the server's pair", which is what a one-LiveKit server
+-- and every node added before this table has. The default node is refused a
+-- row of its own: it *is* the server's LiveKit, so its key is
+-- `server_secrets` by definition and two places to write one value is a way
+-- for them to disagree.
+CREATE TABLE IF NOT EXISTS livekit_node_secrets (
+  node_id            UUID PRIMARY KEY REFERENCES livekit_nodes(id) ON DELETE CASCADE,
+  livekit_api_key    TEXT NOT NULL CHECK (length(btrim(livekit_api_key)) > 0),
+  livekit_secret_key TEXT NOT NULL CHECK (length(btrim(livekit_secret_key)) > 0)
+);
+
+COMMENT ON TABLE livekit_node_secrets IS
+  'A LiveKit node''s own API key and secret. Absent means the node uses the '
+  'server''s pair from server_secrets. Unreachable by any client.';
 
 -- ============================================================
 -- Members

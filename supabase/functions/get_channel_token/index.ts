@@ -10,6 +10,7 @@ import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/a
 import {
   claimVoiceNode,
   livekitCredentials,
+  nodeKeyPair,
   normaliseHost,
   releaseVoiceNodes,
   voiceUserId,
@@ -228,7 +229,6 @@ Deno.serve(async (req) => {
     if (!credentials) {
       return CustomResponse.error("LiveKit credentials not configured for this server", EC.SERVER_CREDENTIALS_MISSING);
     }
-    const { apiKey, apiSecret } = credentials;
 
     const limits = (limitsRow ?? {}) as Record<string, any>;
     const maxVoice = Number(limits[DBSchema.servers.maxVoiceParticipants] ?? 0);
@@ -260,6 +260,13 @@ Deno.serve(async (req) => {
     let node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
     let nodeUrl = node?.url ?? credentials.url;
     let nodeHost = node ? normaliseHost(node.url) : credentials.host;
+
+    // **The key belongs to the node, not to the server.** A region may sign
+    // with its own pair, so this is read after the node is known and again if
+    // the fallback below lands somewhere else — the token minted at the end
+    // is only valid on the box it was signed for. A region without its own
+    // pair uses the server's, which is what the default node always does.
+    let { apiKey, apiSecret } = await nodeKeyPair(supabase, node?.id ?? null, credentials);
 
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
@@ -327,6 +334,9 @@ Deno.serve(async (req) => {
         node = fallback;
         nodeUrl = fallback.url;
         nodeHost = normaliseHost(fallback.url);
+        // Another region, so possibly another key — read again rather than
+        // reused, or the room is opened with a pair this box never accepts.
+        ({ apiKey, apiSecret } = await nodeKeyPair(supabase, fallback.id, credentials));
         roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
         opened = await openRoom(roomService, room);
       }

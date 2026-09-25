@@ -140,10 +140,14 @@ Deno.serve(async (req) => {
     // Opening the room is also how the region is asked whether it is there.
     // Idempotent, the same call `get_channel_token` makes, and it means the
     // first arrival cannot race the second into two rooms of one name.
+    // Signed with the *target's* key. A region may have its own pair, and a
+    // client built with the wrong one is refused by the box rather than by
+    // anything here — which would read as "the region did not answer".
+    const toPair = await nodeKeyPair(supabase, to.id as string, credentials);
     const toService = new RoomServiceClient(
       normaliseHost(to.url),
-      credentials.apiKey,
-      credentials.apiSecret,
+      toPair.apiKey,
+      toPair.apiSecret,
     );
     try {
       await toService.createRoom({ name: channel_id });
@@ -174,10 +178,15 @@ Deno.serve(async (req) => {
     // because the destination is the channel they are already in: a client
     // reading this drops its cached token — which names the old node — and
     // takes the ordinary join path, which asks where to go.
+    const fromPair = await nodeKeyPair(
+      supabase,
+      (currentRow.node_id as string | null) ?? null,
+      credentials,
+    );
     const fromService = new RoomServiceClient(
       normaliseHost(fromUrl),
-      credentials.apiKey,
-      credentials.apiSecret,
+      fromPair.apiKey,
+      fromPair.apiSecret,
     );
     const payload = new TextEncoder().encode(
       JSON.stringify({

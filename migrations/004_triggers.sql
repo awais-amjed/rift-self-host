@@ -872,6 +872,41 @@ BEGIN
   RETURN NEW;
 END; $$;
 
+-- `livekit_nodes.has_own_key` follows `livekit_node_secrets`.
+--
+-- The flag is what a client reads to say "this region has its own key"; the
+-- key itself is in a table no client may touch. A trigger rather than two
+-- writes inside `set_voice_region_credentials`, so that the flag is still
+-- true of the table even when the row is written by something else — a
+-- restore, a fix applied on the service role — rather than only when it is
+-- written the expected way.
+CREATE OR REPLACE FUNCTION mark_node_own_key()
+  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    UPDATE livekit_nodes SET has_own_key = false WHERE id = OLD.node_id;
+    RETURN OLD;
+  END IF;
+
+  UPDATE livekit_nodes SET has_own_key = true WHERE id = NEW.node_id;
+  RETURN NEW;
+END; $$;
+
+-- The default node's key is `server_secrets` by definition — see the table
+-- comment in 001. Refused here rather than only in the RPC, because this is
+-- the rule about the data and the RPC is one way of reaching it.
+CREATE OR REPLACE FUNCTION refuse_default_node_secret()
+  RETURNS TRIGGER LANGUAGE plpgsql
+  SET search_path = public AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM livekit_nodes n WHERE n.id = NEW.node_id AND n.is_default) THEN
+    RAISE EXCEPTION 'The default region uses the server''s own LiveKit key'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END; $$;
+
 -- The other direction is refused rather than mirrored. Deleting this row
 -- would leave `servers.livekit_url` naming a node that is not in the list, so
 -- a channel could be sent to an address nothing offers; renaming is how an
@@ -948,6 +983,16 @@ CREATE TRIGGER messages_ring AFTER INSERT ON messages
 DROP TRIGGER IF EXISTS servers_mirror_default_node ON servers;
 CREATE TRIGGER servers_mirror_default_node AFTER INSERT OR UPDATE ON servers
   FOR EACH ROW EXECUTE FUNCTION mirror_default_livekit_node();
+
+DROP TRIGGER IF EXISTS livekit_node_secrets_mark ON livekit_node_secrets;
+CREATE TRIGGER livekit_node_secrets_mark
+  AFTER INSERT OR UPDATE OR DELETE ON livekit_node_secrets
+  FOR EACH ROW EXECUTE FUNCTION mark_node_own_key();
+
+DROP TRIGGER IF EXISTS livekit_node_secrets_not_default ON livekit_node_secrets;
+CREATE TRIGGER livekit_node_secrets_not_default
+  BEFORE INSERT OR UPDATE ON livekit_node_secrets
+  FOR EACH ROW EXECUTE FUNCTION refuse_default_node_secret();
 
 DROP TRIGGER IF EXISTS livekit_nodes_protect_default ON livekit_nodes;
 CREATE TRIGGER livekit_nodes_protect_default BEFORE DELETE ON livekit_nodes

@@ -30,7 +30,11 @@ export interface LiveKitCredentials {
 }
 
 /**
- * Loads a server's LiveKit credentials, or null when it has none configured.
+ * Loads a server's own LiveKit credentials, or null when it has none
+ * configured.
+ *
+ * The default node's pair, and the fallback for every region that has not
+ * been given one of its own — see [nodeKeyPair].
  *
  * The API secret lives in `server_secrets`, which no client can read — needing
  * it is the whole reason an operation is an edge function rather than a table
@@ -133,6 +137,62 @@ export interface LiveKitNode {
   label: string;
 }
 
+/** A LiveKit API key and secret, whoever they belong to. */
+export interface KeyPair {
+  apiKey: string;
+  apiSecret: string;
+}
+
+/**
+ * The key pair each of [nodeIds] signs with, for those that have their own.
+ *
+ * A node without a row here uses the server's pair, which is why the map is
+ * allowed to come back short — and why every caller below reads it with a
+ * fallback rather than treating a miss as a failure.
+ *
+ * Its own table (`livekit_node_secrets`) with no policy and no grant, read
+ * here on the service role. One key per node rather than one per server
+ * because the key is *on* every box it belongs to: a shared pair means the
+ * cheapest VPS in the list can mint tokens for the room on any other node,
+ * including the one the server itself runs on.
+ */
+export async function nodeKeyPairs(
+  supabase: SupabaseClient,
+  nodeIds: string[],
+): Promise<Map<string, KeyPair>> {
+  const wanted = nodeIds.filter((id) => id.length > 0);
+  if (wanted.length === 0) return new Map();
+
+  const { data } = await supabase
+    .from("livekit_node_secrets")
+    .select("node_id, livekit_api_key, livekit_secret_key")
+    .in("node_id", wanted);
+
+  const pairs = new Map<string, KeyPair>();
+  for (const row of (data ?? []) as Record<string, any>[]) {
+    if (!row.livekit_api_key || !row.livekit_secret_key) continue;
+    pairs.set(row.node_id, {
+      apiKey: row.livekit_api_key,
+      apiSecret: row.livekit_secret_key,
+    });
+  }
+  return pairs;
+}
+
+/**
+ * The pair one node signs with: its own when it has one, the server's when it
+ * doesn't — which is always the answer for the default node, and for every
+ * node on a server that has not given any of them a key.
+ */
+export async function nodeKeyPair(
+  supabase: SupabaseClient,
+  nodeId: string | null,
+  fallback: KeyPair,
+): Promise<KeyPair> {
+  if (!nodeId) return fallback;
+  return (await nodeKeyPairs(supabase, [nodeId])).get(nodeId) ?? fallback;
+}
+
 /**
  * Where this channel's call is, creating that answer if there is not one yet.
  *
@@ -220,14 +280,18 @@ export async function livekitRoomServices(
     ? nodes
     : [{ id: "", url: credentials.url, label: "Default" }];
 
-  return list.map((node) => ({
-    node,
-    service: new RoomServiceClient(
-      normaliseHost(node.url),
-      credentials.apiKey,
-      credentials.apiSecret,
-    ),
-  }));
+  // One query for the whole list, not one per node: this runs on every
+  // roster, kick and move, and each of those already asks every node a
+  // question of its own.
+  const pairs = await nodeKeyPairs(supabase, list.map((node) => node.id));
+
+  return list.map((node) => {
+    const { apiKey, apiSecret } = pairs.get(node.id) ?? credentials;
+    return {
+      node,
+      service: new RoomServiceClient(normaliseHost(node.url), apiKey, apiSecret),
+    };
+  });
 }
 
 /**
@@ -282,12 +346,21 @@ export async function livekitRoomServiceForChannel(
 
   const { data } = await supabase
     .from("voice_rooms")
-    .select("livekit_nodes(url)")
+    .select("node_id, livekit_nodes(url)")
     .eq("channel_id", channelId)
     .maybeSingle();
 
-  const node = (data as Record<string, any> | null)?.livekit_nodes;
+  const row = data as Record<string, any> | null;
+  const node = row?.livekit_nodes;
   const url = (Array.isArray(node) ? node[0]?.url : node?.url) ?? credentials.url;
+  // The node's own key when it has one. A channel with no live call falls
+  // back to the server's address *and* the server's pair, which belong
+  // together: that address is the default node's.
+  const { apiKey, apiSecret } = await nodeKeyPair(
+    supabase,
+    (row?.node_id as string | null) ?? null,
+    credentials,
+  );
 
-  return new RoomServiceClient(normaliseHost(url), credentials.apiKey, credentials.apiSecret);
+  return new RoomServiceClient(normaliseHost(url), apiKey, apiSecret);
 }
