@@ -48,13 +48,13 @@ GRANT SELECT, INSERT, DELETE       ON channels TO authenticated;
 -- in, and offers the nearest one when they are the first to open it. Only an
 -- admin changes it — the addresses are infrastructure, not channel settings.
 --
--- Column by column for the two writes, because `has_own_key` is not an
--- operator's to set: it is a statement about `livekit_node_secrets`, kept
--- true by a trigger, and an admin who could write it by hand could make
--- every client believe a region signs with a key it does not have.
+-- **No INSERT.** A region and the key it signs with are one act — see
+-- `add_voice_region`, which writes both in one transaction — and a client
+-- that could insert the node alone would be making a region with no key of
+-- its own. The trigger in 004 refuses that anyway; this means nobody has to
+-- reach it. Renaming and repointing stay ordinary table writes.
 GRANT SELECT, DELETE ON livekit_nodes TO authenticated;
-GRANT INSERT (server_id, label, url) ON livekit_nodes TO authenticated;
-GRANT UPDATE (label, url)            ON livekit_nodes TO authenticated;
+GRANT UPDATE (label, url) ON livekit_nodes TO authenticated;
 
 -- Read-only to everyone, and written by nobody here: `get_channel_token` sets
 -- it on the service role when it creates a room, and `voice_roster` clears it.
@@ -393,19 +393,17 @@ CREATE POLICY channels_delete_managers ON channels FOR DELETE TO authenticated
 
 -- ---------- where voice runs ----------
 -- The list is server metadata, like the name and the icon: visible to any
--- member, writable by an admin. It carries no secret — a region's key pair
--- lives in `livekit_node_secrets` (and the default's in `server_secrets`),
--- neither of which is reachable from here. The row says only *whether* a
--- region has its own key, which is a fact about the setup rather than a
--- credential.
+-- member, renamed and repointed by an admin. It carries no secret — every
+-- region's key pair lives in `livekit_node_secrets` (and the default's in
+-- `server_secrets`), neither of which is reachable from here.
 
 DROP POLICY IF EXISTS livekit_nodes_read ON livekit_nodes;
 CREATE POLICY livekit_nodes_read ON livekit_nodes FOR SELECT TO authenticated
   USING (server_id = app.server_id());
 
-DROP POLICY IF EXISTS livekit_nodes_write_admins ON livekit_nodes;
-CREATE POLICY livekit_nodes_write_admins ON livekit_nodes FOR INSERT TO authenticated
-  WITH CHECK (server_id = app.server_id() AND app.is_admin());
+-- No INSERT policy: there is no client insert to police. `add_voice_region`
+-- is SECURITY DEFINER and checks the caller itself, because it has to write
+-- the key as well and that table is beyond every policy here.
 
 DROP POLICY IF EXISTS livekit_nodes_update_admins ON livekit_nodes;
 CREATE POLICY livekit_nodes_update_admins ON livekit_nodes FOR UPDATE TO authenticated
@@ -974,9 +972,14 @@ GRANT EXECUTE ON FUNCTION server_storage_used() TO authenticated;
 -- is read by the service role alone, and written only through
 -- `set_voice_region_credentials` below.
 
--- A region's own key pair. An administrator's to set, so it is granted to
--- `authenticated` and checks the caller itself — the table it writes has no
--- policy to do that for it.
+-- Adding a region, and rotating the key one signs with. Both are an
+-- administrator's, so both are granted to `authenticated` and check the
+-- caller themselves — the table they write has no policy to do it for them.
+REVOKE ALL ON FUNCTION add_voice_region(TEXT, TEXT, TEXT, TEXT)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION add_voice_region(TEXT, TEXT, TEXT, TEXT)
+  TO authenticated;
+
 REVOKE ALL ON FUNCTION set_voice_region_credentials(UUID, TEXT, TEXT)
   FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION set_voice_region_credentials(UUID, TEXT, TEXT)

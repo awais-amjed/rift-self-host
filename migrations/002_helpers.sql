@@ -1280,12 +1280,17 @@ COMMENT ON VIEW member_role_list IS
 -- always, and only the attempt falls back. When the region returns, the very
 -- next call goes there again with nobody having touched anything.
 DROP FUNCTION IF EXISTS app.claim_voice_node(UUID, UUID);
+DROP FUNCTION IF EXISTS app.claim_voice_node(UUID, UUID, BOOLEAN);
 
+-- `is_default` rides along because the key a token is signed with depends on
+-- it: every added region has its own pair, and the default node's is the
+-- server's. The caller would otherwise have to ask again for the one fact it
+-- cannot do without.
 CREATE OR REPLACE FUNCTION app.claim_voice_node(
   p_channel    UUID,
   p_preferred  UUID DEFAULT NULL,
   p_ignore_pin BOOLEAN DEFAULT false
-) RETURNS TABLE (id UUID, url TEXT, label TEXT)
+) RETURNS TABLE (id UUID, url TEXT, label TEXT, is_default BOOLEAN)
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_server UUID;
@@ -1321,7 +1326,7 @@ BEGIN
     ON CONFLICT (channel_id) DO NOTHING;
 
   RETURN QUERY
-  SELECT n.id, n.url, n.label
+  SELECT n.id, n.url, n.label, n.is_default
     FROM voice_rooms vr
     JOIN livekit_nodes n ON n.id = vr.node_id
    WHERE vr.channel_id = p_channel;
@@ -1364,10 +1369,12 @@ COMMENT ON FUNCTION app.release_voice_node(UUID[]) IS
 -- A channel with no call has nothing to move: the row is not created here,
 -- because the next caller will claim one anyway and creating it now would
 -- pin an empty channel to a node nobody chose.
+DROP FUNCTION IF EXISTS app.move_voice_node(UUID, UUID);
+
 CREATE OR REPLACE FUNCTION app.move_voice_node(
   p_channel UUID,
   p_node    UUID
-) RETURNS TABLE (id UUID, url TEXT, label TEXT)
+) RETURNS TABLE (id UUID, url TEXT, label TEXT, is_default BOOLEAN)
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_server UUID;
@@ -1389,7 +1396,8 @@ BEGIN
   IF NOT FOUND THEN RETURN; END IF;
 
   RETURN QUERY
-  SELECT n.id, n.url, n.label FROM livekit_nodes n WHERE n.id = p_node;
+  SELECT n.id, n.url, n.label, n.is_default
+    FROM livekit_nodes n WHERE n.id = p_node;
 END $$;
 
 COMMENT ON FUNCTION app.move_voice_node(UUID, UUID) IS

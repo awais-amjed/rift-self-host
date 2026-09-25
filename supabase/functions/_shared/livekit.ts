@@ -135,6 +135,9 @@ export interface LiveKitNode {
   id: string;
   url: string;
   label: string;
+
+  /** The mirror of `servers.livekit_url`, whose key is the server's own. */
+  isDefault?: boolean;
 }
 
 /** A LiveKit API key and secret, whoever they belong to. */
@@ -180,17 +183,24 @@ export async function nodeKeyPairs(
 }
 
 /**
- * The pair one node signs with: its own when it has one, the server's when it
- * doesn't — which is always the answer for the default node, and for every
- * node on a server that has not given any of them a key.
+ * The pair one node signs with, or **null when there is none to sign with**.
+ *
+ * The server's pair answers for the default node, which is the server's own
+ * LiveKit, and for a call resolved from `servers.livekit_url` with no node
+ * named at all. Every other region carries its own key and a missing one is
+ * not a reason to reach for the server's: that fallback is the thing
+ * per-region keys exist to prevent, and it would arrive silently. The schema
+ * refuses to make such a region; if one is somehow there, it is unusable
+ * rather than quietly shared.
  */
 export async function nodeKeyPair(
   supabase: SupabaseClient,
-  nodeId: string | null,
+  node: { id: string; isDefault?: boolean } | null,
   fallback: KeyPair,
-): Promise<KeyPair> {
-  if (!nodeId) return fallback;
-  return (await nodeKeyPairs(supabase, [nodeId])).get(nodeId) ?? fallback;
+): Promise<KeyPair | null> {
+  if (!node || !node.id) return fallback;
+  if (node.isDefault) return fallback;
+  return (await nodeKeyPairs(supabase, [node.id])).get(node.id) ?? null;
 }
 
 /**
@@ -218,7 +228,12 @@ export async function claimVoiceNode(
   });
   const row = Array.isArray(data) ? data[0] : data;
   if (!row?.id || !row?.url) return null;
-  return { id: row.id, url: row.url, label: row.label ?? "" };
+  return {
+    id: row.id,
+    url: row.url,
+    label: row.label ?? "",
+    isDefault: row.is_default === true,
+  };
 }
 
 /**
@@ -252,6 +267,7 @@ export async function livekitNodes(
     id: n.id,
     url: n.url,
     label: n.label,
+    isDefault: n.is_default === true,
   }));
 }
 
@@ -278,19 +294,27 @@ export async function livekitRoomServices(
   // its other name.
   const list: LiveKitNode[] = nodes.length > 0
     ? nodes
-    : [{ id: "", url: credentials.url, label: "Default" }];
+    : [{ id: "", url: credentials.url, label: "Default", isDefault: true }];
 
   // One query for the whole list, not one per node: this runs on every
   // roster, kick and move, and each of those already asks every node a
   // question of its own.
   const pairs = await nodeKeyPairs(supabase, list.map((node) => node.id));
 
-  return list.map((node) => {
-    const { apiKey, apiSecret } = pairs.get(node.id) ?? credentials;
-    return {
+  // A region with no key of its own is left out rather than talked to with
+  // the server's. It then behaves like a region that does not answer, which
+  // is what it is: nothing here can open a room on it.
+  return list.flatMap((node) => {
+    const pair = node.isDefault ? credentials : pairs.get(node.id);
+    if (!pair) return [];
+    return [{
       node,
-      service: new RoomServiceClient(normaliseHost(node.url), apiKey, apiSecret),
-    };
+      service: new RoomServiceClient(
+        normaliseHost(node.url),
+        pair.apiKey,
+        pair.apiSecret,
+      ),
+    }];
   });
 }
 
@@ -346,21 +370,23 @@ export async function livekitRoomServiceForChannel(
 
   const { data } = await supabase
     .from("voice_rooms")
-    .select("node_id, livekit_nodes(url)")
+    .select("node_id, livekit_nodes(url, is_default)")
     .eq("channel_id", channelId)
     .maybeSingle();
 
   const row = data as Record<string, any> | null;
-  const node = row?.livekit_nodes;
-  const url = (Array.isArray(node) ? node[0]?.url : node?.url) ?? credentials.url;
-  // The node's own key when it has one. A channel with no live call falls
-  // back to the server's address *and* the server's pair, which belong
-  // together: that address is the default node's.
-  const { apiKey, apiSecret } = await nodeKeyPair(
+  const joined = row?.livekit_nodes;
+  const node = Array.isArray(joined) ? joined[0] : joined;
+  const url = node?.url ?? credentials.url;
+  // The node's own key. A channel with no live call falls back to the
+  // server's address *and* the server's pair, which belong together: that
+  // address is the default node's.
+  const pair = await nodeKeyPair(
     supabase,
-    (row?.node_id as string | null) ?? null,
+    row?.node_id ? { id: row.node_id as string, isDefault: node?.is_default === true } : null,
     credentials,
   );
+  if (!pair) return null;
 
-  return new RoomServiceClient(normaliseHost(url), apiKey, apiSecret);
+  return new RoomServiceClient(normaliseHost(url), pair.apiKey, pair.apiSecret);
 }

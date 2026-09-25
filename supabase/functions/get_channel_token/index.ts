@@ -261,17 +261,24 @@ Deno.serve(async (req) => {
     let nodeUrl = node?.url ?? credentials.url;
     let nodeHost = node ? normaliseHost(node.url) : credentials.host;
 
-    // **The key belongs to the node, not to the server.** A region may sign
-    // with its own pair, so this is read after the node is known and again if
-    // the fallback below lands somewhere else — the token minted at the end
-    // is only valid on the box it was signed for. A region without its own
-    // pair uses the server's, which is what the default node always does.
-    let { apiKey, apiSecret } = await nodeKeyPair(supabase, node?.id ?? null, credentials);
+    // **The key belongs to the node, not to the server.** Every added region
+    // signs with its own pair and only the default node uses the server's, so
+    // this is read after the node is known — and again if the fallback below
+    // lands somewhere else, because a token is only valid on the box it was
+    // signed for.
+    //
+    // Null means there is no key for that region, which the schema does not
+    // allow to happen. If it somehow has, the region is unusable rather than
+    // quietly run on the server's pair, and everything below treats it as a
+    // region that did not answer.
+    let pair = await nodeKeyPair(supabase, node, credentials);
 
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
     // the edge function is the only thing that can create rooms.
-    let roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
+    let roomService = pair
+      ? new RoomServiceClient(nodeHost, pair.apiKey, pair.apiSecret)
+      : null;
 
     // How full the call is (migration 028), asked only when there is a limit
     // to compare it against — a server that has not set one pays nothing.
@@ -288,7 +295,7 @@ Deno.serve(async (req) => {
     // from earlier can rejoin without asking. What it does stop is a channel
     // growing without bound, because every genuinely new arrival needs a
     // fresh token and every one of those is counted.
-    if (maxVoice > 0 && !isBot) {
+    if (maxVoice > 0 && !isBot && roomService) {
       try {
         const present = new Set(
           (await roomService.listParticipants(room))
@@ -320,7 +327,7 @@ Deno.serve(async (req) => {
     // Only from the pin, and only once. An automatic choice that fails has
     // nothing better to fall back to, and a second failure is a server with
     // no region answering at all.
-    let opened = await openRoom(roomService, room);
+    let opened = roomService ? await openRoom(roomService, room) : false;
 
     if (!opened && node && pinnedNodeId && node.id === pinnedNodeId) {
       await releaseVoiceNodes(supabase, [channel_id]).catch(() => {});
@@ -340,11 +347,13 @@ Deno.serve(async (req) => {
         node = fallback;
         nodeUrl = fallback.url;
         nodeHost = normaliseHost(fallback.url);
-        // Another region, so possibly another key — read again rather than
-        // reused, or the room is opened with a pair this box never accepts.
-        ({ apiKey, apiSecret } = await nodeKeyPair(supabase, fallback.id, credentials));
-        roomService = new RoomServiceClient(nodeHost, apiKey, apiSecret);
-        opened = await openRoom(roomService, room);
+        // Another region, so another key — read again rather than reused, or
+        // the room is opened with a pair this box never accepts.
+        pair = await nodeKeyPair(supabase, fallback, credentials);
+        roomService = pair
+          ? new RoomServiceClient(nodeHost, pair.apiKey, pair.apiSecret)
+          : null;
+        opened = roomService ? await openRoom(roomService, room) : false;
       }
     }
 
@@ -379,7 +388,8 @@ Deno.serve(async (req) => {
     // deafened user's token cannot subscribe, so the state survives rejoins
     // and cannot be bypassed client-side. The flags also ride along as
     // participant metadata so every client can render the moderation state.
-    const at = new AccessToken(apiKey, apiSecret, {
+    // Non-null past the check above: the room was opened, which needed it.
+    const at = new AccessToken(pair!.apiKey, pair!.apiSecret, {
       identity,
       name: displayName,
       ttl: "1h",

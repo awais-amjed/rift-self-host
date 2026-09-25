@@ -6,7 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitCredentials, normaliseHost } from "../_shared/livekit.ts";
+import { livekitCredentials, nodeKeyPair, normaliseHost } from "../_shared/livekit.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -96,7 +96,7 @@ Deno.serve(async (req) => {
     // Where the call is now, before anything moves it.
     const { data: current } = await supabase
       .from("voice_rooms")
-      .select("node_id, livekit_nodes(url)")
+      .select("node_id, livekit_nodes(url, is_default)")
       .eq("channel_id", channel_id)
       .maybeSingle();
 
@@ -111,9 +111,10 @@ Deno.serve(async (req) => {
       return CustomResponse.success({ moved: 0, reason: "already_there" });
     }
 
-    const fromNode = currentRow.livekit_nodes;
-    const fromUrl = (Array.isArray(fromNode) ? fromNode[0]?.url : fromNode?.url) ??
-      credentials.url;
+    const fromNode = Array.isArray(currentRow.livekit_nodes)
+      ? currentRow.livekit_nodes[0]
+      : currentRow.livekit_nodes;
+    const fromUrl = fromNode?.url ?? credentials.url;
 
     // The region has to be this server's, and it has to answer, *before*
     // anything is written down. Re-pointing first and opening the room second
@@ -123,7 +124,7 @@ Deno.serve(async (req) => {
     // mover had been told the move failed.
     const { data: target, error: lookupError } = await supabase
       .from("livekit_nodes")
-      .select("id, url, label")
+      .select("id, url, label, is_default")
       .eq("id", node_id)
       .eq("server_id", auth.serverId)
       .maybeSingle();
@@ -140,10 +141,20 @@ Deno.serve(async (req) => {
     // Opening the room is also how the region is asked whether it is there.
     // Idempotent, the same call `get_channel_token` makes, and it means the
     // first arrival cannot race the second into two rooms of one name.
-    // Signed with the *target's* key. A region may have its own pair, and a
-    // client built with the wrong one is refused by the box rather than by
-    // anything here — which would read as "the region did not answer".
-    const toPair = await nodeKeyPair(supabase, to.id as string, credentials);
+    // Signed with the *target's* key. Every added region has its own pair,
+    // and a client built with the wrong one is refused by the box rather than
+    // by anything here — which would read as "the region did not answer".
+    const toPair = await nodeKeyPair(
+      supabase,
+      { id: to.id as string, isDefault: to.is_default === true },
+      credentials,
+    );
+    if (!toPair) {
+      return CustomResponse.error(
+        `${to.label} has no LiveKit key of its own, so nothing can be opened there`,
+        EC.SERVER_CREDENTIALS_MISSING,
+      );
+    }
     const toService = new RoomServiceClient(
       normaliseHost(to.url),
       toPair.apiKey,
@@ -180,14 +191,17 @@ Deno.serve(async (req) => {
     // takes the ordinary join path, which asks where to go.
     const fromPair = await nodeKeyPair(
       supabase,
-      (currentRow.node_id as string | null) ?? null,
+      currentRow.node_id
+        ? {
+          id: currentRow.node_id as string,
+          isDefault: fromNode?.is_default === true,
+        }
+        : null,
       credentials,
     );
-    const fromService = new RoomServiceClient(
-      normaliseHost(fromUrl),
-      fromPair.apiKey,
-      fromPair.apiSecret,
-    );
+    const fromService = fromPair
+      ? new RoomServiceClient(normaliseHost(fromUrl), fromPair.apiKey, fromPair.apiSecret)
+      : null;
     const payload = new TextEncoder().encode(
       JSON.stringify({
         v: SIGNAL_VERSION,
@@ -199,8 +213,13 @@ Deno.serve(async (req) => {
 
     let told = 0;
     try {
-      const participants = await fromService.listParticipants(channel_id);
-      if (participants.length > 0) {
+      // No key for the region they are on means nothing can be said to them.
+      // The move is recorded either way, so the next person to ask is sent to
+      // the new region; these keep talking where they are until they rejoin.
+      const participants = fromService
+        ? await fromService.listParticipants(channel_id)
+        : [];
+      if (participants.length > 0 && fromService) {
         await fromService.sendData(channel_id, payload, DataPacket_Kind.RELIABLE, {
           topic: MOVE_TOPIC,
         });

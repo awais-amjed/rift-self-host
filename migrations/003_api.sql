@@ -2109,10 +2109,7 @@ AS $$
              'id',         n.id,
              'label',      n.label,
              'url',        n.url,
-             'is_default', n.is_default,
-             -- Whether it signs with its own key. Not the key: that is in a
-             -- table this function, which runs as the caller, cannot read.
-             'has_own_key', n.has_own_key)
+             'is_default', n.is_default)
              ORDER BY n.is_default DESC, n.label) AS rows
       FROM livekit_nodes n
   )
@@ -2186,21 +2183,68 @@ COMMENT ON FUNCTION get_server_details() IS
   'that used to run one after another.';
 
 -- ============================================================
--- A region's own LiveKit key
+-- Regions, and the key each one holds
 -- ============================================================
--- The one function here an *administrator* calls, and it exists because the
--- table it writes is one nobody may touch: `livekit_node_secrets` has no
--- policy and no grant, so the write has to be a SECURITY DEFINER function
--- that checks the caller itself.
+-- The two functions here an *administrator* calls, and they exist because the
+-- table they write is one nobody may touch: `livekit_node_secrets` has no
+-- policy and no grant, so the writes have to be SECURITY DEFINER functions
+-- that check the caller themselves.
 --
--- Both secrets null clears the row, which puts the region back on the
--- server's pair — the same state as a region that never had one. That is the
--- undo, and it is why this is one function rather than a set and a clear.
+-- Adding a region is one of them because the node and its key are one act. A
+-- region with no key of its own would fall back to the server's pair, which
+-- is what per-region keys exist to prevent, so the two rows are written in
+-- one transaction and a deferred trigger in 004 refuses the pair being split.
+-- There is no clearing a key, for the same reason: the undo for a region is
+-- removing it.
+
+CREATE OR REPLACE FUNCTION add_voice_region(
+  p_label   TEXT,
+  p_url     TEXT,
+  p_api_key TEXT,
+  p_secret  TEXT
+) RETURNS jsonb
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID := app.server_id();
+  v_id     UUID;
+BEGIN
+  IF NOT app.is_admin() THEN
+    RAISE EXCEPTION 'Only an administrator may add a region'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF btrim(COALESCE(p_api_key, '')) = '' OR btrim(COALESCE(p_secret, '')) = '' THEN
+    RAISE EXCEPTION 'A region needs its own LiveKit API key and secret'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  INSERT INTO livekit_nodes (server_id, label, url)
+  VALUES (v_server, btrim(p_label), btrim(p_url))
+  RETURNING id INTO v_id;
+
+  INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
+  VALUES (v_id, btrim(p_api_key), btrim(p_secret));
+
+  -- The row as the client would have read it back from the table, so adding a
+  -- region answers with the region.
+  RETURN (SELECT jsonb_build_object('id', n.id, 'label', n.label, 'url', n.url,
+                                    'is_default', n.is_default)
+            FROM livekit_nodes n WHERE n.id = v_id);
+END; $$;
+
+COMMENT ON FUNCTION add_voice_region(TEXT, TEXT, TEXT, TEXT) IS
+  'Add a LiveKit region with the key pair it signs with. Administrators only; '
+  'both halves of the key are required, because a region without one would '
+  'fall back to the server''s.';
+
+-- Dropped first: it once took two defaulted parameters, because passing
+-- neither was how a region gave its key up. A replacement cannot take a
+-- default away.
+DROP FUNCTION IF EXISTS set_voice_region_credentials(UUID, TEXT, TEXT);
 
 CREATE OR REPLACE FUNCTION set_voice_region_credentials(
   p_node    UUID,
-  p_api_key TEXT DEFAULT NULL,
-  p_secret  TEXT DEFAULT NULL
+  p_api_key TEXT,
+  p_secret  TEXT
 ) RETURNS VOID
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -2225,16 +2269,11 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
-  IF btrim(COALESCE(p_api_key, '')) = '' AND btrim(COALESCE(p_secret, '')) = '' THEN
-    DELETE FROM livekit_node_secrets WHERE node_id = p_node;
-    RETURN;
-  END IF;
-
-  -- One without the other is a half-configured node that would mint tokens
-  -- nothing accepts, so it is refused rather than merged with what is
-  -- already stored.
+  -- Both halves, always. One without the other is a half-configured node
+  -- that would mint tokens nothing accepts, and neither is not a way to give
+  -- a region up — there is no falling back to the server's pair.
   IF btrim(COALESCE(p_api_key, '')) = '' OR btrim(COALESCE(p_secret, '')) = '' THEN
-    RAISE EXCEPTION 'A region needs both an API key and a secret, or neither'
+    RAISE EXCEPTION 'A region needs both an API key and a secret'
       USING ERRCODE = 'check_violation';
   END IF;
 
@@ -2246,9 +2285,9 @@ BEGIN
 END; $$;
 
 COMMENT ON FUNCTION set_voice_region_credentials(UUID, TEXT, TEXT) IS
-  'Give a region its own LiveKit API key and secret, or pass neither to put '
-  'it back on the server''s pair. Administrators only; never the default '
-  'region, whose key is the server''s.';
+  'Replace a region''s own LiveKit API key and secret — for a rotation, one '
+  'box at a time. Administrators only; never the default region, whose key '
+  'is the server''s.';
 
 -- ============================================================
 -- Voice nodes, for the service role
@@ -2264,14 +2303,15 @@ COMMENT ON FUNCTION set_voice_region_credentials(UUID, TEXT, TEXT) IS
 -- `get_channel_token` claims; `voice_roster` releases.
 
 DROP FUNCTION IF EXISTS claim_voice_node(UUID, UUID);
+DROP FUNCTION IF EXISTS claim_voice_node(UUID, UUID, BOOLEAN);
 
 CREATE OR REPLACE FUNCTION claim_voice_node(
   p_channel    UUID,
   p_preferred  UUID DEFAULT NULL,
   p_ignore_pin BOOLEAN DEFAULT false
-) RETURNS TABLE (id UUID, url TEXT, label TEXT)
+) RETURNS TABLE (id UUID, url TEXT, label TEXT, is_default BOOLEAN)
   LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
-  SELECT n.id, n.url, n.label
+  SELECT n.id, n.url, n.label, n.is_default
     FROM app.claim_voice_node(p_channel, p_preferred, p_ignore_pin) n
 $$;
 
@@ -2289,10 +2329,13 @@ COMMENT ON FUNCTION release_voice_node(UUID[]) IS
   'Service-role face of app.release_voice_node: these calls have ended, so '
   'the next one on each channel is decided afresh.';
 
+DROP FUNCTION IF EXISTS move_voice_node(UUID, UUID);
+
 CREATE OR REPLACE FUNCTION move_voice_node(p_channel UUID, p_node UUID)
-  RETURNS TABLE (id UUID, url TEXT, label TEXT)
+  RETURNS TABLE (id UUID, url TEXT, label TEXT, is_default BOOLEAN)
   LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
-  SELECT n.id, n.url, n.label FROM app.move_voice_node(p_channel, p_node) n
+  SELECT n.id, n.url, n.label, n.is_default
+    FROM app.move_voice_node(p_channel, p_node) n
 $$;
 
 COMMENT ON FUNCTION move_voice_node(UUID, UUID) IS

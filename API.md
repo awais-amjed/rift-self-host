@@ -461,32 +461,37 @@ answer as an empty room.
 the destination resolves on that client's next token request. A move between two regions is the
 reconnect it was always doing.
 
-### A region's own key
+### Every region's own key
 
-Each region may hold its own LiveKit API key and secret, in `livekit_node_secrets` — a table
-with no policy and no grant, like `server_secrets`, read only by the edge functions on the
-service role. A region without a row uses the server's pair, which is what the default region
-always does: it *is* `servers.livekit_url`, so its key is the server's by definition and it is
-refused one of its own.
+Every region a server adds holds its own LiveKit API key and secret, in
+`livekit_node_secrets` — a table with no policy and no grant, like `server_secrets`, read only
+by the edge functions on the service role. **It is required, not offered.** The default region
+is the one exception and barely one: it *is* `servers.livekit_url`, so its pair is the server's
+and it is refused a key of its own.
 
 One pair per server was the first design, and the reasoning was that a LiveKit key is a line in
 each box's own `livekit.yaml` anyway. What that missed is blast radius. The key is *on* every
 box, so whoever takes the cheapest VPS in the list holds the key that mints tokens for the room
 on any other node — including the one the server itself runs on. Calls are end-to-end
 encrypted, so that buys metadata, impersonation and disruption rather than audio, and it is
-still every room everywhere; rotating the answer meant changing every box at once.
+still every room everywhere; rotating the answer meant changing every box at once. The operator
+has to write *some* key into each box either way, so a distinct one is the same work — and an
+optional safeguard is one most people skip.
 
-An administrator sets one with `set_voice_region_credentials(p_node, p_api_key, p_secret)`, an
-admin-checked `SECURITY DEFINER` function because the table it writes is out of reach. Passing
-neither secret clears the row and puts the region back on the server's pair. `livekit_nodes`
-carries `has_own_key`, kept in step by a trigger: it says a key exists, never what it is, and
-is not an operator's column to write — the grant is column-by-column for exactly that reason.
+A region is therefore added with `add_voice_region(p_label, p_url, p_api_key, p_secret)`, an
+admin-checked `SECURITY DEFINER` function that writes the node and its key in one transaction;
+`authenticated` has no INSERT on `livekit_nodes` at all. A deferred constraint trigger enforces
+the same rule against the data rather than the API: at commit, a non-default node with no key
+is refused, and the key cannot be deleted while its node is there. Rotation is
+`set_voice_region_credentials(p_node, p_api_key, p_secret)`, both halves, one box at a time.
 
-Everything that talks to a node reads its pair: `get_channel_token` mints the join token with
-the key of whichever node the claim landed on (and again if the unreachable-pin fallback moves
-it somewhere else), `move_call` signs for the source and the target separately, and the shared
-`livekitRoomServices` builds one admin client per node from one query. A token signed with the
-wrong key is refused by the box, which would read as "the region did not answer".
+Everything that talks to a node reads that node's pair, and **a missing one is never the
+server's**: `get_channel_token` mints the join token with the key of whichever node the claim
+landed on (and again if the unreachable-pin fallback moves it), `move_call` signs for the
+source and the target separately, and `livekitRoomServices` builds one admin client per node
+from one query, leaving out any node it has no key for — which then behaves exactly like a
+region that does not answer, because it is one. `claim_voice_node` and `move_voice_node` return
+`is_default` alongside the address, since that is what decides which pair to reach for.
 
 ### When a region is offline
 

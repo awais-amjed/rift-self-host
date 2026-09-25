@@ -872,25 +872,42 @@ BEGIN
   RETURN NEW;
 END; $$;
 
--- `livekit_nodes.has_own_key` follows `livekit_node_secrets`.
+-- Every region but the default has a key of its own.
 --
--- The flag is what a client reads to say "this region has its own key"; the
--- key itself is in a table no client may touch. A trigger rather than two
--- writes inside `set_voice_region_credentials`, so that the flag is still
--- true of the table even when the row is written by something else — a
--- restore, a fix applied on the service role — rather than only when it is
--- written the expected way.
-CREATE OR REPLACE FUNCTION mark_node_own_key()
-  RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
+-- A rule about the data rather than about the API, because a region without
+-- one would have to fall back to the server's pair — which is the single
+-- thing per-region keys exist to prevent, and it would arrive silently.
+--
+-- Deferred, because the node row and its key are two inserts: they land in
+-- one transaction (`add_voice_region`) and this asks its question at commit,
+-- when both are there or neither is.
+CREATE OR REPLACE FUNCTION require_node_key()
+  RETURNS TRIGGER LANGUAGE plpgsql
   SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'DELETE' THEN
-    UPDATE livekit_nodes SET has_own_key = false WHERE id = OLD.node_id;
-    RETURN OLD;
+  IF NEW.is_default THEN RETURN NEW; END IF;
+  IF NOT EXISTS (SELECT 1 FROM livekit_node_secrets s WHERE s.node_id = NEW.id) THEN
+    RAISE EXCEPTION 'A region needs its own LiveKit API key and secret'
+      USING ERRCODE = 'check_violation';
   END IF;
-
-  UPDATE livekit_nodes SET has_own_key = true WHERE id = NEW.node_id;
   RETURN NEW;
+END; $$;
+
+-- And it cannot be taken away afterwards, which would leave the region
+-- running on the server's pair with nothing said.
+--
+-- The node being gone is how a *cascade* is told apart from somebody deleting
+-- the key on its own: the parent row is deleted first, so by the time this
+-- runs for a cascade there is nothing left to be missing a key.
+CREATE OR REPLACE FUNCTION refuse_node_key_delete()
+  RETURNS TRIGGER LANGUAGE plpgsql
+  SET search_path = public AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM livekit_nodes n WHERE n.id = OLD.node_id) THEN
+    RAISE EXCEPTION 'A region cannot give up its key; remove the region instead'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN OLD;
 END; $$;
 
 -- The default node's key is `server_secrets` by definition — see the table
@@ -984,10 +1001,16 @@ DROP TRIGGER IF EXISTS servers_mirror_default_node ON servers;
 CREATE TRIGGER servers_mirror_default_node AFTER INSERT OR UPDATE ON servers
   FOR EACH ROW EXECUTE FUNCTION mirror_default_livekit_node();
 
-DROP TRIGGER IF EXISTS livekit_node_secrets_mark ON livekit_node_secrets;
-CREATE TRIGGER livekit_node_secrets_mark
-  AFTER INSERT OR UPDATE OR DELETE ON livekit_node_secrets
-  FOR EACH ROW EXECUTE FUNCTION mark_node_own_key();
+DROP TRIGGER IF EXISTS livekit_nodes_require_key ON livekit_nodes;
+CREATE CONSTRAINT TRIGGER livekit_nodes_require_key
+  AFTER INSERT OR UPDATE ON livekit_nodes
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION require_node_key();
+
+DROP TRIGGER IF EXISTS livekit_node_secrets_keep ON livekit_node_secrets;
+CREATE TRIGGER livekit_node_secrets_keep
+  BEFORE DELETE ON livekit_node_secrets
+  FOR EACH ROW EXECUTE FUNCTION refuse_node_key_delete();
 
 DROP TRIGGER IF EXISTS livekit_node_secrets_not_default ON livekit_node_secrets;
 CREATE TRIGGER livekit_node_secrets_not_default

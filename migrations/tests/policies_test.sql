@@ -5509,13 +5509,37 @@ SET LOCAL ROLE authenticated;
 DO $$
 DECLARE v_id UUID;
 BEGIN
-  INSERT INTO livekit_nodes (server_id, label, url)
-  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Singapore', 'ws://sg:7880')
-  RETURNING id INTO v_id;
+  v_id := (add_voice_region('Singapore', 'ws://sg:7880', 'APIsg', 'secret-sg') ->> 'id')::UUID;
   IF v_id IS NULL THEN
     RAISE EXCEPTION 'FAIL: an admin could not add a node';
   END IF;
-  RAISE NOTICE 'ok  an admin adds a node';
+  RAISE NOTICE 'ok  an admin adds a node, with the key it signs with';
+END $$;
+
+-- And cannot add one without a key. Both halves are required by the function,
+-- and the node on its own is refused by the deferred trigger even if the
+-- function is gone round — which is the rule that matters, because a region
+-- with no key of its own would quietly use the server's.
+DO $$
+BEGIN
+  BEGIN
+    PERFORM add_voice_region('Nowhere', 'ws://nowhere:7880', '', '');
+    RAISE EXCEPTION 'FAIL: a region was added with no key';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO livekit_nodes (server_id, label, url)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Nowhere', 'ws://nowhere:7880');
+    RAISE EXCEPTION 'FAIL: a bare node insert was accepted';
+  EXCEPTION
+    -- A member reaches the grant first; the admin this runs as reaches the
+    -- trigger. Either answer is the table refusing a region with no key.
+    WHEN insufficient_privilege THEN NULL;
+    WHEN check_violation THEN NULL;
+  END;
+
+  RAISE NOTICE 'ok  a region cannot exist without a key of its own';
 END $$;
 
 -- Bob is an ordinary member: he reads the list and cannot touch it.
@@ -5531,8 +5555,7 @@ BEGIN
   END IF;
 
   BEGIN
-    INSERT INTO livekit_nodes (server_id, label, url)
-    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Bobsville', 'ws://bob:7880');
+    PERFORM add_voice_region('Bobsville', 'ws://bob:7880', 'APIbob', 'secret-bob');
     RAISE EXCEPTION 'FAIL: a member added a node';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
@@ -5562,9 +5585,9 @@ END $$;
 -- ── A region's own LiveKit key ──────────────────────────────
 -- One pair per server was the first design: every node carried the same key,
 -- so a box compromised in the cheapest region could mint tokens for the room
--- on any other, including the server's own. A region may now hold its own
--- pair, in a table no client may read, written only through an admin-checked
--- function.
+-- on any other, including the server's own. Every added region now holds its
+-- own pair, in a table no client may read, written only through the
+-- admin-checked functions that put it there.
 
 -- Alice is an admin.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -5573,45 +5596,27 @@ SET LOCAL ROLE authenticated;
 
 DO $$
 DECLARE
-  v_sg   UUID;
-  v_def  UUID;
-  v_flag BOOLEAN;
-  v_n    INTEGER;
+  v_sg UUID;
+  v_n  INTEGER;
 BEGIN
-  SELECT id INTO v_sg  FROM livekit_nodes WHERE label = 'Singapore';
-  SELECT id INTO v_def FROM livekit_nodes
-   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+  SELECT id INTO v_sg FROM livekit_nodes WHERE label = 'Singapore';
 
-  PERFORM set_voice_region_credentials(v_sg, 'APIsg', 'secret-sg');
+  -- Rotating it is a replacement, one box at a time, and the writer never
+  -- gets to see what is stored.
+  PERFORM set_voice_region_credentials(v_sg, 'APIsg2', 'secret-sg2');
 
-  SELECT has_own_key INTO v_flag FROM livekit_nodes WHERE id = v_sg;
-  IF NOT v_flag THEN
-    RAISE EXCEPTION 'FAIL: the node was not marked as having its own key';
-  END IF;
-
-  -- The key itself is not readable from here, only the fact that there is one.
   BEGIN
     SELECT count(*) INTO v_n FROM livekit_node_secrets;
     RAISE EXCEPTION 'FAIL: an admin read the region key table';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
-  -- Neither is the flag writable by hand: it is a statement about a table the
-  -- writer cannot see, and an admin who could set it would make every client
-  -- believe a region signs with a key it does not have.
-  BEGIN
-    UPDATE livekit_nodes SET has_own_key = true WHERE id = v_def;
-    RAISE EXCEPTION 'FAIL: an admin set has_own_key by hand';
-  EXCEPTION WHEN insufficient_privilege THEN NULL;
-  END;
-
-  RAISE NOTICE 'ok  an admin gives a region its own key without ever seeing one';
+  RAISE NOTICE 'ok  an admin rotates a region key without ever seeing one';
 END $$;
 
 -- The default region is refused one: it *is* the server's LiveKit, so its key
 -- is `server_secrets` and two places to write one value is a way for them to
--- disagree. Half a pair is refused too — a node with a key and no secret
--- would mint tokens nothing accepts.
+-- disagree. Half a pair is refused too, and so is a stranger's node.
 DO $$
 DECLARE
   v_sg  UUID;
@@ -5633,7 +5638,6 @@ BEGIN
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 
-  -- And a node that is not this server's is not found at all.
   BEGIN
     PERFORM set_voice_region_credentials('99999999-0000-4000-8000-000000000009',
                                          'APIx', 'secret-x');
@@ -5661,38 +5665,25 @@ BEGIN
   RAISE NOTICE 'ok  a member cannot give a region a key';
 END $$;
 
--- Clearing it puts the region back on the server's pair, which is the undo
--- and the same state as a region that never had one. Then the row goes with
--- the node, so a removed region leaves no key behind.
+-- The key cannot be taken away while the region is there — that would leave
+-- it running on the server's pair with nothing said — and it goes with the
+-- region when the region goes.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
 
 DO $$
 DECLARE
-  v_sg   UUID;
-  v_flag BOOLEAN;
-  v_n    INTEGER;
+  v_sg UUID;
+  v_n  INTEGER;
 BEGIN
   SELECT id INTO v_sg FROM livekit_nodes WHERE label = 'Singapore';
-  PERFORM set_voice_region_credentials(v_sg, NULL, NULL);
-
-  SELECT has_own_key INTO v_flag FROM livekit_nodes WHERE id = v_sg;
-  IF v_flag THEN
-    RAISE EXCEPTION 'FAIL: clearing the key left the region marked as having one';
-  END IF;
 
   RESET ROLE;
-  SELECT count(*) INTO v_n FROM livekit_node_secrets WHERE node_id = v_sg;
-  IF v_n <> 0 THEN
-    RAISE EXCEPTION 'FAIL: clearing the key left the row behind';
-  END IF;
-
-  -- And the cascade: a key belongs to a node, so removing the node removes it.
-  PERFORM set_config('request.jwt.claims',
-    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
-  SET LOCAL ROLE authenticated;
-  PERFORM set_voice_region_credentials(v_sg, 'APIsg', 'secret-sg');
-  RESET ROLE;
+  BEGIN
+    DELETE FROM livekit_node_secrets WHERE node_id = v_sg;
+    RAISE EXCEPTION 'FAIL: a region gave up its key and kept running';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
 
   DELETE FROM livekit_nodes WHERE id = v_sg;
   SELECT count(*) INTO v_n FROM livekit_node_secrets WHERE node_id = v_sg;
@@ -5700,11 +5691,14 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a removed region left its key behind';
   END IF;
 
-  -- Put it back for the tests below, without a key of its own.
-  INSERT INTO livekit_nodes (server_id, label, url)
-  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Singapore', 'ws://sg:7880');
+  -- Put it back for the tests below, the only way there is.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  SET LOCAL ROLE authenticated;
+  PERFORM add_voice_region('Singapore', 'ws://sg:7880', 'APIsg', 'secret-sg');
+  RESET ROLE;
 
-  RAISE NOTICE 'ok  a region''s key can be taken back, and goes with the region';
+  RAISE NOTICE 'ok  a region''s key cannot be dropped, and goes with the region';
 END $$;
 
 -- The claim. Automatic, with nothing pinned, takes the caller's suggestion.
