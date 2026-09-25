@@ -5260,6 +5260,20 @@ BEGIN
   RAISE NOTICE 'ok  an admin adds a clip, and the server and author are stamped';
 END $$;
 
+-- The clip has to live in this server's own folder. A row naming Beta's object
+-- could never be played from Alpha, but it would count as a reference and keep
+-- a clip Beta had deleted on disk past every sweep.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO soundboard_sounds (name, object_path, duration_ms, bytes)
+    VALUES ('borrowed', 'bbbb0000-0000-4000-8000-000000000001/theirs.audio', 500, 400);
+    RAISE EXCEPTION 'FAIL: a clip was hung on another server''s object';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a clip names its own server''s object and no other';
+END $$;
+
 -- Bob holds no role at all, so he is the baseline and nothing more.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;

@@ -265,8 +265,17 @@ CREATE POLICY soundboard_select ON soundboard_sounds FOR SELECT TO authenticated
 -- The stamp runs first — a BEFORE trigger fires before the check — so this
 -- reads the value the row will actually have, not the one the client sent.
 DROP POLICY IF EXISTS soundboard_insert ON soundboard_sounds;
+-- And the clip has to be one of this server's own: `object_path` comes from
+-- the client, and the storage policy in 006 only ever checked the *upload*'s
+-- folder. A row naming another server's object could not be played — the
+-- read is refused there too — but it counted as a reference, so a clip that
+-- server had deleted was kept on disk past every sweep.
 CREATE POLICY soundboard_insert ON soundboard_sounds FOR INSERT TO authenticated
-  WITH CHECK (server_id = app.server_id() AND app.has_perm('MANAGE_SOUNDBOARD'));
+  WITH CHECK (
+    server_id = app.server_id()
+    AND app.has_perm('MANAGE_SOUNDBOARD')
+    AND split_part(object_path, '/', 1) = app.server_id()::text
+  );
 
 DROP POLICY IF EXISTS soundboard_update ON soundboard_sounds;
 CREATE POLICY soundboard_update ON soundboard_sounds FOR UPDATE TO authenticated
