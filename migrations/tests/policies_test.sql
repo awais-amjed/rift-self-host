@@ -94,6 +94,16 @@ SELECT app.sync_permission_cache(id) FROM users
  WHERE server_id IN ('aaaa0000-0000-4000-8000-000000000001',
                      'bbbb0000-0000-4000-8000-000000000001');
 
+-- A member cannot choose a channel's id (008) — it is the LiveKit room name —
+-- but the sections below create channels *as* members and then name them by
+-- hand. So for the length of this transaction the column's default reads
+-- `rift_test.channel_id` when a test has set it, and a test that needs a known
+-- id sets it, inserts without one, and clears it. The member still sends no
+-- id; the ROLLBACK at the end puts the real default back.
+ALTER TABLE channels ALTER COLUMN id SET DEFAULT
+  COALESCE(NULLIF(current_setting('rift_test.channel_id', true), '')::UUID,
+           gen_random_uuid());
+
 -- Put the sequences out of the fixtures' way, permanently.
 --
 -- The fixtures below name message ids by hand, in the 9000s, so later tests
@@ -233,10 +243,10 @@ DO $$ BEGIN PERFORM set_config('request.jwt.claims',
 DO $$
 DECLARE v_id BIGINT; v_sender UUID; v_at TIMESTAMPTZ;
 BEGIN
-  -- Bob claims to be Alice, and backdates. The trigger overrules both.
-  INSERT INTO messages (channel_id, sender_id, created_at, ciphertext, nonce, signature, key_version)
+  -- Bob claims to be Alice. The trigger overrules him.
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
   VALUES ('aaaa1111-0000-4000-8000-000000000001',
-          '11111111-aaaa-4aaa-8aaa-000000000001', '2020-01-01T00:00:00Z',
+          '11111111-aaaa-4aaa-8aaa-000000000001',
           'forged', 'n', 's', 1)
   RETURNING id, sender_id, created_at INTO v_id, v_sender, v_at;
 
@@ -247,6 +257,33 @@ BEGIN
     RAISE EXCEPTION 'FAIL: created_at was accepted from the client';
   END IF;
   RAISE NOTICE 'ok  the server attests sender and timestamp';
+END $$;
+
+-- And the columns the server owns are not the client's to send at all: the
+-- time, and the id — which is the order of the conversation, so a sender who
+-- picked one could sit at the top of the channel forever, or squat the ids
+-- just ahead of the sequence and make everybody else's sends collide.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, created_at, ciphertext, nonce, signature, key_version)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', '2020-01-01T00:00:00Z', 'x', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a message was backdated by its sender';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version)
+    VALUES (9000000000000000000, 'aaaa1111-0000-4000-8000-000000000001', 'x', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a sender chose their message''s id';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES (9000000000000000000, '11111111-aaaa-4aaa-8aaa-000000000001', 'x', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a sender chose their DM''s id';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  no sender chooses a message''s id or time';
 END $$;
 
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -1982,9 +2019,8 @@ DO $$ BEGIN PERFORM set_config('request.jwt.claims',
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO channels (id, server_id, name, channel_type, is_private)
-    VALUES ('aaaa1111-0000-4000-8000-00000000fff0',
-            'aaaa0000-0000-4000-8000-000000000001', 'too-soon', 'text', true);
+    INSERT INTO channels (server_id, name, channel_type, is_private)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'too-soon', 'text', true);
     RAISE EXCEPTION 'FAIL: a plain member made a private channel';
   EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
     IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
@@ -2007,9 +2043,10 @@ DO $$ BEGIN PERFORM set_config('request.jwt.claims',
 
 DO $$
 BEGIN
-  INSERT INTO channels (id, server_id, name, channel_type, is_private)
-  VALUES ('aaaa1111-0000-4000-8000-00000000ffff',
-          'aaaa0000-0000-4000-8000-000000000001', 'secret', 'text', true);
+  PERFORM set_config('rift_test.channel_id', 'aaaa1111-0000-4000-8000-00000000ffff', true);
+  INSERT INTO channels (server_id, name, channel_type, is_private)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'secret', 'text', true);
+  PERFORM set_config('rift_test.channel_id', '', true);
 
   -- Born with somebody able to run it. Without this it is orphaned from the
   -- first statement, and section 8's tidy-up would delete it on the first
@@ -2964,9 +3001,10 @@ DO $$ BEGIN PERFORM set_config('request.jwt.claims',
 DO $$
 DECLARE v_role UUID;
 BEGIN
-  INSERT INTO channels (id, server_id, name, channel_type, is_private)
-  VALUES ('aaaa1111-0000-4000-8000-0000000000a0',
-          'aaaa0000-0000-4000-8000-000000000001', 'audience', 'text', true);
+  PERFORM set_config('rift_test.channel_id', 'aaaa1111-0000-4000-8000-0000000000a0', true);
+  INSERT INTO channels (server_id, name, channel_type, is_private)
+  VALUES ('aaaa0000-0000-4000-8000-000000000001', 'audience', 'text', true);
+  PERFORM set_config('rift_test.channel_id', '', true);
   PERFORM set_channel_members('aaaa1111-0000-4000-8000-0000000000a0',
     ARRAY['11111111-aaaa-4aaa-8aaa-000000000002',
           '11111111-aaaa-4aaa-8aaa-000000000003',
@@ -3484,18 +3522,18 @@ END $$;
 DO $$
 BEGIN
   BEGIN
-    INSERT INTO invites (server_id, created_by, code, is_bot)
+    INSERT INTO invites (server_id, created_by, is_bot)
     VALUES ('aaaa0000-0000-4000-8000-000000000001',
-            '11111111-aaaa-4aaa-8aaa-0000000000a1', 'bot-invite-1', true);
+            '11111111-aaaa-4aaa-8aaa-0000000000a1', true);
     RAISE EXCEPTION 'FAIL: a plain inviter made a bot invite';
   EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
     IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
   END;
 
   -- The same person, the same permission, inviting a person: unchanged.
-  INSERT INTO invites (server_id, created_by, code, is_bot)
+  INSERT INTO invites (server_id, created_by, is_bot)
   VALUES ('aaaa0000-0000-4000-8000-000000000001',
-          '11111111-aaaa-4aaa-8aaa-0000000000a1', 'person-invite-1', false);
+          '11111111-aaaa-4aaa-8aaa-0000000000a1', false);
   RAISE NOTICE 'ok  inviting a person is untouched, inviting a bot is not';
 END $$;
 
@@ -3510,10 +3548,33 @@ BEGIN
   IF NOT app.has_perm('ADD_BOTS') THEN
     RAISE EXCEPTION 'FAIL: an administrator cannot add a bot';
   END IF;
-  INSERT INTO invites (server_id, created_by, code, is_bot)
+  INSERT INTO invites (server_id, created_by, is_bot)
   VALUES ('aaaa0000-0000-4000-8000-000000000001',
-          '11111111-aaaa-4aaa-8aaa-000000000001', 'bot-invite-2', true);
+          '11111111-aaaa-4aaa-8aaa-000000000001', true);
   RAISE NOTICE 'ok  an administrator needs no backfill to hold a new bit';
+END $$;
+
+-- The code is the secret that lets somebody in, and `uses` is the count that
+-- makes a one-use link one use. The server draws the first and keeps the
+-- second; a creator who could write them could mint "aaaa", or a one-use link
+-- that starts at -1000.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO invites (server_id, created_by, code)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001',
+            '11111111-aaaa-4aaa-8aaa-000000000001', 'aaaa');
+    RAISE EXCEPTION 'FAIL: an invite''s creator chose its code';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO invites (server_id, created_by, max_uses, uses)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001',
+            '11111111-aaaa-4aaa-8aaa-000000000001', 1, -1000);
+    RAISE EXCEPTION 'FAIL: an invite''s creator set how often it had been used';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  an invite''s code and use count are the server''s';
 END $$;
 
 -- ============================================================
@@ -5904,6 +5965,30 @@ BEGIN
   END;
   RAISE NOTICE 'ok  a channel cannot be pinned to another server''s region';
 END $$;
+
+-- A channel's id is its LiveKit room name, and a LiveKit shared by two stacks
+-- is one namespace: a manager who could copy another stack's channel id into a
+-- channel of their own would be handed a token for that stack's call. So the
+-- id is the server's to draw, like a message's and an invite's code.
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO channels (id, server_id, name, channel_type)
+    VALUES ('bbbb1111-0000-4000-8000-00000000c0de',
+            'aaaa0000-0000-4000-8000-000000000001', 'copied-id', 'voice');
+    RAISE EXCEPTION 'FAIL: a manager chose a channel''s id';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO roles (server_id, name, position, is_owner)
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'second-owner', 1, true);
+    RAISE EXCEPTION 'FAIL: an admin made a role and called it the owner''s';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a channel''s id and a role''s ownership are the server''s';
+END $$;
+RESET ROLE;
 
 -- `channel_manageable_by` is what `move_call` and `delete_channel` ask before
 -- touching a room, and it must give `can_manage_channel`'s answer: a public

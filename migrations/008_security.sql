@@ -42,7 +42,18 @@ GRANT SELECT                       ON users    TO authenticated;
 -- permissions are not yours to write, they go through the RPCs in 003.
 GRANT UPDATE (display_name, chat_public_key, avatar_path) ON users TO authenticated;
 
-GRANT SELECT, INSERT, DELETE       ON channels TO authenticated;
+GRANT SELECT, DELETE ON channels TO authenticated;
+
+-- **Never the id.** A channel's id is its LiveKit room name, and a room name
+-- is all a token names: LiveKit keys are not scoped to rooms, so two stacks
+-- sharing one LiveKit share one namespace. With `id` writable, a manager on
+-- one stack could create a channel carrying another stack's channel id and be
+-- handed a working token — room admin included — for that stack's call. The
+-- primary key only stops the copy within one database. Nor `created_at`, or
+-- `rotate_from_key_version`, which the sweep owns.
+GRANT INSERT (server_id, name, channel_type, is_private, retention_days,
+              history_cap, livekit_node_id)
+  ON channels TO authenticated;
 
 -- Everybody reads the node list: a member is told which region their call is
 -- in, and offers the nearest one when they are the first to open it. Only an
@@ -62,13 +73,25 @@ GRANT UPDATE (label, url) ON livekit_nodes TO authenticated;
 -- choosing.
 GRANT SELECT ON voice_rooms TO authenticated;
 
-GRANT SELECT, INSERT, DELETE       ON invites  TO authenticated;
+-- INSERT is by column, further down: never `uses`, `code` or `id`.
+GRANT SELECT, DELETE               ON invites  TO authenticated;
 
-GRANT SELECT, INSERT, DELETE       ON messages TO authenticated;
+-- INSERT is by column, in section 3 — and never `id`. See dm_messages.
+GRANT SELECT, DELETE               ON messages TO authenticated;
 
 GRANT UPDATE (ciphertext, nonce, signature, key_version) ON messages TO authenticated;
 
-GRANT SELECT, INSERT, DELETE       ON dm_messages TO authenticated;
+GRANT SELECT, DELETE               ON dm_messages TO authenticated;
+
+-- **Never the id.** Message ids are the order of a conversation — pages,
+-- unread counts and read markers are all "ids above this one" — and a
+-- sender who picks theirs breaks it for everybody else: one row at the top of
+-- the bigint range stays newest forever and marks every later message read
+-- for whoever reads it, and a few rows just ahead of the sequence make the
+-- next ordinary sends fail on the primary key. `sender_id` is listed because
+-- clients send it; `attest_message` overwrites it, and `created_at`, anyway.
+GRANT INSERT (recipient_id, sender_id, ciphertext, nonce, signature, key_version)
+  ON dm_messages TO authenticated;
 
 GRANT UPDATE (ciphertext, nonce, signature, key_version) ON dm_messages TO authenticated;
 
@@ -318,7 +341,15 @@ REVOKE ALL ON member_roles FROM anon, authenticated;
 -- Who holds what is not a secret from the people it is exercised on.
 GRANT SELECT                ON roles        TO authenticated;
 
-GRANT INSERT, DELETE        ON roles        TO authenticated;
+GRANT DELETE                ON roles        TO authenticated;
+
+-- Configured, not constituted: never `is_owner` or `is_everyone`, which say
+-- what a role *is*, and never `id` or `created_at`. `roles_insert` already
+-- refuses a new everyone-role, and a new owner-role only falls to it because
+-- `protect_owner_role` lifts it to position 400 first — a refusal by
+-- side effect. The grant says it outright.
+GRANT INSERT (server_id, name, color, position, permissions)
+  ON roles TO authenticated;
 
 -- `server_id`, `is_everyone` and `legacy_key` are absent on purpose: they are
 -- what a role *is*, not how it is configured, and a member with `MANAGE_ROLES`
@@ -508,7 +539,11 @@ REVOKE ALL ON FUNCTION leave_channel(UUID) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION leave_channel(UUID) TO authenticated;
 
-GRANT INSERT (server_id, created_by, code, max_uses, expires_at, is_bot, role_id)
+-- Not `uses`, which a creator set to -1000 to make a one-use link good for a
+-- thousand and one joins, and not `code`: the code is the secret that lets
+-- somebody in, so the server draws it (`new_invite_code`) rather than taking
+-- "aaaa" from whoever minted the link.
+GRANT INSERT (server_id, created_by, max_uses, expires_at, is_bot, role_id)
   ON invites TO authenticated;
 
 DROP POLICY IF EXISTS member_roles_delete ON member_roles;
