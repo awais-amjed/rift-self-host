@@ -368,10 +368,18 @@ export async function livekitRoomServiceForChannel(
   const credentials = await livekitCredentials(supabase, serverId);
   if (!credentials) return null;
 
+  // Only a channel on [serverId], and only a node that is that server's too.
+  // The service role reads `voice_rooms` for every server in the project, so
+  // without both filters a caller naming another server's channel was handed
+  // that server's node *and its key* — the credentials above are only the
+  // fallback. `!inner` makes the embedded filters remove the row rather than
+  // blank the embed.
   const { data } = await supabase
     .from("voice_rooms")
-    .select("node_id, livekit_nodes(url, is_default)")
+    .select("node_id, livekit_nodes!inner(url, is_default, server_id), channels!inner(server_id)")
     .eq("channel_id", channelId)
+    .eq("channels.server_id", serverId)
+    .eq("livekit_nodes.server_id", serverId)
     .maybeSingle();
 
   const row = data as Record<string, any> | null;
