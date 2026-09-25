@@ -29,6 +29,45 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+/**
+ * How busy one region is, from the room list it already answered with.
+ *
+ * `streams` is the number that matters and the reason people is not enough:
+ * an SFU copies rather than mixes, so the work is publishers × subscribers.
+ * Twenty people listening to nobody is almost free; six people with one
+ * screen share between them is not. Counting heads would show the first as
+ * busy and the second as idle, which is backwards.
+ */
+function summarise(
+  node: { id: string; label: string },
+  rooms: { numParticipants: number; numPublishers: number }[],
+) {
+  let people = 0;
+  let publishers = 0;
+  let streams = 0;
+  let calls = 0;
+
+  for (const room of rooms) {
+    const inRoom = room.numParticipants ?? 0;
+    const sending = room.numPublishers ?? 0;
+    if (inRoom > 0) calls++;
+    people += inRoom;
+    publishers += sending;
+    // Each publisher's media goes to everybody else in the room.
+    streams += sending * Math.max(inRoom - 1, 0);
+  }
+
+  return {
+    id: node.id,
+    label: node.label,
+    calls,
+    people,
+    publishers,
+    streams,
+    reachable: true,
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -68,14 +107,29 @@ Deno.serve(async (req) => {
       return CustomResponse.success({ roster: {} });
     }
 
-    // Rooms are named by channel id, and only rooms that exist come back — so
-    // an idle server costs one call per node, not one per channel.
+    // One unfiltered `listRooms` per node, which is both halves of this
+    // answer: the roster below, and how busy each region is.
+    //
+    // Unfiltered because the load figure is about the *region*, and a region
+    // is as busy as everything on it — including channels this caller cannot
+    // see. What goes back is only totals, never a name, so a private channel
+    // remains as invisible as it was; that somewhere is busy is already
+    // obvious to anyone in a call there.
+    //
+    // `listRooms` carries `numParticipants` and `numPublishers` per room, so
+    // the load costs no request of its own — and skipping `listParticipants`
+    // for rooms that are empty or not visible makes this *cheaper* than it
+    // was, not dearer.
     const perNode = await Promise.all(
       services.map(async ({ node, service }) => {
         try {
-          const rooms = await service.listRooms(channelIds);
+          const rooms = await service.listRooms();
+
+          const visible = rooms.filter(
+            (room) => channelIds.includes(room.name) && room.numParticipants > 0,
+          );
           const rosters = await Promise.all(
-            rooms.map(async (room) => {
+            visible.map(async (room) => {
               try {
                 return {
                   room: room.name,
@@ -86,12 +140,19 @@ Deno.serve(async (req) => {
               }
             }),
           );
-          return { node, rosters };
+
+          return { node, rosters, load: summarise(node, rooms) };
         } catch {
           // A node that is down answers with nothing rather than blanking the
           // whole roster. Its calls go missing from the sidebar until it is
-          // back, which is what is true.
-          return { node, rosters: [] as { room: string; participants: unknown[] }[] };
+          // back, which is what is true — and it reports itself unreachable
+          // rather than idle, which is a different thing and the one a
+          // manager needs to see.
+          return {
+            node,
+            rosters: [] as { room: string; participants: unknown[] }[],
+            load: { ...summarise(node, []), reachable: false },
+          };
         }
       }),
     );
@@ -125,7 +186,10 @@ Deno.serve(async (req) => {
       await releaseVoiceNodes(supabase, ended).catch(() => {});
     }
 
-    return CustomResponse.success({ roster });
+    return CustomResponse.success({
+      roster,
+      regions: perNode.map(({ load }) => load),
+    });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }
