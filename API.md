@@ -461,6 +461,33 @@ answer as an empty room.
 the destination resolves on that client's next token request. A move between two regions is the
 reconnect it was always doing.
 
+### When a region is offline
+
+Nothing pretends otherwise, and the rule throughout is that a region which
+does not answer must not be *recorded* as holding anything.
+
+- **The probe never offers it.** A node that fails to answer `GET /` within
+  three seconds cannot win the measurement, so automatic does not pick it.
+- **`get_channel_token` releases the claim it just took.** The claim has to
+  come before the room is opened — it is what stops two simultaneous joiners
+  opening one call in two places — so a region that is down would otherwise
+  leave a claim naming it, and a claim outranks both the pin and the probe.
+  Released, an automatic channel is free to land on a region that is up; a
+  pinned one claims it again and fails again, which is correct, because the
+  operator said where those calls go.
+- **`move_call` opens the room before it writes anything.** Opening it is how
+  the region is asked whether it is there. A failed move changes nothing.
+- **`voice_roster` answers without it.** A node that is down contributes an
+  empty list rather than blanking the roster, so calls on the other regions
+  still appear.
+- **Moderation skips it.** `kick_user`, `moderate_user`, `move_user` and
+  `delete_server` each ask every node and ignore the ones that fail, so a
+  region being down does not stop a member being removed from the others.
+
+A call already running on a region that goes down is between those clients
+and LiveKit; nothing here can reconnect them, and the next join decides
+afresh.
+
 **Every node shares the server's one LiveKit key pair** (`server_secrets`). A key is a line in
 each box's own `livekit.yaml`, written by the operator who is adding the node, so matching them
 is a setup step rather than a constraint that costs anything — and it keeps one secret per
