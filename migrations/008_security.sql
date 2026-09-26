@@ -631,7 +631,10 @@ CREATE POLICY messages_insert ON messages FOR INSERT TO authenticated
     AND (NOT is_interaction OR NOT app.is_bot())
     -- A poll is a member asking the channel. A bot has panels for asking, and
     -- a poll addressed to one bot is a question only it could see answered.
-    AND (poll IS NULL OR (NOT app.is_bot() AND to_bot IS NULL))
+    -- Its own bit, on `@everyone` by default, so a server can keep polls to
+    -- the roles it picks without taking anybody's voice away.
+    AND (poll IS NULL OR (NOT app.is_bot() AND to_bot IS NULL
+                          AND app.has_perm('CREATE_POLLS')))
   );
 
 REVOKE ALL ON bot_server_grants FROM anon, authenticated;

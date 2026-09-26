@@ -6105,6 +6105,49 @@ BEGIN
   RAISE NOTICE 'ok  pinning is a Moderator''s by default, and nobody else''s';
 END $$;
 
+DO $$
+BEGIN
+  IF (SELECT permissions & app.perm('CREATE_POLLS') FROM roles
+       WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+         AND is_everyone) = 0 THEN
+    RAISE EXCEPTION 'FAIL: a new server keeps polls from its members';
+  END IF;
+  IF (app.perm_all() & app.perm('CREATE_POLLS')) = 0 THEN
+    RAISE EXCEPTION 'FAIL: CREATE_POLLS is outside perm_all';
+  END IF;
+  RAISE NOTICE 'ok  everybody may post a poll by default';
+END $$;
+
+-- Taken off @everyone, the bit is what stops the poll; the same member's
+-- plain message still goes through.
+UPDATE roles SET permissions = permissions & ~app.perm('CREATE_POLLS')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                          key_version, poll)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1,
+            jsonb_build_object('options', 2, 'multiple', false,
+                               'closes_at', (now() + interval '1 day')::TEXT));
+    RAISE EXCEPTION 'FAIL: a member without CREATE_POLLS posted a poll';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                        key_version)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000f9', '11111111-aaaa-4aaa-8aaa-000000000002', 'c', 'n', 's', 1);
+  RAISE NOTICE 'ok  a poll takes CREATE_POLLS, and a message does not';
+END $$;
+
+RESET ROLE;
+UPDATE roles SET permissions = permissions | app.perm('CREATE_POLLS')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone;
+
 SET LOCAL ROLE authenticated;
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;

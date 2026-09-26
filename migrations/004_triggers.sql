@@ -647,7 +647,7 @@ BEGIN
      | app.perm('CONNECT')       | app.perm('SPEAK')
      | app.perm('SCREEN_SHARE')
      | app.perm('SUMMON_BOTS')   | app.perm('CREATE_INVITE')
-     | app.perm('USE_SOUNDBOARD'), true, false),
+     | app.perm('USE_SOUNDBOARD') | app.perm('CREATE_POLLS'), true, false),
     (NEW.id, 'Moderator', 200,
        app.perm('MANAGE_CHANNELS') | app.perm('MANAGE_MESSAGES')
      | app.perm('MANAGE_WEBHOOKS') | app.perm('KICK_MEMBERS')

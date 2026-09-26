@@ -544,12 +544,13 @@ CREATE OR REPLACE FUNCTION app.perm_bit(p_name TEXT) RETURNS BIGINT
     WHEN 'MANAGE_SOUNDBOARD'      THEN 1::BIGINT << 24  -- add and remove clips
     WHEN 'USE_SOUNDBOARD'         THEN 1::BIGINT << 25  -- fire one in a call
     WHEN 'PIN_MESSAGES'           THEN 1::BIGINT << 26  -- pin and unpin
+    WHEN 'CREATE_POLLS'           THEN 1::BIGINT << 27  -- post a poll
     ELSE NULL
   END
 $$;
 
 CREATE OR REPLACE FUNCTION app.perm_all() RETURNS BIGINT
-  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 27) - 1 $$;
+  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 28) - 1 $$;
 
 CREATE OR REPLACE FUNCTION app.bot_summoned_to(p_channel UUID, p_bot UUID)
   RETURNS BOOLEAN
