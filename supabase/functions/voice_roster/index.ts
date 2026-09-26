@@ -139,13 +139,19 @@ Deno.serve(async (req) => {
           );
           const rosters = await Promise.all(
             visible.map(async (room) => {
+              // When LiveKit created the room: the call's start, for the
+              // sidebar's timer. Milliseconds where the server has them,
+              // seconds on older ones.
+              const startedAt = Number(room.creationTimeMs) ||
+                Number(room.creationTime) * 1000;
               try {
                 return {
                   room: room.name,
+                  startedAt,
                   participants: await service.listParticipants(room.name),
                 };
               } catch {
-                return { room: room.name, participants: [] };
+                return { room: room.name, startedAt, participants: [] };
               }
             }),
           );
@@ -159,7 +165,11 @@ Deno.serve(async (req) => {
           // manager needs to see.
           return {
             node,
-            rosters: [] as { room: string; participants: unknown[] }[],
+            rosters: [] as {
+              room: string;
+              startedAt: number;
+              participants: unknown[];
+            }[],
             load: { id: node.id, label: node.label, load: null, reachable: false },
           };
         }
@@ -167,10 +177,16 @@ Deno.serve(async (req) => {
     );
 
     const roster: Record<string, string> = {};
+    // Visible, occupied calls only, like the roster: a private channel's
+    // start time would say when a call nobody here can join began.
+    const started: Record<string, number> = {};
     const busy = new Set<string>();
     for (const { rosters } of perNode) {
-      for (const { room, participants } of rosters) {
-        if (participants.length > 0) busy.add(room);
+      for (const { room, startedAt, participants } of rosters) {
+        if (participants.length > 0) {
+          busy.add(room);
+          if (startedAt > 0) started[room] = startedAt;
+        }
         for (const participant of participants as { identity: string }[]) {
           const userId = voiceUserId(participant.identity);
           // Someone joined from two devices in different channels lands here
@@ -197,6 +213,7 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success({
       roster,
+      started,
       regions: perNode.map(({ load }) => load),
     });
   } catch (err) {
