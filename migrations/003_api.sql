@@ -1224,11 +1224,14 @@ BEGIN
     RETURN;
   END IF;
 
-  -- A DM: either of the two, and nobody else.
+  -- A DM: either of the two, and nobody else — and not a banned member, who
+  -- can no longer send one either. A pin rings the other side, so without
+  -- this a ban would leave a way to keep poking the people they wrote to.
   SELECT LEAST(d.sender_id, d.recipient_id), GREATEST(d.sender_id, d.recipient_id)
     INTO v_low, v_high
     FROM dm_messages d
-   WHERE d.id = p_message AND auth.uid() IN (d.sender_id, d.recipient_id);
+   WHERE d.id = p_message AND auth.uid() IN (d.sender_id, d.recipient_id)
+     AND app.server_id() IS NOT NULL;
   IF v_low IS NULL THEN
     RAISE EXCEPTION 'message_not_found';
   END IF;

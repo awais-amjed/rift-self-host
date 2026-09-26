@@ -178,8 +178,11 @@ CREATE POLICY dm_reactions_select ON dm_message_reactions FOR SELECT TO authenti
   USING (app.can_see_dm(message_id));
 
 DROP POLICY IF EXISTS dm_reactions_insert ON dm_message_reactions;
+-- Not while banned: a banned member cannot send a DM, and a reaction rings the
+-- other side just as a message does.
 CREATE POLICY dm_reactions_insert ON dm_message_reactions FOR INSERT TO authenticated
-  WITH CHECK (user_id = auth.uid() AND app.can_see_dm(message_id));
+  WITH CHECK (user_id = auth.uid() AND app.can_see_dm(message_id)
+              AND app.server_id() IS NOT NULL);
 
 DROP POLICY IF EXISTS dm_reactions_delete_own ON dm_message_reactions;
 CREATE POLICY dm_reactions_delete_own ON dm_message_reactions FOR DELETE TO authenticated

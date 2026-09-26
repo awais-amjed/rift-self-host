@@ -6285,6 +6285,35 @@ BEGIN
   RAISE NOTICE 'ok  and nobody else sees or touches a DM''s pins';
 END $$;
 
+-- Banned, a member can no longer send a DM, and so can no longer pin one or
+-- react to one either: both ring the other side.
+RESET ROLE;
+UPDATE users SET is_banned = true WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM set_pinned('dm', 8601, false);
+    RAISE EXCEPTION 'FAIL: a banned member changed a DM''s pins';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'message_not_found' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO dm_message_reactions (message_id, user_id, emoji)
+    VALUES (8601, '11111111-aaaa-4aaa-8aaa-000000000002', '👍');
+    RAISE EXCEPTION 'FAIL: a banned member reacted to a DM';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a banned member neither pins nor reacts in a DM';
+END $$;
+
+RESET ROLE;
+UPDATE users SET is_banned = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+SET LOCAL ROLE authenticated;
+
 -- ── Polls ───────────────────────────────────────────────────
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
