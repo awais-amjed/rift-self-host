@@ -26,7 +26,7 @@ remote). The setup page asks for your domain, generates every secret, starts
 the rest of the stack, and gives you an invite link to paste into the Rift app.
 
 The full walkthrough, including running behind your own reverse proxy, is the
-[installation guide](https://joinrift.app/docs/install/).
+[installation guide](https://docs.joinrift.app/install/).
 
 ## Requirements
 
@@ -34,7 +34,7 @@ The full walkthrough, including running behind your own reverse proxy, is the
 - A domain name, and HTTPS — phones refuse plain `http://`
 - Ports 80 and 443 (unless you bring your own proxy), plus UDP 7882 and TCP 7881
   for voice
-- About 4 GB of RAM and 2 CPUs — see [sizing](https://joinrift.app/docs/sizing/)
+- About 4 GB of RAM and 2 CPUs — see [sizing](https://docs.joinrift.app/sizing/)
 
 **Choose the domain carefully: a server's address is permanent.** Every
 member's identity is derived from it, so moving to a new address makes everyone
@@ -50,19 +50,19 @@ docker compose up -d
 
 Fetch the compose file first: it pins every upstream image. The console applies
 new migrations and endpoints by itself on start — see
-[updating](https://joinrift.app/docs/updating/).
+[updating](https://docs.joinrift.app/updating/).
 
 ## Documentation
 
 **Running a server** — on the website:
-[install](https://joinrift.app/docs/install/) ·
-[the console](https://joinrift.app/docs/console/) ·
-[updating](https://joinrift.app/docs/updating/) ·
-[backups](https://joinrift.app/docs/backups/) ·
-[call regions](https://joinrift.app/docs/regions/) ·
-[strict networks](https://joinrift.app/docs/turn/) ·
-[sizing](https://joinrift.app/docs/sizing/) ·
-[troubleshooting](https://joinrift.app/docs/troubleshooting/)
+[install](https://docs.joinrift.app/install/) ·
+[the console](https://docs.joinrift.app/console/) ·
+[updating](https://docs.joinrift.app/updating/) ·
+[backups](https://docs.joinrift.app/backups/) ·
+[call regions](https://docs.joinrift.app/regions/) ·
+[strict networks](https://docs.joinrift.app/turn/) ·
+[sizing](https://docs.joinrift.app/sizing/) ·
+[troubleshooting](https://docs.joinrift.app/troubleshooting/)
 
 **Working on it** — in this repository:
 

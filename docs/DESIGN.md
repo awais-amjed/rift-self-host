@@ -1,7 +1,7 @@
 # Design of the self-hosted stack
 
 Why a Rift server is shaped the way it is. For running one, see the
-[self-hosting guide](https://joinrift.app/docs/); for what a client may call,
+[self-hosting guide](https://docs.joinrift.app/); for what a client may call,
 [`API.md`](../API.md).
 
 ## What this is
