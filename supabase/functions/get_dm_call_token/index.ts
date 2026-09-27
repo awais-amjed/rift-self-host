@@ -73,6 +73,11 @@ Deno.serve(async (req) => {
     if (typeof call_id !== "string" || call_id.length === 0) {
       return CustomResponse.error("Missing required field: call_id", EC.MISSING_FIELDS);
     }
+    // Anything that is not a call id is no call, and says so in the same
+    // words as one that is not yours — not a database error about the cast.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(call_id)) {
+      return CustomResponse.error("This call has ended", EC.CALL_NOT_FOUND);
+    }
 
     const wantsShare = screen_share === true || sound_share === true;
     const [
