@@ -1034,6 +1034,31 @@ CREATE TRIGGER users_ban_ends_calls AFTER UPDATE OF is_banned ON users
   FOR EACH ROW WHEN (NEW.is_banned AND NOT OLD.is_banned)
   EXECUTE FUNCTION app.end_calls_of_banned();
 
+-- A block hangs up too. `start_dm_call` refuses a new call across one, but a
+-- call already ringing when the block lands would otherwise ring on to its
+-- end. Ended the way the blocker hanging up would have ended it — a ring they
+-- were receiving is `declined`, one they were making `cancelled` — so the
+-- call log tells the blocked person nothing a hang-up would not.
+CREATE OR REPLACE FUNCTION app.end_calls_on_block() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE dm_calls c
+     SET ended_at = now(),
+         outcome  = CASE WHEN c.answered_at IS NOT NULL
+                           THEN 'completed'::dm_call_outcome
+                         WHEN c.callee_id = NEW.blocker_id
+                           THEN 'declined'::dm_call_outcome
+                         ELSE 'cancelled'::dm_call_outcome END
+   WHERE c.ended_at IS NULL
+     AND LEAST(c.caller_id, c.callee_id)    = LEAST(NEW.blocker_id, NEW.blocked_id)
+     AND GREATEST(c.caller_id, c.callee_id) = GREATEST(NEW.blocker_id, NEW.blocked_id);
+  RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS member_blocks_end_calls ON member_blocks;
+CREATE TRIGGER member_blocks_end_calls AFTER INSERT ON member_blocks
+  FOR EACH ROW EXECUTE FUNCTION app.end_calls_on_block();
+
 -- ============================================================
 -- The soundboard's three rules
 -- ============================================================

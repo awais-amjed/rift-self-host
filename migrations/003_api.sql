@@ -1397,6 +1397,12 @@ DECLARE
   v_low     UUID;
   v_high    UUID;
 BEGIN
+  -- A pin rings the channel or the other person, so it is something said, and
+  -- a time-out means saying nothing — unpinning included.
+  IF app.timed_out() THEN
+    RAISE EXCEPTION 'timed_out';
+  END IF;
+
   IF p_scope = 'channel' THEN
     -- Neither a press nor a reply only one person can see: both are rows most
     -- of the channel cannot read, and a pin is a thing the whole channel sees.
@@ -1441,6 +1447,11 @@ BEGIN
      AND app.server_id() IS NOT NULL;
   IF v_low IS NULL THEN
     RAISE EXCEPTION 'message_not_found';
+  END IF;
+  -- And not somebody who has blocked you, whom it would ring all the same.
+  -- Refused in the DM gate's words, so it reads as a setting there too.
+  IF app.blocked_by(CASE WHEN v_low = auth.uid() THEN v_high ELSE v_low END) THEN
+    RAISE EXCEPTION 'dm_not_accepted';
   END IF;
 
   IF p_pinned THEN
@@ -2371,6 +2382,9 @@ BEGIN
 
   IF app.timed_out() THEN RAISE EXCEPTION 'timed_out'; END IF;
   IF NOT app.has_perm('CONNECT') THEN RAISE EXCEPTION 'cannot_connect'; END IF;
+  -- Nor a bot, which cannot be rung either: nothing in the SDK can hold a
+  -- call's key, so a bot's call is only ever a phone ringing for nothing.
+  IF app.is_bot() THEN RAISE EXCEPTION 'cannot_connect'; END IF;
 
   -- Either direction. Being called by somebody you blocked is the thing a
   -- block is for; calling somebody you blocked is a mis-tap on a button the

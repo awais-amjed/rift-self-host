@@ -133,9 +133,15 @@ DROP POLICY IF EXISTS dm_messages_insert ON dm_messages;
 CREATE POLICY dm_messages_insert ON dm_messages FOR INSERT TO authenticated
   WITH CHECK (sender_id = auth.uid() AND app.can_receive_dm(recipient_id));
 
+-- An edit lands in front of the recipient as surely as a new message does, so
+-- it answers to the same two things the DM gate (004) asks of one: not while
+-- timed out, and not to somebody who has blocked you. Without them a block or
+-- a time-out left the sender free to rewrite everything they had already sent.
 DROP POLICY IF EXISTS dm_messages_update_own ON dm_messages;
 CREATE POLICY dm_messages_update_own ON dm_messages FOR UPDATE TO authenticated
-  USING (sender_id = auth.uid()) WITH CHECK (sender_id = auth.uid());
+  USING (sender_id = auth.uid())
+  WITH CHECK (sender_id = auth.uid() AND NOT app.timed_out()
+              AND NOT app.blocked_by(recipient_id));
 
 DROP POLICY IF EXISTS dm_messages_delete_own ON dm_messages;
 CREATE POLICY dm_messages_delete_own ON dm_messages FOR DELETE TO authenticated
@@ -182,10 +188,15 @@ CREATE POLICY dm_reactions_select ON dm_message_reactions FOR SELECT TO authenti
 
 DROP POLICY IF EXISTS dm_reactions_insert ON dm_message_reactions;
 -- Not while banned: a banned member cannot send a DM, and a reaction rings the
--- other side just as a message does.
+-- other side just as a message does. Nor, for the same reason, while timed out
+-- or on a message from somebody who has blocked you.
 CREATE POLICY dm_reactions_insert ON dm_message_reactions FOR INSERT TO authenticated
   WITH CHECK (user_id = auth.uid() AND app.can_see_dm(message_id)
-              AND app.server_id() IS NOT NULL AND NOT app.timed_out());
+              AND app.server_id() IS NOT NULL AND NOT app.timed_out()
+              AND NOT app.blocked_by((
+                SELECT CASE WHEN d.sender_id = auth.uid() THEN d.recipient_id
+                            ELSE d.sender_id END
+                  FROM dm_messages d WHERE d.id = message_id)));
 
 DROP POLICY IF EXISTS dm_reactions_delete_own ON dm_message_reactions;
 CREATE POLICY dm_reactions_delete_own ON dm_message_reactions FOR DELETE TO authenticated
@@ -492,9 +503,11 @@ CREATE POLICY voice_rooms_read ON voice_rooms FOR SELECT TO authenticated
   USING (app.can_see_channel(channel_id));
 
 DROP POLICY IF EXISTS messages_update_own ON messages;
+-- A time-out stops edits as well as posts: rewriting an old message is saying
+-- something new, and was the one way a timed-out member still could.
 CREATE POLICY messages_update_own ON messages FOR UPDATE TO authenticated
   USING (sender_id = auth.uid() AND app.can_see_channel(channel_id))
-  WITH CHECK (sender_id = auth.uid());
+  WITH CHECK (sender_id = auth.uid() AND NOT app.timed_out());
 
 DROP POLICY IF EXISTS messages_delete ON messages;
 CREATE POLICY messages_delete ON messages FOR DELETE TO authenticated
@@ -1286,6 +1299,7 @@ REVOKE ALL ON FUNCTION app.close_stale_dm_calls(UUID, UUID)  FROM PUBLIC, anon, 
 GRANT EXECUTE ON FUNCTION app.close_stale_dm_calls(UUID, UUID) TO postgres;
 REVOKE ALL ON FUNCTION app.ring_dm_callee()                  FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION app.end_calls_of_banned()             FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.end_calls_on_block()              FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION app.announce_dm_call()                FROM PUBLIC, anon, authenticated;
 
 -- Internal. The cap is a check the two report functions make, and a member's

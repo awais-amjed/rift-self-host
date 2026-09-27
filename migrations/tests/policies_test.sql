@@ -6662,7 +6662,25 @@ BEGIN
   EXCEPTION WHEN raise_exception THEN
     IF SQLERRM <> 'timed_out' THEN RAISE; END IF;
   END;
-  RAISE NOTICE 'ok  a timed-out member cannot post, react or DM';
+  -- The side doors: rewriting what they already said, and pinning.
+  BEGIN
+    UPDATE messages SET ciphertext = 'rewritten' WHERE id = 9800;
+    RAISE EXCEPTION 'FAIL: a timed-out member edited their message';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM set_pinned('channel', 9800, true);
+    RAISE EXCEPTION 'FAIL: a timed-out member pinned';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'timed_out' THEN RAISE; END IF;
+  END;
+  IF app.can_use_topic('chat:aaaa1111-0000-4000-8000-000000000001', true) THEN
+    RAISE EXCEPTION 'FAIL: a timed-out member may type into a channel';
+  END IF;
+  IF NOT app.can_use_topic('chat:aaaa1111-0000-4000-8000-000000000001', false) THEN
+    RAISE EXCEPTION 'FAIL: a timed-out member cannot even listen to a channel';
+  END IF;
+  RAISE NOTICE 'ok  a timed-out member cannot post, react, DM, edit, pin or type';
 END $$;
 
 SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
@@ -6839,6 +6857,78 @@ BEGIN
     IF SQLERRM <> 'dm_not_accepted' THEN RAISE; END IF;
   END;
   RAISE NOTICE 'ok  a block stops DMs, reads like a setting, and is invisible to the blocked';
+END $$;
+
+-- The side doors: everything else of amy's that would land in front of ben.
+DO $$
+DECLARE
+  v_mine   BIGINT;
+  v_theirs BIGINT;
+BEGIN
+  SELECT max(id) INTO v_mine FROM dm_messages
+   WHERE sender_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+     AND recipient_id = '11111111-aaaa-4aaa-8aaa-000000000302';
+  IF v_mine IS NULL THEN RAISE EXCEPTION 'FAIL: fixture — amy never wrote to ben'; END IF;
+
+  -- One of ben's to react to and pin, written as ben.
+  RESET ROLE;
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000302', '11111111-aaaa-4aaa-8aaa-000000000301', 'from-ben', 'n', 's', 1)
+  RETURNING id INTO v_theirs;
+  SET LOCAL ROLE authenticated;
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+  BEGIN
+    UPDATE dm_messages SET ciphertext = 'rewritten' WHERE id = v_mine;
+    RAISE EXCEPTION 'FAIL: a blocked member edited an old DM to the blocker';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO dm_message_reactions (message_id, user_id, emoji)
+    VALUES (v_theirs, '11111111-aaaa-4aaa-8aaa-000000000301', '👍');
+    RAISE EXCEPTION 'FAIL: a blocked member reacted to the blocker''s DM';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM set_pinned('dm', v_theirs, true);
+    RAISE EXCEPTION 'FAIL: a blocked member pinned in the blocker''s DM';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'dm_not_accepted' THEN RAISE; END IF;
+  END;
+  IF app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000302', true) THEN
+    RAISE EXCEPTION 'FAIL: a blocked member may send typing to the blocker';
+  END IF;
+  IF NOT app.can_use_topic('user:11111111-aaaa-4aaa-8aaa-000000000303', true) THEN
+    RAISE EXCEPTION 'FAIL: the block stopped typing to somebody else';
+  END IF;
+  RAISE NOTICE 'ok  nor edits, reactions, pins or typing reach the blocker';
+
+  -- The blocker is not the one blocked: ben may still do all of it.
+  RESET ROLE;
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+  SET LOCAL ROLE authenticated;
+  UPDATE dm_messages SET ciphertext = 'ben-edit' WHERE id = v_theirs;
+  IF NOT FOUND THEN RAISE EXCEPTION 'FAIL: the blocker cannot edit their own DM'; END IF;
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+  -- And a time-out stops a DM edit as it stops a channel one.
+  RESET ROLE;
+  UPDATE users SET timed_out_until = now() + interval '1 hour'
+   WHERE id = '11111111-aaaa-4aaa-8aaa-000000000302';
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    UPDATE dm_messages SET ciphertext = 'ben-edit-2' WHERE id = v_theirs;
+    RAISE EXCEPTION 'FAIL: a timed-out member edited a DM';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RESET ROLE;
+  UPDATE users SET timed_out_until = NULL
+   WHERE id = '11111111-aaaa-4aaa-8aaa-000000000302';
+  SET LOCAL ROLE authenticated;
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+  RAISE NOTICE 'ok  the blocker still can, and a time-out stops a DM edit';
 END $$;
 
 SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
@@ -7188,6 +7278,29 @@ RESET ROLE;
 UPDATE roles SET permissions = permissions | app.perm('CONNECT')
  WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone;
 
+-- A bot, even one with an open conversation: it cannot be rung, and it cannot
+-- ring anybody either. eve stands in for one for the length of the check.
+-- `is_bot` is pinned at registration (004), so the pin steps aside for this.
+ALTER TABLE users DISABLE TRIGGER users_pin_is_bot;
+UPDATE users SET is_bot = true WHERE id = '11111111-aaaa-4aaa-8aaa-000000000305';
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000305');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+    RAISE EXCEPTION 'FAIL: a bot rang somebody';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_connect' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a bot starts no call';
+END $$;
+
+RESET ROLE;
+UPDATE users SET is_bot = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000305';
+ALTER TABLE users ENABLE TRIGGER users_pin_is_bot;
+
 -- ---------- a ring, and an answer ----------
 
 SET LOCAL ROLE authenticated;
@@ -7481,6 +7594,33 @@ BEGIN
   END IF;
   PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000301', NULL, NULL, false);
   RAISE NOTICE 'ok  a ban hangs up every call the member is in';
+END $$;
+
+-- ---------- a block hangs up ----------
+-- Ended as the blocker hanging up would end it: a ring they were getting is
+-- declined, one they were making is cancelled.
+
+DO $$
+DECLARE v_in UUID; v_out UUID;
+BEGIN
+  v_in := (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000301')->>'id')::UUID;
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+  INSERT INTO member_blocks (blocker_id, blocked_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000001');
+  IF my_dm_calls(ARRAY[v_in])->0->>'outcome' IS DISTINCT FROM 'declined' THEN
+    RAISE EXCEPTION 'FAIL: blocking the caller left their call ringing: %', my_dm_calls(ARRAY[v_in]);
+  END IF;
+  DELETE FROM member_blocks WHERE blocker_id = '11111111-aaaa-4aaa-8aaa-000000000301';
+
+  v_out := (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000001')->>'id')::UUID;
+  INSERT INTO member_blocks (blocker_id, blocked_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000001');
+  IF my_dm_calls(ARRAY[v_out])->0->>'outcome' IS DISTINCT FROM 'cancelled' THEN
+    RAISE EXCEPTION 'FAIL: blocking the callee left the call ringing: %', my_dm_calls(ARRAY[v_out]);
+  END IF;
+  DELETE FROM member_blocks WHERE blocker_id = '11111111-aaaa-4aaa-8aaa-000000000301';
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+  RAISE NOTICE 'ok  a block hangs up a call ringing either way';
 END $$;
 
 -- ---------- which changes push the callee ----------

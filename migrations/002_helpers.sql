@@ -85,6 +85,16 @@ CREATE OR REPLACE FUNCTION app.timed_out() RETURNS BOOLEAN
                     WHERE u.id = auth.uid()), false)
 $$;
 
+-- Has this person blocked me? The DM gate (004) asks it of a new message, but
+-- a message is not the only thing that lands in front of somebody: an edit to
+-- an old one, a reaction, a pin and a typing indicator each do too, and each
+-- was a way round the block until it asked as well.
+CREATE OR REPLACE FUNCTION app.blocked_by(p_other UUID) RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (SELECT 1 FROM member_blocks b
+                  WHERE b.blocker_id = p_other AND b.blocked_id = auth.uid())
+$$;
+
 -- The level actually in force, chain and defaults folded in. SECURITY DEFINER
 -- because the ring triggers ask it about *other* people, whose rows no session
 -- may read.

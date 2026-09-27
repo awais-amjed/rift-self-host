@@ -544,10 +544,16 @@ BEGIN
       RETURN v_rest = v_server::text;
     WHEN 'user' THEN
       -- Only a DM's typing indicator is sent here by a client; everything else
-      -- on a user topic comes from the database.
-      RETURN v_rest ~ '^[0-9a-f-]{36}$' AND app.is_co_member(v_rest::uuid);
+      -- on a user topic comes from the database. Not by somebody the owner has
+      -- blocked, or who is timed out: typing is the one thing either could
+      -- still put in front of them.
+      RETURN v_rest ~ '^[0-9a-f-]{36}$' AND app.is_co_member(v_rest::uuid)
+         AND NOT app.blocked_by(v_rest::uuid) AND NOT app.timed_out();
     WHEN 'chat' THEN
-      RETURN v_rest ~ '^[0-9a-f-]{36}$' AND app.can_see_channel(v_rest::uuid);
+      -- Listening is anyone's who can see the channel; typing into it is not
+      -- a timed-out member's, who could not send what they were typing.
+      RETURN v_rest ~ '^[0-9a-f-]{36}$' AND app.can_see_channel(v_rest::uuid)
+         AND NOT (p_write AND app.timed_out());
     WHEN 'channel' THEN
       -- Listening only. The database is the only thing that speaks here, and
       -- a member who could speak here could forge a message announcement to
