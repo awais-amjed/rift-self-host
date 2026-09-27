@@ -410,6 +410,8 @@ END $$;
 
 CREATE OR REPLACE FUNCTION app.announce_channel_member() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
 BEGIN
   IF NOT app.realtime_ready() THEN
     RETURN NULL;
@@ -423,9 +425,14 @@ BEGIN
     -- which their own client asks for when it opens the channel, and ringing
     -- for it would spend a delivery per member every time a private channel
     -- is created.
-    PERFORM realtime.send('{}'::jsonb, 'sweep',
-                          'server:' || (SELECT c.server_id FROM channels c
-                                         WHERE c.id = OLD.channel_id), true);
+    --
+    -- Not when the channel itself is what went: its members leave by
+    -- cascade after the row, there is no key left to move off, and the
+    -- topic would be `server:` and NULL — a failed send per member.
+    SELECT c.server_id INTO v_server FROM channels c WHERE c.id = OLD.channel_id;
+    IF v_server IS NOT NULL THEN
+      PERFORM realtime.send('{}'::jsonb, 'sweep', 'server:' || v_server, true);
+    END IF;
     RETURN NULL;
   END IF;
 
