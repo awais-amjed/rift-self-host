@@ -1404,9 +1404,10 @@ COMMENT ON TABLE reports IS
 -- `dm_messages` already exposes: who called whom, when, and for how long.
 --
 -- `alive_at` is the heartbeat. A client in an answered call touches it every
--- minute, and a call nobody has touched for three is closed by the sweep
--- (007), because the only other thing that knows a call is over is LiveKit,
--- and a client that crashed never says goodbye.
+-- twenty seconds, and a call nobody has touched for three minutes is closed
+-- by the sweep (007) — ended at its last beat, so its length is right to
+-- within one — because the only other thing that knows a call is over is
+-- LiveKit, and a client that crashed never says goodbye.
 --
 -- Written only through the functions in 003. The two people in a call read
 -- it through them too; there is no grant on the table itself.

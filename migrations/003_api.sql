@@ -2485,7 +2485,7 @@ BEGIN
   RETURN app.dm_call_json(v_call, v_me);
 END; $$;
 
--- Still here. Sent by a client in an answered call about once a minute;
+-- Still here. Sent by a client in an answered call every twenty seconds;
 -- answers whether the call is still going, which is also how a client that
 -- missed the hang-up doorbell finds out.
 CREATE OR REPLACE FUNCTION dm_call_alive(p_call UUID) RETURNS BOOLEAN

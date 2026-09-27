@@ -1276,6 +1276,14 @@ GRANT EXECUTE ON FUNCTION claim_dm_call_room(UUID, UUID, UUID, BOOLEAN) TO servi
 
 REVOKE ALL ON FUNCTION app.dm_call_json(dm_calls, UUID)      FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION app.close_stale_dm_calls(UUID, UUID)  FROM PUBLIC, anon, authenticated;
+
+-- The sweep (007) runs it every minute as `postgres`, which is who pg_cron
+-- runs jobs as. Every other job's function is written in 007 and so owned by
+-- that role already; this one lives with the call functions it shares its
+-- rules with, and is owned by whoever applied 003. Without this the job fails
+-- every minute with "permission denied" and a call both ends walked away from
+-- stays live for good — found on the dev stack, where it had.
+GRANT EXECUTE ON FUNCTION app.close_stale_dm_calls(UUID, UUID) TO postgres;
 REVOKE ALL ON FUNCTION app.ring_dm_callee()                  FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION app.end_calls_of_banned()             FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION app.announce_dm_call()                FROM PUBLIC, anon, authenticated;
