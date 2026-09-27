@@ -1,8 +1,8 @@
 /**
  * The join rules for Rift's private Realtime topics.
  *
- * Migration 017 moved members off Postgres Changes and onto broadcasts, and
- * made every topic private: a client may join `server:<id>` or `user:<id>` only
+ * Members hear the database through broadcasts rather than Postgres Changes,
+ * and every topic is private: a client may join `server:<id>` or `user:<id>` only
  * if `app.can_use_topic` says so. Realtime asks by checking a policy on its own
  * table, `realtime.messages`, and that is the awkward part:
  *

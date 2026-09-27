@@ -106,11 +106,11 @@ Deno.serve(async (req) => {
 
     // Generate an admin invite code (single-use).
     //
-    // It names a role now rather than three booleans (migration 025). The one
+    // It names a role now rather than three booleans. The one
     // it wants is the most senior on a server that has existed for a
     // millisecond and has exactly the roles its own trigger just seeded — so
     // "highest position" is `Admin`, without this having to know the name.
-    // Not `Owner`, which sits above it (013): that one is never named by an
+    // Not `Owner`, which sits above it: that one is never named by an
     // invite. Registration hands it to the first person in, which is whoever
     // redeems this.
     const inviteCode = generateInviteCode();

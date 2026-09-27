@@ -10,7 +10,7 @@ import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
  * Let a bot hear a voice channel, or stop it hearing one.
  *
  * The authorisation and the row live in `grant_bot_voice_listen` /
- * `revoke_bot_voice_listen` (migration 031), called as the caller so
+ * `revoke_bot_voice_listen`, called as the caller so
  * `MANAGE_BOTS` and `app.can_see_channel` are decided about the person who
  * clicked rather than about the service role.
  *

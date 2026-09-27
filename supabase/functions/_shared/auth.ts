@@ -44,7 +44,7 @@ export async function authenticateToken(
     return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
   }
 
-  // 2. Load this server's profile row. users.id = auth.uid() (see migration 007).
+  // 2. Load this server's profile row. users.id = auth.uid().
   const { data, error } = await supabase
     .from(DBSchema.users.tableName)
     .select(

@@ -16,7 +16,7 @@ const supabase = createClient(
  * server and never will — it is a different database with a different notion
  * of who anybody is. What makes this safe to leave open is that the token *is*
  * the credential: 256 random bits, single-use, five-minute life, and only its
- * digest stored (migration 042). Presenting one is the whole proof, and
+ * digest stored. Presenting one is the whole proof, and
  * guessing one is not a thing that happens.
  *
  * It answers with almost nothing on purpose. A valid token returns the server

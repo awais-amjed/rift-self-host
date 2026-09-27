@@ -16,11 +16,11 @@ const MAX_ATTACHMENT_CEILING = 524288000; // 500 MB
 
 // Nothing here touches storage. Each server owns a `chat-<serverId>` bucket and
 // a trigger on `servers` moves that bucket's file_size_limit whenever the
-// column changes (migration 008) — in the same statement, so it cannot be
+// column changes — in the same statement, so it cannot be
 // skipped or raced. This endpoint only has to write the row.
 
 /**
- * The operator limits from migrations 007 and 009, as (request field → column)
+ * The operator limits on `servers`, as (request field → column)
  * pairs.
  *
  * They are validated together rather than one `if` each because they share one

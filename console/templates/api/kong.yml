@@ -94,7 +94,7 @@ services:
             - anon
 
   ## Almost everything a client does: messages, members, channels, invites,
-  ## reactions, read cursors — all of it under the policies in 002_security.sql.
+  ## reactions, read cursors — all of it under the row-level security policies.
   - name: rest-v1
     _comment: "PostgREST: /rest/v1/* -> http://rest:3000/*"
     url: http://rest:3000/

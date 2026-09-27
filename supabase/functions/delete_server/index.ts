@@ -11,8 +11,8 @@ import { livekitRoomServices } from "../_shared/livekit.ts";
  * Delete a server: everything it holds, and everything holding it up.
  *
  * The row delete is the `delete_server` RPC, run with the caller's own JWT so
- * the database is what decides — it refuses anyone but the owner (migration
- * 013) and cascades to every table the server owns. What the cascade cannot
+ * the database is what decides — it refuses anyone but the owner
+ * and cascades to every table the server owns. What the cascade cannot
  * reach is done here with the service role, after the RPC has said yes:
  *
  *   * the LiveKit room of every voice channel, which disconnects whoever is

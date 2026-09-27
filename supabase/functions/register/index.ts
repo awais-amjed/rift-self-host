@@ -19,7 +19,7 @@ const supabase = createClient(
  * The client first authenticates via Sign-in-with-Web3 (SIWS), which yields a
  * GoTrue JWT for a fresh `auth.users` row keyed by the caller's Ed25519 key.
  * register then binds a `users` profile to that identity: `users.id = auth.uid()`
- * (see API.md / `002_limits.sql`). No token is issued — the client already holds
+ * (see API.md). No token is issued — the client already holds
  * the JWT.
  */
 Deno.serve(async (req) => {
@@ -78,7 +78,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Claim the invite + create the profile atomically (migration 009). The
+    // Claim the invite + create the profile atomically. The
     // invite is only consumed once every check passes, so a rejected register
     // (e.g. username taken) never burns an invite use.
     const { data: regData, error: regError } = await supabase.rpc("register_user", {

@@ -14,7 +14,7 @@
  * - The limit is a sixty-second rolling average, so bursts sail past and only
  *   sustained traffic trips it. A short test proves nothing.
  * - Every delivery spends it, database broadcasts included. A message in an
- *   open channel goes to the whole server's topic (migration 017), so the
+ *   open channel goes to the whole server's topic, so the
  *   unread badges scale with members × messages and are usually the larger
  *   cost — not typing indicators, which is where anyone would look first.
  *
@@ -44,7 +44,7 @@ export interface RealtimeLimits {
  * evening, and the way they fail is the worst possible one.
  *
  * **Events are deliveries.** A message in an open channel goes to the
- * server's topic (migration 017), so one send to 1,000 people online is
+ * server's topic, so one send to 1,000 people online is
  * 1,000 events. At the old 5,000 that is **five messages a second, for the
  * whole server**, and the limit is a sixty-second rolling average, so a
  * burst sails through and only sustained traffic trips it.
@@ -75,8 +75,8 @@ export interface RealtimeLimits {
  *   a good fraction of the connection count or coming back up is a thundering
  *   herd against its own rate limit.
  * - **Topics per client.** A member holds one for the server, one of their
- *   own, presence, voice, the open channel's typing — and since migration
- *   027 one per *private* channel they can see, because that is where a
+ *   own, presence, voice, the open channel's typing — and one
+ *   per *private* channel they can see, because that is where a
  *   private channel's messages are announced. The stock 100 is therefore a
  *   cap on private channels per member, and reaching it looks like a channel
  *   that has silently stopped updating.

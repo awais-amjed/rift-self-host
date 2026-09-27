@@ -63,11 +63,11 @@ Deno.serve(async (req) => {
     // is a hole the moment one is not — for people before bots, since a private
     // voice channel is a call you could walk into by knowing an id.
     //
-    // `visible_channels` is the same answer 020's policies give; asking the
+    // `visible_channels` is the same answer the channel policies give; asking the
     // database rather than reimplementing the rule here is the whole point of
     // 021.
     //
-    // `channel_joinable_by` rather than `channel_visible_to` (037): a summoned
+    // `channel_joinable_by` rather than `channel_visible_to`: a summoned
     // bot is in the room without being of it. It may take a token for this one
     // voice channel and nothing else — it still cannot list the channel, read
     // its roster or post in it, because every other caller asks
@@ -172,7 +172,7 @@ Deno.serve(async (req) => {
     const isDeafened: boolean = userRecord[DBSchema.users.isDeafened] === true;
     const isBot: boolean = userRecord[DBSchema.users.isBot] === true;
 
-    // A bot publishes; it does not hear (BOTS.md §6b, migration 031).
+    // A bot publishes; it does not hear (BOTS.md §6b).
     //
     // This function never asked what the caller was, and `@everyone` carries
     // CONNECT and SPEAK — so a bot invited to a server could sit in a call and
@@ -183,7 +183,7 @@ Deno.serve(async (req) => {
     // that genuinely needs to listen gets an explicit per-channel grant, and
     // unlike §6's key grant this one is honestly reversible: subscription is a
     // permission rather than arithmetic, so revoking stops the audio mid-call.
-    // Calls are end-to-end encrypted (migrations 031-032), and a bot publishing
+    // Calls are end-to-end encrypted, and a bot publishing
     // with `encryptionType: kNone` would be one every member's client skips the
     // frame cryptor for — its audio in the clear, inside the room built so that
     // could not happen. So a bot needs a media key before it needs a token, and
@@ -280,7 +280,7 @@ Deno.serve(async (req) => {
       ? new RoomServiceClient(nodeHost, pair.apiKey, pair.apiSecret)
       : null;
 
-    // How full the call is (migration 028), asked only when there is a limit
+    // How full the call is, asked only when there is a limit
     // to compare it against — a server that has not set one pays nothing.
     //
     // **People, not connections.** A screen share is a second connection held

@@ -24,7 +24,7 @@ const supabase = createClient(
  * trip is what binds a listing to a domain, because only whoever controls this
  * domain can answer for it.
  *
- * Only the digest is stored (migration 042). The token itself exists in this
+ * Only the digest is stored. The token itself exists in this
  * response, in the client's memory, and in central's request — never at rest.
  */
 Deno.serve(async (req) => {

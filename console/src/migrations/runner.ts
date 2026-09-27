@@ -62,7 +62,7 @@ export async function readMigrations(directory: string): Promise<Migration[]> {
     files.push({ name: entry.name, path, sql, checksum: await checksum(sql) });
   }
 
-  // Filenames are zero-padded (`007_limits.sql`), so a plain sort is the
+  // Filenames are zero-padded (`007_jobs.sql`), so a plain sort is the
   // numeric order. `localeCompare` is not used on purpose — its collation
   // varies by locale, and the order migrations run in must not.
   files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

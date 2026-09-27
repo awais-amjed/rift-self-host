@@ -6,24 +6,24 @@ const DBSchema = {
     name: "name",
     iconUrl: "icon_url",
     livekitUrl: "livekit_url",
-    // Operator limits (migration 007). Both sweeps default to 0 = off; the
+    // Operator limits. Both sweeps default to 0 = off; the
     // attachment cap is a size and therefore has a real default. There is no
     // daily message quota — a rate limit does not bound storage.
     maxAttachmentBytes: "max_attachment_bytes",
     messageRetentionDays: "message_retention_days",
     messageHistoryCap: "message_history_cap",
-    // DM overrides (migration 009). Nullable like the channel-level columns,
+    // DM overrides. Nullable like the channel-level columns,
     // because they override rather than set the base case: NULL inherits the
     // two above, 0 opts DMs out of a server-wide sweep.
     dmRetentionDays: "dm_retention_days",
     dmHistoryCap: "dm_history_cap",
-    // What a call may cost the operator (migration 028). Both 0 = off. The
+    // What a call may cost the operator. Both 0 = off. The
     // participant cap is enforced here, by get_channel_token; the share cap
     // is a number the client keeps, because a LiveKit token cannot carry a
     // bitrate.
     maxVoiceParticipants: "max_voice_participants",
     maxShareMbps: "max_share_mbps",
-    // How large the place may get (migration 029). Both 0 = off, and both
+    // How large the place may get. Both 0 = off, and both
     // are real walls: one way to become a member, one way for bytes to
     // arrive, and the database owns each.
     maxMembers: "max_members",
@@ -58,7 +58,7 @@ const DBSchema = {
     isDeafened: "is_deafened",
     chatPublicKey: "chat_public_key",
     avatarPath: "avatar_path",
-    // A program, not a person (migration 014). Bots are filtered out of every
+    // A program, not a person. Bots are filtered out of every
     // key-distribution list below; the database refuses them a keyring entry
     // regardless, so these filters save a round trip rather than enforce a rule.
     isBot: "is_bot",
@@ -90,7 +90,7 @@ const DBSchema = {
     livekitNodeId: "livekit_node_id",
   },
   // Where each member's phones can be reached, and the credential this server
-  // rings them over (migration 010). `push_config` has no grant and no policy:
+  // rings them over. `push_config` has no grant and no policy:
   // the ring triggers read it as SECURITY DEFINER and no session can.
   deviceTokens: {
     tableName: "device_tokens",

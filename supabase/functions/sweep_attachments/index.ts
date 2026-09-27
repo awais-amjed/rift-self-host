@@ -15,7 +15,7 @@ const BATCH = 1000;
 
 /**
  * Applies the server's retention settings and removes the attachment blobs left
- * behind (migration 007).
+ * behind.
  *
  * This exists because deleting a message frees almost nothing on its own.
  * `ciphertext` is capped at 16 KB, so the disk an operator worries about is
@@ -55,7 +55,7 @@ Deno.serve(async (req) => {
       return CustomResponse.success({ swept: 0, more: false });
     }
 
-    // Each server owns its own bucket (migration 008), so a batch can span
+    // Each server owns its own bucket, so a batch can span
     // several of them on a project hosting more than one server.
     const byBucket = new Map<string, string[]>();
     for (const orphan of orphans) {

@@ -19,7 +19,7 @@ const supabase = createClient(
 );
 
 /**
- * A LiveKit token for a call between two members (`dm_calls`, 001).
+ * A LiveKit token for a call between two members (`dm_calls`).
  *
  * The same shape of answer as `get_channel_token` — token, identity, the node
  * to connect to, the share bitrate — for a room named after the call rather

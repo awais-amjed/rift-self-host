@@ -26,7 +26,7 @@ const supabase = createClient(
  *   key for `current_version`, and whether each may also hear. A member's
  *   client seals them the same way it heals a member — a bot's media key is
  *   derived from the channel key, so only somebody holding that can produce
- *   one (migration 032).
+ *   one.
  * - `my_voice_key`: for a bot caller, its own sealed media key. Bots have no
  *   `channel_keyring` rows and never will; this is the one thing they get.
  */
@@ -63,7 +63,7 @@ Deno.serve(async (req) => {
       // member sealed for it, or it joins the call and publishes frames nobody
       // can decrypt. `get_channel_token` already admits it on exactly this
       // test, and the SDK asks for the key one call *earlier* (`voice.ts`), so
-      // without this the flow 037 was written to allow fails before reaching
+      // without this the summon flow fails before reaching
       // the function that allows it.
       //
       // The answer is the narrowest thing that works: its own sealed key and
@@ -139,7 +139,7 @@ Deno.serve(async (req) => {
 
     // Who may hold this channel's key, and from which version. One view rather
     // than a members query plus a bot-grant query plus the rule that joins
-    // them: 020 added a third input (private-channel membership), and three
+    // them: private-channel membership is a third input, and three
     // filters spread across two edge functions is three places to forget one.
     const { data: eligibleData, error: eligibleError } = await supabase
       .from("channel_eligible_members")

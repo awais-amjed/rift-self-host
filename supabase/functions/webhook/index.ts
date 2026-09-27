@@ -16,7 +16,7 @@ import * as EC from "../_shared/error_codes.ts";
  * it, and answers every kind of failure the same way.
  *
  * This function is deliberately thin. The lookup, the rate check and the insert
- * are one statement inside the database (migration 013) so nothing can sit
+ * are one statement inside the database so nothing can sit
  * between them, and so the rule survives the next thing that learns to write a
  * message. All that is left out here is the one part only an edge function can
  * do: being reachable without a JWT. The doorbell is the database's, like

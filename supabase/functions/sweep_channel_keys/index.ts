@@ -31,9 +31,9 @@ const supabase = createClient(
  * never rotated away from them, and a new member is only ever keyed by whoever
  * happens to join a call next.
  *
- * This runs as the service role, so 020's policies are not protecting it.
+ * This runs as the service role, so the row-level security policies are not protecting it.
  * Everything it is allowed to say comes from `channel_eligible_members`, which
- * is the same answer the policies give — see 021, which exists because four
+ * is the same answer the policies give. It exists because four
  * hand-written filters is four places for that answer to drift.
  */
 Deno.serve(async (req) => {
@@ -180,7 +180,7 @@ Deno.serve(async (req) => {
       //     everything already said under it.
       //
       //   * a channel that has just been opened up. `rotate_from_key_version`
-      //     is set when a private channel goes public (020), because healing
+      //     is set when a private channel goes public, because healing
       //     seals the *current* version — and the current version is the one
       //     the private conversation was written under. Nobody new is sealed
       //     until the sweep is past the mark.

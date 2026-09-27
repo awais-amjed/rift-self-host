@@ -58,7 +58,7 @@ Deno.test("everybody can come back at once after a restart", () => {
 });
 
 Deno.test("a member can hold a topic for every private channel they see", () => {
-  // Since migration 027 a private channel's messages are announced on a
+  // A private channel's messages are announced on a
   // topic of its own, so a member joins one per private channel they can
   // read, on top of the server, their own, presence, voice and typing. The
   // stock 100 would therefore have been a silent cap on private channels per

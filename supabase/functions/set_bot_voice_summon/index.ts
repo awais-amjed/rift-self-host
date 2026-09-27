@@ -7,7 +7,7 @@ import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/a
 import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
 
 /**
- * Ask a bot into a voice channel, or send it away (migration 037).
+ * Ask a bot into a voice channel, or send it away.
  *
  * The authorisation and the row live in `summon_bot_to_voice` /
  * `dismiss_bot_from_voice`, called as the caller so `SUMMON_BOTS` and
