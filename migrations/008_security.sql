@@ -1245,6 +1245,41 @@ GRANT EXECUTE ON FUNCTION dm_link_state(UUID)                             TO aut
 GRANT EXECUTE ON FUNCTION dm_requests()                                   TO authenticated;
 GRANT EXECUTE ON FUNCTION answer_dm_request(UUID, BOOLEAN)                TO authenticated;
 
+-- ============================================================
+-- DM calls
+-- ============================================================
+-- No grant on the table: the two people in a call read it through
+-- `my_dm_calls` and `dm_call_log`, which answer only about calls they are
+-- in, and every write is one of the four functions that decide what a call
+-- may become. The room is the token function's, asking `claim_dm_call_room`
+-- as the service role.
+REVOKE ALL ON dm_calls FROM PUBLIC, anon, authenticated;
+ALTER TABLE dm_calls ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON FUNCTION start_dm_call(UUID)                FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION answer_dm_call(UUID)               FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION end_dm_call(UUID)                  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION dm_call_alive(UUID)                FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION my_dm_calls(UUID[])                FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION dm_call_log(UUID, TIMESTAMPTZ)     FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION start_dm_call(UUID)             TO authenticated;
+GRANT EXECUTE ON FUNCTION answer_dm_call(UUID)            TO authenticated;
+GRANT EXECUTE ON FUNCTION end_dm_call(UUID)               TO authenticated;
+GRANT EXECUTE ON FUNCTION dm_call_alive(UUID)             TO authenticated;
+GRANT EXECUTE ON FUNCTION my_dm_calls(UUID[])             TO authenticated;
+GRANT EXECUTE ON FUNCTION dm_call_log(UUID, TIMESTAMPTZ)  TO authenticated;
+
+REVOKE ALL ON FUNCTION claim_dm_call_room(UUID, UUID, UUID, BOOLEAN)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION claim_dm_call_room(UUID, UUID, UUID, BOOLEAN) TO service_role;
+
+REVOKE ALL ON FUNCTION app.dm_call_json(dm_calls, UUID)      FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.close_stale_dm_calls(UUID, UUID)  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.ring_dm_callee()                  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.end_calls_of_banned()             FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.announce_dm_call()                FROM PUBLIC, anon, authenticated;
+
 -- Internal. The cap is a check the two report functions make, and a member's
 -- topic is rung by the server, not by the member.
 REVOKE ALL ON FUNCTION app.report_room(UUID)              FROM PUBLIC, anon, authenticated;

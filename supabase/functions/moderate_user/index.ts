@@ -163,10 +163,19 @@ async function applyToLiveRooms(
     // Only rooms that actually exist come back, so this is one call per node
     // rather than one listParticipants per channel on a server where nobody
     // is in voice.
+    // A ban reaches their DM calls too (`dm-<callId>`), which no channel id
+    // names. Only a ban: a moderator's voice mute is about the server's
+    // channels, and a call between two people is not one of them — it was
+    // never minted with the flags (`get_dm_call_token`), so it is not updated
+    // with them either.
     const rooms = (await Promise.all(
       services.map(async ({ service }) => {
         try {
-          return await service.listRooms(channelIds);
+          const channelRooms = await service.listRooms(channelIds);
+          if (!isBanned) return channelRooms;
+          const callRooms = (await service.listRooms())
+            .filter((room) => room.name.startsWith("dm-"));
+          return [...channelRooms, ...callRooms];
         } catch {
           return [];
         }

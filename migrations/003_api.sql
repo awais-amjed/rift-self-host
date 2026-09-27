@@ -2249,6 +2249,335 @@ BEGIN
 END; $$;
 
 -- ============================================================
+-- Calls
+-- ============================================================
+-- A call between two members is a row (`dm_calls`, 001) and a LiveKit room
+-- named after it. These are the only writers of the row. The room is the
+-- token function's (`get_dm_call_token`), and it will only mint for a call
+-- these have let exist.
+--
+-- Who may call whom follows the DM rules rather than inventing its own:
+--
+--   * only an **open** conversation — somebody who asks first has to have
+--     accepted, and somebody who takes nobody new has to already know you;
+--   * a block stops calls exactly as it stops messages, and reads the same
+--     (`call_not_accepted`), so it still reads as a setting;
+--   * a member who is timed out cannot start one, and one who may not
+--     `CONNECT` to voice cannot either;
+--   * five unanswered calls to one person in an hour is the most anybody
+--     rings them, because a phone that rings is harder to ignore than a badge.
+
+-- How long a call rings before it is over. The caller's client hangs up at
+-- thirty seconds; this is the server's own limit, a little longer so that an
+-- answer in flight at the thirtieth second still lands.
+CREATE OR REPLACE FUNCTION app.dm_call_ring_window() RETURNS INTERVAL
+  LANGUAGE sql IMMUTABLE AS $$ SELECT interval '45 seconds' $$;
+
+-- A caller who hangs up after this long hung up on somebody who had a
+-- chance to answer: `missed`. Sooner is `cancelled`, which nobody is told
+-- about as though they had missed something.
+CREATE OR REPLACE FUNCTION app.dm_call_missed_after() RETURNS INTERVAL
+  LANGUAGE sql IMMUTABLE AS $$ SELECT interval '15 seconds' $$;
+
+-- An answered call nobody has touched for this long is over.
+CREATE OR REPLACE FUNCTION app.dm_call_silence_limit() RETURNS INTERVAL
+  LANGUAGE sql IMMUTABLE AS $$ SELECT interval '3 minutes' $$;
+
+-- A call as one of its two people sees it: the row, and who is on the other
+-- end — including their chat key, because the media key is derived from the
+-- pair's DM key and the callee may never have opened this conversation on the
+-- device that is ringing.
+CREATE OR REPLACE FUNCTION app.dm_call_json(p_call dm_calls, p_me UUID)
+  RETURNS JSONB
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT jsonb_build_object(
+           'id',                   p_call.id,
+           'caller_id',            p_call.caller_id,
+           'callee_id',            p_call.callee_id,
+           'started_at',           p_call.started_at,
+           'answered_at',          p_call.answered_at,
+           'ended_at',             p_call.ended_at,
+           'outcome',              p_call.outcome,
+           'peer_id',              u.id,
+           'peer_name',            u.display_name,
+           'peer_username',        u.username,
+           'peer_avatar_path',     u.avatar_path,
+           'peer_chat_public_key', u.chat_public_key,
+           'peer_public_key',      u.public_key)
+    FROM users u
+   WHERE u.id = CASE WHEN p_call.caller_id = p_me
+                     THEN p_call.callee_id ELSE p_call.caller_id END
+$$;
+
+-- Close whatever between these two is past its time: a ring nobody answered
+-- inside the window, or an answered call gone silent. Run before anything
+-- asks whether the pair has a call going, so a stale row can never stand in
+-- the way of a new one — and by the sweep (007) for every pair at once, with
+-- both left NULL.
+CREATE OR REPLACE FUNCTION app.close_stale_dm_calls(
+  p_low UUID DEFAULT NULL, p_high UUID DEFAULT NULL
+)
+  RETURNS VOID
+  LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+  UPDATE dm_calls c
+     SET ended_at = CASE WHEN c.answered_at IS NULL
+                         THEN c.started_at + app.dm_call_ring_window()
+                         ELSE c.alive_at END,
+         outcome  = CASE WHEN c.answered_at IS NULL
+                         THEN 'missed'::dm_call_outcome
+                         ELSE 'completed'::dm_call_outcome END
+   WHERE c.ended_at IS NULL
+     AND (p_low IS NULL OR (LEAST(c.caller_id, c.callee_id)    = p_low
+                        AND GREATEST(c.caller_id, c.callee_id) = p_high))
+     AND ((c.answered_at IS NULL
+           AND c.started_at < now() - app.dm_call_ring_window())
+       OR (c.answered_at IS NOT NULL
+           AND c.alive_at < now() - app.dm_call_silence_limit()))
+$$;
+
+-- Ring somebody. Returns the call.
+--
+-- If the two of them already have one going it is returned instead of a
+-- second — and if that one is *them* ringing *you*, calling back is picking
+-- up: it is answered here, so two people pressing Call at the same moment
+-- end up in one call rather than each hearing the other's line busy.
+CREATE OR REPLACE FUNCTION start_dm_call(p_peer UUID) RETURNS JSONB
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_me     UUID := auth.uid();
+  v_server UUID := app.server_id();
+  v_low    UUID := LEAST(p_peer, auth.uid());
+  v_high   UUID := GREATEST(p_peer, auth.uid());
+  v_call   dm_calls%ROWTYPE;
+BEGIN
+  IF v_server IS NULL THEN RAISE EXCEPTION 'not_authorized'; END IF;
+  IF p_peer IS NULL OR p_peer = v_me THEN RAISE EXCEPTION 'user_not_found'; END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM users u
+                  WHERE u.id = p_peer AND u.server_id = v_server
+                    AND NOT u.is_banned AND NOT u.is_bot) THEN
+    RAISE EXCEPTION 'user_not_found';
+  END IF;
+
+  IF app.timed_out() THEN RAISE EXCEPTION 'timed_out'; END IF;
+  IF NOT app.has_perm('CONNECT') THEN RAISE EXCEPTION 'cannot_connect'; END IF;
+
+  -- Either direction. Being called by somebody you blocked is the thing a
+  -- block is for; calling somebody you blocked is a mis-tap on a button the
+  -- app does not show.
+  IF EXISTS (SELECT 1 FROM member_blocks b
+              WHERE (b.blocker_id = p_peer AND b.blocked_id = v_me)
+                 OR (b.blocker_id = v_me   AND b.blocked_id = p_peer)) THEN
+    RAISE EXCEPTION 'call_not_accepted';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM dm_links l
+                  WHERE l.user_low = v_low AND l.user_high = v_high
+                    AND l.status = 'open') THEN
+    RAISE EXCEPTION 'call_needs_conversation';
+  END IF;
+
+  -- The same lock the DM gate takes on the pair: two calls crossing in flight
+  -- must not both decide there is none.
+  PERFORM pg_advisory_xact_lock(hashtextextended(v_low::TEXT || v_high::TEXT, 0));
+  PERFORM app.close_stale_dm_calls(v_low, v_high);
+
+  SELECT * INTO v_call FROM dm_calls c
+   WHERE c.ended_at IS NULL
+     AND LEAST(c.caller_id, c.callee_id)    = v_low
+     AND GREATEST(c.caller_id, c.callee_id) = v_high;
+  IF FOUND THEN
+    IF v_call.answered_at IS NULL AND v_call.callee_id = v_me THEN
+      UPDATE dm_calls c SET answered_at = now(), alive_at = now()
+       WHERE c.id = v_call.id
+      RETURNING * INTO v_call;
+    END IF;
+    RETURN app.dm_call_json(v_call, v_me);
+  END IF;
+
+  IF (SELECT count(*) FROM dm_calls c
+       WHERE c.caller_id = v_me AND c.callee_id = p_peer
+         AND c.started_at > now() - interval '1 hour'
+         AND c.answered_at IS NULL) >= 5 THEN
+    RAISE EXCEPTION 'call_rate_limited';
+  END IF;
+
+  INSERT INTO dm_calls (caller_id, callee_id) VALUES (v_me, p_peer)
+  RETURNING * INTO v_call;
+  RETURN app.dm_call_json(v_call, v_me);
+END; $$;
+
+-- Pick up. Only the person being called, only while it rings, and only once:
+-- a second device answering after the first gets `call_not_ringing`, which is
+-- how it learns to stop.
+CREATE OR REPLACE FUNCTION answer_dm_call(p_call UUID) RETURNS JSONB
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_me   UUID := auth.uid();
+  v_call dm_calls%ROWTYPE;
+BEGIN
+  IF app.server_id() IS NULL THEN RAISE EXCEPTION 'not_authorized'; END IF;
+
+  SELECT * INTO v_call FROM dm_calls c WHERE c.id = p_call FOR UPDATE;
+  IF NOT FOUND OR v_call.callee_id <> v_me THEN
+    RAISE EXCEPTION 'call_not_found';
+  END IF;
+  IF v_call.ended_at IS NOT NULL
+     OR v_call.started_at < now() - app.dm_call_ring_window() THEN
+    RAISE EXCEPTION 'call_ended';
+  END IF;
+  IF v_call.answered_at IS NOT NULL THEN
+    RAISE EXCEPTION 'call_not_ringing';
+  END IF;
+
+  UPDATE dm_calls c SET answered_at = now(), alive_at = now()
+   WHERE c.id = p_call
+  RETURNING * INTO v_call;
+  RETURN app.dm_call_json(v_call, v_me);
+END; $$;
+
+-- Hang up, from either end, in any state. What it is called depends on who
+-- and when: a ring the callee refuses is `declined`, a ring the caller gives
+-- up on is `missed` or `cancelled`, and anything answered is `completed`.
+-- Ending one already over returns it as it is — both ends hang up at once
+-- all the time.
+CREATE OR REPLACE FUNCTION end_dm_call(p_call UUID) RETURNS JSONB
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_me   UUID := auth.uid();
+  v_call dm_calls%ROWTYPE;
+BEGIN
+  IF app.server_id() IS NULL THEN RAISE EXCEPTION 'not_authorized'; END IF;
+
+  SELECT * INTO v_call FROM dm_calls c WHERE c.id = p_call FOR UPDATE;
+  IF NOT FOUND OR v_me NOT IN (v_call.caller_id, v_call.callee_id) THEN
+    RAISE EXCEPTION 'call_not_found';
+  END IF;
+  IF v_call.ended_at IS NOT NULL THEN
+    RETURN app.dm_call_json(v_call, v_me);
+  END IF;
+
+  UPDATE dm_calls c
+     SET ended_at = now(),
+         outcome  = CASE
+           WHEN c.answered_at IS NOT NULL THEN 'completed'::dm_call_outcome
+           WHEN v_me = c.callee_id        THEN 'declined'::dm_call_outcome
+           WHEN c.started_at <= now() - app.dm_call_missed_after()
+                                          THEN 'missed'::dm_call_outcome
+           ELSE 'cancelled'::dm_call_outcome END
+   WHERE c.id = p_call
+  RETURNING * INTO v_call;
+  RETURN app.dm_call_json(v_call, v_me);
+END; $$;
+
+-- Still here. Sent by a client in an answered call about once a minute;
+-- answers whether the call is still going, which is also how a client that
+-- missed the hang-up doorbell finds out.
+CREATE OR REPLACE FUNCTION dm_call_alive(p_call UUID) RETURNS BOOLEAN
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_me UUID := auth.uid();
+BEGIN
+  IF app.server_id() IS NULL THEN RETURN false; END IF;
+  UPDATE dm_calls c SET alive_at = now()
+   WHERE c.id = p_call
+     AND v_me IN (c.caller_id, c.callee_id)
+     AND c.ended_at IS NULL
+     AND c.answered_at IS NOT NULL;
+  RETURN FOUND;
+END; $$;
+
+-- The caller's calls that are still going, from either side, plus any of
+-- [p_known] however they stand — so a client that was ringing, or in a call,
+-- learns how it ended without a second question. A ring past its window is
+-- left out even before the sweep has closed it: it cannot be answered.
+CREATE OR REPLACE FUNCTION my_dm_calls(p_known UUID[] DEFAULT '{}')
+  RETURNS JSONB
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(app.dm_call_json(c, auth.uid())
+                            ORDER BY c.started_at DESC), '[]'::jsonb)
+    FROM dm_calls c
+   WHERE app.server_id() IS NOT NULL
+     AND auth.uid() IN (c.caller_id, c.callee_id)
+     AND ((c.ended_at IS NULL
+           AND (c.answered_at IS NOT NULL
+                OR c.started_at >= now() - app.dm_call_ring_window()))
+          OR c.id = ANY (COALESCE(p_known, '{}')))
+$$;
+
+-- One conversation's calls since [p_since], newest first — the stretch of
+-- history the client has messages loaded for. A call still ringing is not
+-- history yet and is left to `my_dm_calls`.
+CREATE OR REPLACE FUNCTION dm_call_log(p_peer UUID, p_since TIMESTAMPTZ)
+  RETURNS JSONB
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(row ORDER BY started_at DESC), '[]'::jsonb)
+    FROM (
+      SELECT c.started_at, app.dm_call_json(c, auth.uid()) AS row
+        FROM dm_calls c
+       WHERE app.server_id() IS NOT NULL
+         AND LEAST(c.caller_id, c.callee_id)    = LEAST(p_peer, auth.uid())
+         AND GREATEST(c.caller_id, c.callee_id) = GREATEST(p_peer, auth.uid())
+         AND c.started_at >= COALESCE(p_since, '-infinity')
+         AND (c.answered_at IS NOT NULL OR c.ended_at IS NOT NULL)
+       ORDER BY c.started_at DESC
+       LIMIT 200
+    ) page
+$$;
+
+-- For the token function: may this member have a token for this call's
+-- room, and which node is it on? The caller from the first ring, so the
+-- line is already open when the callee picks up; the callee once they have.
+--
+-- `{allowed, node}`, with `node` null on a server that has no node rows and
+-- runs on `servers.livekit_url` alone. The node is claimed on the first ask
+-- and kept, because a room lives on one box; a suggestion counts only if it is
+-- one of this server's, as with a channel. [p_move_to_default] is for a node
+-- that did not answer: the call goes to the default instead.
+CREATE OR REPLACE FUNCTION claim_dm_call_room(
+  p_call UUID, p_user UUID, p_preferred UUID DEFAULT NULL,
+  p_move_to_default BOOLEAN DEFAULT false
+) RETURNS JSONB
+  LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_call   dm_calls%ROWTYPE;
+  v_server UUID;
+  v_node   livekit_nodes%ROWTYPE;
+BEGIN
+  SELECT * INTO v_call FROM dm_calls c WHERE c.id = p_call FOR UPDATE;
+  IF NOT FOUND OR v_call.ended_at IS NOT NULL
+     OR NOT (p_user = v_call.caller_id
+             OR (p_user = v_call.callee_id AND v_call.answered_at IS NOT NULL)) THEN
+    RETURN jsonb_build_object('allowed', false);
+  END IF;
+
+  SELECT u.server_id INTO v_server FROM users u
+   WHERE u.id = p_user AND NOT u.is_banned;
+  IF v_server IS NULL THEN RETURN jsonb_build_object('allowed', false); END IF;
+
+  IF NOT p_move_to_default THEN
+    SELECT * INTO v_node FROM livekit_nodes n
+     WHERE n.id = COALESCE(v_call.node_id, p_preferred) AND n.server_id = v_server;
+  END IF;
+  IF v_node.id IS NULL THEN
+    SELECT * INTO v_node FROM livekit_nodes n
+     WHERE n.server_id = v_server AND n.is_default;
+  END IF;
+
+  UPDATE dm_calls c SET node_id = v_node.id WHERE c.id = p_call;
+
+  RETURN jsonb_build_object(
+    'allowed', true,
+    'node', CASE WHEN v_node.id IS NULL THEN NULL ELSE jsonb_build_object(
+              'id', v_node.id, 'url', v_node.url, 'label', v_node.label,
+              'is_default', v_node.is_default) END);
+END; $$;
+
+COMMENT ON FUNCTION claim_dm_call_room(UUID, UUID, UUID, BOOLEAN) IS
+  'Whether this member may join this call''s room and on which node, claiming '
+  'one on the first ask. Service role only: the token function''s question.';
+
+-- ============================================================
 -- One question about a server
 -- ============================================================
 -- Opening a server, and every structural change after it, cost five or six

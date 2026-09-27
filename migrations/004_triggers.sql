@@ -974,6 +974,67 @@ CREATE TRIGGER dm_messages_ring AFTER INSERT ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION ring_dm_recipient();
 
 -- ============================================================
+-- A call rings the phone
+-- ============================================================
+-- A ring, and the end of a ring — answered on another device, declined,
+-- given up on — each push the callee's phones, because a phone woken by the
+-- first is showing a call it has to be told to take down. The end of a call
+-- somebody answered pushes nothing: nothing on the callee's phone is ringing
+-- by then, and the device in the call hears the hang-up over Realtime.
+--
+-- The doorbell is as empty as a message's. The phone asks `my_dm_calls` what
+-- it was woken for, so nothing about the call reaches the push relay.
+--
+-- A conversation muted to `none` does not ring. That is what muting a person
+-- is for, and it is the same answer their messages get.
+CREATE OR REPLACE FUNCTION app.ring_dm_callee() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
+BEGIN
+  SELECT u.server_id INTO v_server FROM users u WHERE u.id = NEW.callee_id;
+  IF v_server IS NULL OR NOT app.push_enabled(v_server) THEN RETURN NULL; END IF;
+  IF app.notify_level(NEW.callee_id, 'dm', NEW.caller_id) = 'none' THEN
+    RETURN NULL;
+  END IF;
+  PERFORM ring_devices(v_server, ARRAY[NEW.callee_id]);
+  RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS dm_calls_ring ON dm_calls;
+CREATE TRIGGER dm_calls_ring AFTER INSERT ON dm_calls
+  FOR EACH ROW EXECUTE FUNCTION app.ring_dm_callee();
+
+DROP TRIGGER IF EXISTS dm_calls_ring_stop ON dm_calls;
+CREATE TRIGGER dm_calls_ring_stop AFTER UPDATE OF answered_at, ended_at ON dm_calls
+  FOR EACH ROW
+  WHEN (OLD.answered_at IS NULL AND OLD.ended_at IS NULL
+        AND (NEW.answered_at IS NOT NULL OR NEW.ended_at IS NOT NULL))
+  EXECUTE FUNCTION app.ring_dm_callee();
+
+-- A ban hangs up. The token a banned member holds is still good for its hour,
+-- and `moderate_user` takes them out of the room; this is the row's half, so
+-- the person on the other end is told the call is over rather than left
+-- talking to a line that went dead.
+CREATE OR REPLACE FUNCTION app.end_calls_of_banned() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE dm_calls c
+     SET ended_at = now(),
+         outcome  = CASE WHEN c.answered_at IS NULL
+                         THEN 'cancelled'::dm_call_outcome
+                         ELSE 'completed'::dm_call_outcome END
+   WHERE c.ended_at IS NULL
+     AND NEW.id IN (c.caller_id, c.callee_id);
+  RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS users_ban_ends_calls ON users;
+CREATE TRIGGER users_ban_ends_calls AFTER UPDATE OF is_banned ON users
+  FOR EACH ROW WHEN (NEW.is_banned AND NOT OLD.is_banned)
+  EXECUTE FUNCTION app.end_calls_of_banned();
+
+-- ============================================================
 -- The soundboard's three rules
 -- ============================================================
 -- The default LiveKit node follows servers.livekit_url

@@ -180,6 +180,17 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================================
+-- Calls between two members
+-- ============================================================
+
+-- How a DM call ended. `NULL` on the row is "not over yet". `missed` and
+-- `cancelled` are both the caller giving up before an answer, told apart by
+-- whether it had rung long enough for the callee to have had a chance.
+DO $$ BEGIN
+  CREATE TYPE dm_call_outcome AS ENUM ('completed', 'missed', 'declined', 'cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ============================================================
 -- Servers
 -- ============================================================
 -- One Supabase project can host several servers (identity is derived per
@@ -1376,6 +1387,73 @@ COMMENT ON TABLE reports IS
   'A member reporting a message or a member to this server''s moderators. A '
   'message report holds the sealed envelope, copied server-side, never the '
   'text. Written by report_message / report_member, closed by resolve_report.';
+
+-- ============================================================
+-- DM calls
+-- ============================================================
+-- One row per call between two members, from the first ring to the hang-up.
+-- The row is what the call *is* as far as anything but LiveKit knows: its id
+-- names the room (`dm-<id>`), its state is what makes the other person's
+-- devices ring and stop ringing, and once it is over it is the "Missed call"
+-- or "Call, 12 min" in the conversation.
+--
+-- **Nothing said in the call is here, or anywhere the server can reach.** The
+-- media key is derived from the pair's DM key (`dmcall:v1:<id>`), which the
+-- server never holds — unlike a channel call, whose key every member has,
+-- including whoever runs the place. What *is* here is metadata, the same kind
+-- `dm_messages` already exposes: who called whom, when, and for how long.
+--
+-- `alive_at` is the heartbeat. A client in an answered call touches it every
+-- minute, and a call nobody has touched for three is closed by the sweep
+-- (007), because the only other thing that knows a call is over is LiveKit,
+-- and a client that crashed never says goodbye.
+--
+-- Written only through the functions in 003. The two people in a call read
+-- it through them too; there is no grant on the table itself.
+
+CREATE TABLE IF NOT EXISTS dm_calls (
+  id          UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+  caller_id   UUID            NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  callee_id   UUID            NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  started_at  TIMESTAMPTZ     NOT NULL DEFAULT now(),
+  answered_at TIMESTAMPTZ,
+  alive_at    TIMESTAMPTZ     NOT NULL DEFAULT now(),
+  ended_at    TIMESTAMPTZ,
+  outcome     dm_call_outcome,
+  -- Which LiveKit the call is on, decided by the first token minted for it
+  -- and kept, because a room lives on exactly one node.
+  node_id     UUID            REFERENCES livekit_nodes(id) ON DELETE SET NULL,
+  CHECK (caller_id <> callee_id),
+  CONSTRAINT dm_calls_ended_whole CHECK ((ended_at IS NULL) = (outcome IS NULL)),
+  CONSTRAINT dm_calls_completed_answered
+    CHECK (outcome IS DISTINCT FROM 'completed' OR answered_at IS NOT NULL)
+);
+
+-- One call at a time between two people. Both calling each other at once is
+-- one call, not two: the second `start_dm_call` finds the first and answers it.
+CREATE UNIQUE INDEX IF NOT EXISTS dm_calls_one_open ON dm_calls
+  (LEAST(caller_id, callee_id), GREATEST(caller_id, callee_id))
+  WHERE ended_at IS NULL;
+
+-- A conversation's calls, newest first — the log drawn beside its messages.
+CREATE INDEX IF NOT EXISTS idx_dm_calls_pair ON dm_calls
+  (LEAST(caller_id, callee_id), GREATEST(caller_id, callee_id), started_at DESC);
+
+-- A member's calls still going, from either side.
+CREATE INDEX IF NOT EXISTS idx_dm_calls_open_caller ON dm_calls (caller_id)
+  WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_dm_calls_open_callee ON dm_calls (callee_id)
+  WHERE ended_at IS NULL;
+
+-- The spam cap counts one caller's unanswered calls to one person.
+CREATE INDEX IF NOT EXISTS idx_dm_calls_caller ON dm_calls
+  (caller_id, callee_id, started_at);
+
+COMMENT ON TABLE dm_calls IS
+  'Calls between two members: who, when, answered, ended and how. The media '
+  'key is derived from the pair''s DM key and is never here. Written by '
+  'start_dm_call / answer_dm_call / end_dm_call; closed by the sweep when '
+  'nobody is left to say so.';
 
 -- ============================================================
 -- Channel keys and read cursors

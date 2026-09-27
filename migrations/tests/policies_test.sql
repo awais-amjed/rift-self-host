@@ -7067,6 +7067,444 @@ END $$;
 RESET ROLE;
 
 -- ============================================================
+-- 30b. DM calls
+-- ============================================================
+-- Section 30's people, where it left them: amy has open conversations with
+-- ben and cal and none with dee; eve talks to ben and cal; the admin to amy,
+-- cal and dee. A call follows those, and nothing else.
+--
+-- `ring_devices` is a recorder again for the length of this section, as in
+-- 26, so which transitions push the callee can be read off directly.
+
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+
+CREATE TEMP TABLE real_ring (def TEXT);
+INSERT INTO real_ring
+SELECT pg_get_functiondef('ring_devices(uuid, uuid[])'::regprocedure);
+
+CREATE OR REPLACE FUNCTION ring_devices(p_server_id UUID, p_user_ids UUID[])
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $recorder$
+BEGIN
+  INSERT INTO rung VALUES (p_server_id, COALESCE(p_user_ids, '{}'::uuid[]));
+END $recorder$;
+
+INSERT INTO push_config (server_id, endpoint, secret, relay_id)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', 'http://relay.invalid/push',
+        'push-secret', gen_random_uuid())
+ON CONFLICT (server_id) DO NOTHING;
+DELETE FROM rung;
+
+-- Somewhere for a test to keep the call it is talking about, readable by the
+-- member it is pretending to be.
+CREATE TEMP TABLE the_call (id UUID);
+CREATE TEMP TABLE stale_ring (id UUID);
+GRANT ALL ON the_call, stale_ring TO authenticated;
+
+-- ---------- who may be called ----------
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000304');
+    RAISE EXCEPTION 'FAIL: amy called somebody she has never talked to';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_needs_conversation' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000301');
+    RAISE EXCEPTION 'FAIL: amy called herself';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'user_not_found' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM 1 FROM dm_calls;
+    RAISE EXCEPTION 'FAIL: a member read the calls table directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM claim_dm_call_room(gen_random_uuid(), '11111111-aaaa-4aaa-8aaa-000000000301');
+    RAISE EXCEPTION 'FAIL: a member asked the token function''s question';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a call needs an open conversation, and the table and room are out of reach';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+INSERT INTO member_blocks (blocker_id, blocked_id) VALUES ('11111111-aaaa-4aaa-8aaa-000000000302', '11111111-aaaa-4aaa-8aaa-000000000301');
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+    RAISE EXCEPTION 'FAIL: amy rang somebody who blocked her';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_not_accepted' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a block stops calls, in the words a setting would use';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+DELETE FROM member_blocks WHERE blocker_id = '11111111-aaaa-4aaa-8aaa-000000000302';
+
+RESET ROLE;
+UPDATE users SET timed_out_until = now() + interval '1 hour' WHERE id = '11111111-aaaa-4aaa-8aaa-000000000305';
+UPDATE roles SET permissions = permissions & ~app.perm('CONNECT')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000305');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+    RAISE EXCEPTION 'FAIL: a timed-out member rang somebody';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'timed_out' THEN RAISE; END IF;
+  END;
+END $$;
+
+RESET ROLE;
+UPDATE users SET timed_out_until = NULL WHERE id = '11111111-aaaa-4aaa-8aaa-000000000305';
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000305');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+    RAISE EXCEPTION 'FAIL: a member who may not connect rang somebody';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_connect' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  nobody timed out, or kept out of voice, starts a call';
+END $$;
+
+RESET ROLE;
+UPDATE roles SET permissions = permissions | app.perm('CONNECT')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone;
+
+-- ---------- a ring, and an answer ----------
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+  IF v->>'caller_id' <> '11111111-aaaa-4aaa-8aaa-000000000301' OR v->>'peer_id' <> '11111111-aaaa-4aaa-8aaa-000000000302'
+     OR v->>'answered_at' IS NOT NULL OR v->>'ended_at' IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: the new call reads %', v;
+  END IF;
+  INSERT INTO the_call VALUES ((v->>'id')::UUID);
+  IF (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302')->>'id')::UUID <> (SELECT id FROM the_call) THEN
+    RAISE EXCEPTION 'FAIL: ringing again opened a second call';
+  END IF;
+  RAISE NOTICE 'ok  a call rings once, however often it is pressed';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+
+DO $$
+BEGIN
+  IF jsonb_array_length(my_dm_calls(ARRAY[(SELECT id FROM the_call)])) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: somebody else can see the call';
+  END IF;
+  BEGIN
+    PERFORM answer_dm_call((SELECT id FROM the_call));
+    RAISE EXCEPTION 'FAIL: somebody else answered the call';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_not_found' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM end_dm_call((SELECT id FROM the_call));
+    RAISE EXCEPTION 'FAIL: somebody else hung up the call';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_not_found' THEN RAISE; END IF;
+  END;
+  IF dm_call_alive((SELECT id FROM the_call)) THEN
+    RAISE EXCEPTION 'FAIL: somebody else kept the call alive';
+  END IF;
+  RAISE NOTICE 'ok  a call is its two people''s, and nobody else''s to see or touch';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := my_dm_calls();
+  IF jsonb_array_length(v) <> 1 OR v->0->>'peer_id' <> '11111111-aaaa-4aaa-8aaa-000000000301'
+     OR v->0->>'peer_chat_public_key' <> 'chat-r_amy' THEN
+    RAISE EXCEPTION 'FAIL: ben''s ringing call reads %', v;
+  END IF;
+  -- Calling back is picking up.
+  v := start_dm_call('11111111-aaaa-4aaa-8aaa-000000000301');
+  IF (v->>'id')::UUID <> (SELECT id FROM the_call) OR v->>'answered_at' IS NULL THEN
+    RAISE EXCEPTION 'FAIL: calling back did not answer: %', v;
+  END IF;
+  BEGIN
+    PERFORM answer_dm_call((SELECT id FROM the_call));
+    RAISE EXCEPTION 'FAIL: a call was answered twice';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_not_ringing' THEN RAISE; END IF;
+  END;
+  IF NOT dm_call_alive((SELECT id FROM the_call)) THEN
+    RAISE EXCEPTION 'FAIL: the answered call is not alive';
+  END IF;
+  RAISE NOTICE 'ok  calling back answers, and a second answer learns it is taken';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := end_dm_call((SELECT id FROM the_call));
+  IF v->>'outcome' <> 'completed' OR v->>'ended_at' IS NULL THEN
+    RAISE EXCEPTION 'FAIL: hanging up an answered call reads %', v;
+  END IF;
+  IF dm_call_alive((SELECT id FROM the_call)) THEN
+    RAISE EXCEPTION 'FAIL: an ended call is still alive';
+  END IF;
+  v := dm_call_log('11111111-aaaa-4aaa-8aaa-000000000302', now() - interval '1 hour');
+  IF jsonb_array_length(v) <> 1 OR v->0->>'outcome' <> 'completed' THEN
+    RAISE EXCEPTION 'FAIL: the conversation''s log reads %', v;
+  END IF;
+  IF jsonb_array_length(my_dm_calls()) <> 0
+     OR my_dm_calls(ARRAY[(SELECT id FROM the_call)])->0->>'outcome' <> 'completed' THEN
+    RAISE EXCEPTION 'FAIL: an ended call is still listed as going, or cannot be asked after';
+  END IF;
+  RAISE NOTICE 'ok  hanging up completes it, into the log and out of the calls going';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+BEGIN
+  IF end_dm_call((SELECT id FROM the_call))->>'outcome' <> 'completed' THEN
+    RAISE EXCEPTION 'FAIL: the second hang-up rewrote the call';
+  END IF;
+  RAISE NOTICE 'ok  both ends hanging up is one hang-up';
+END $$;
+
+-- ---------- declined, cancelled, missed ----------
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+TRUNCATE the_call;
+INSERT INTO the_call SELECT (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302')->>'id')::UUID;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+BEGIN
+  IF end_dm_call((SELECT id FROM the_call))->>'outcome' <> 'declined' THEN
+    RAISE EXCEPTION 'FAIL: the callee hanging up a ring is not a decline';
+  END IF;
+  RAISE NOTICE 'ok  the callee refusing a ring declines it';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  IF end_dm_call((start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302')->>'id')::UUID)->>'outcome' <> 'cancelled' THEN
+    RAISE EXCEPTION 'FAIL: a ring given up at once is not cancelled';
+  END IF;
+END $$;
+
+TRUNCATE the_call;
+INSERT INTO the_call SELECT (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302')->>'id')::UUID;
+RESET ROLE;
+UPDATE dm_calls SET started_at = now() - interval '20 seconds'
+ WHERE id = (SELECT id FROM the_call);
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  IF end_dm_call((SELECT id FROM the_call))->>'outcome' <> 'missed' THEN
+    RAISE EXCEPTION 'FAIL: a ring given up after it had a chance is not missed';
+  END IF;
+  RAISE NOTICE 'ok  a caller giving up is cancelled at once and missed after a real ring';
+END $$;
+
+-- ---------- five unanswered, then no more ----------
+-- amy has rung ben three times without an answer: declined, cancelled,
+-- missed. The one he answered does not count.
+
+DO $$
+BEGIN
+  PERFORM end_dm_call((start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302')->>'id')::UUID);
+  PERFORM end_dm_call((start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302')->>'id')::UUID);
+  BEGIN
+    PERFORM start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+    RAISE EXCEPTION 'FAIL: a sixth unanswered call in the hour rang';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_rate_limited' THEN RAISE; END IF;
+  END;
+  -- Somebody else is still reachable.
+  PERFORM end_dm_call((start_dm_call('11111111-aaaa-4aaa-8aaa-000000000303')->>'id')::UUID);
+  RAISE NOTICE 'ok  five unanswered calls to one person an hour, and no more';
+END $$;
+
+-- ---------- what nobody hung up ----------
+
+RESET ROLE;
+TRUNCATE the_call;
+WITH ring AS (
+  INSERT INTO dm_calls (caller_id, callee_id, started_at, alive_at)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000305', '11111111-aaaa-4aaa-8aaa-000000000302',
+          now() - interval '1 minute', now() - interval '1 minute')
+  RETURNING id)
+INSERT INTO stale_ring SELECT id FROM ring;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+BEGIN
+  IF jsonb_array_length(my_dm_calls()) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a ring past its window is still offered';
+  END IF;
+  BEGIN
+    PERFORM answer_dm_call((SELECT id FROM stale_ring));
+    RAISE EXCEPTION 'FAIL: a ring past its window was answered';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_ended' THEN RAISE; END IF;
+  END;
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000305');
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := start_dm_call('11111111-aaaa-4aaa-8aaa-000000000302');
+  IF (v->>'id')::UUID = (SELECT id FROM stale_ring) THEN
+    RAISE EXCEPTION 'FAIL: a stale ring stood in for a new call';
+  END IF;
+  INSERT INTO the_call VALUES ((v->>'id')::UUID);
+  RAISE NOTICE 'ok  a ring past its window cannot be answered, and a new call replaces it';
+END $$;
+
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF (SELECT outcome FROM dm_calls WHERE id = (SELECT id FROM stale_ring)) <> 'missed' THEN
+    RAISE EXCEPTION 'FAIL: the stale ring was not closed as missed';
+  END IF;
+  UPDATE dm_calls SET answered_at = now() - interval '10 minutes',
+                      alive_at    = now() - interval '5 minutes'
+   WHERE id = (SELECT id FROM the_call);
+  PERFORM app.close_stale_dm_calls();
+  IF (SELECT outcome FROM dm_calls WHERE id = (SELECT id FROM the_call)) <> 'completed'
+     OR (SELECT ended_at FROM dm_calls WHERE id = (SELECT id FROM the_call))
+        > now() - interval '4 minutes' THEN
+    RAISE EXCEPTION 'FAIL: the sweep did not end a silent call where it went quiet';
+  END IF;
+  RAISE NOTICE 'ok  the sweep ends a call gone silent, at the moment it went silent';
+END $$;
+
+-- ---------- the room ----------
+
+DO $$
+DECLARE v_call UUID;
+BEGIN
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', '11111111-aaaa-4aaa-8aaa-000000000001', 'role', 'authenticated')::TEXT, true);
+  v_call := (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000303')->>'id')::UUID;
+  PERFORM set_config('request.jwt.claims', '', true);
+
+  IF (claim_dm_call_room(v_call, '11111111-aaaa-4aaa-8aaa-000000000001')->>'allowed')::BOOLEAN IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: the caller cannot open the room of their own call';
+  END IF;
+  IF (claim_dm_call_room(v_call, '11111111-aaaa-4aaa-8aaa-000000000303')->>'allowed')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: the callee had the room before answering';
+  END IF;
+  IF (claim_dm_call_room(v_call, '11111111-aaaa-4aaa-8aaa-000000000301')->>'allowed')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: a stranger had the room';
+  END IF;
+  UPDATE dm_calls SET answered_at = now() WHERE id = v_call;
+  IF (claim_dm_call_room(v_call, '11111111-aaaa-4aaa-8aaa-000000000303')->>'allowed')::BOOLEAN IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: the callee cannot join after answering';
+  END IF;
+  UPDATE dm_calls SET ended_at = now(), outcome = 'completed' WHERE id = v_call;
+  RAISE NOTICE 'ok  the room is the caller''s from the ring, the callee''s from the answer';
+END $$;
+
+-- ---------- a ban hangs up ----------
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+
+DO $$
+DECLARE v_call UUID;
+BEGIN
+  v_call := (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000301')->>'id')::UUID;
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000301', NULL, NULL, true);
+  IF my_dm_calls(ARRAY[v_call])->0->>'outcome' <> 'cancelled' THEN
+    RAISE EXCEPTION 'FAIL: a ban left the banned member''s call ringing';
+  END IF;
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000301', NULL, NULL, false);
+  RAISE NOTICE 'ok  a ban hangs up every call the member is in';
+END $$;
+
+-- ---------- which changes push the callee ----------
+
+RESET ROLE;
+DELETE FROM rung;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+TRUNCATE the_call;
+INSERT INTO the_call SELECT (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000303')->>'id')::UUID;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+DO $$
+BEGIN
+  PERFORM answer_dm_call((SELECT id FROM the_call));
+  PERFORM dm_call_alive((SELECT id FROM the_call));
+  PERFORM end_dm_call((SELECT id FROM the_call));
+END $$;
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM rung WHERE user_ids = ARRAY['11111111-aaaa-4aaa-8aaa-000000000303'::UUID]) <> 2
+     OR (SELECT count(*) FROM rung) <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a ring and its answer should push the callee twice, got %',
+      (SELECT jsonb_agg(user_ids) FROM rung);
+  END IF;
+  RAISE NOTICE 'ok  the ring and the end of the ring push the callee; the heartbeat and hang-up do not';
+END $$;
+
+-- Muted, a person does not ring.
+INSERT INTO notification_prefs (user_id, scope, scope_id, level)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000303', 'dm', '11111111-aaaa-4aaa-8aaa-000000000001', 'none');
+DELETE FROM rung;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+DO $$ BEGIN
+  PERFORM end_dm_call((start_dm_call('11111111-aaaa-4aaa-8aaa-000000000303')->>'id')::UUID);
+END $$;
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM rung) THEN
+    RAISE EXCEPTION 'FAIL: a muted conversation rang the phone';
+  END IF;
+  RAISE NOTICE 'ok  a conversation muted to none does not ring';
+END $$;
+
+DELETE FROM notification_prefs WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000303';
+DO $$ BEGIN EXECUTE (SELECT def FROM real_ring); END $$;
+DELETE FROM push_config WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

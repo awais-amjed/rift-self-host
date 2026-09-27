@@ -30,6 +30,11 @@ export const CHANNEL_NOT_FOUND     = "channel_not_found";
 export const CHANNEL_NAME_DUPLICATE = "channel_name_duplicate";
 export const CHANNEL_TYPE_INVALID  = "channel_type_invalid";
 
+// ── DM calls ──────────────────────────────────────────────────────────────────
+// Asked for a room of a call that is over, is not yours, or is not yours to
+// join yet. One code for all three, so a call id confirms nothing.
+export const CALL_NOT_FOUND = "call_not_found";
+
 // ── Key rotation ──────────────────────────────────────────────────────────────
 // A bot asked for a voice token before any member sealed it a media key.
 // Retryable, and it clears as soon as a member is in the channel.

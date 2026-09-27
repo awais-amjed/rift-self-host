@@ -2,8 +2,8 @@
 -- Rift self-hosted server — 007: scheduled work
 -- ============================================================
 -- Everything that runs on a clock rather than in response to a request:
--- retention sweeps, expiring invites and summons, and clearing out
--- attachments whose message is gone.
+-- retention sweeps, expiring invites and summons, closing DM calls nobody
+-- hung up, and clearing out attachments whose message is gone.
 -- ============================================================
 
 -- ============================================================
@@ -176,7 +176,7 @@ CREATE OR REPLACE FUNCTION app.enforce_retention(p_limit INTEGER DEFAULT 500000)
   RETURNS VOID
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  -- Four statements, each guarded by "has anybody asked for this at all".
+  -- Five statements, each guarded by "has anybody asked for this at all".
   --
   -- Without the guards every one of them still has to join `messages` to
   -- `channels` to `servers` before it can discover that the answer is no, so
@@ -200,7 +200,7 @@ BEGIN
   -- that an operator who switches a cap on sees it converging, and low
   -- enough that one night's work is a size and not a number of hours.
   --
-  -- Oldest first, in all four, so that what a member sees meanwhile is a
+  -- Oldest first, in all five, so that what a member sees meanwhile is a
   -- history that ends earlier rather than one with holes punched through it.
   --
   -- What this does **not** bound is that finding: the two by-count statements
@@ -241,6 +241,25 @@ BEGIN
        AND d.created_at < now() - make_interval(
              days => COALESCE(s.dm_retention_days, s.message_retention_days))
      ORDER BY d.id
+     LIMIT p_limit);
+  END IF;
+
+  -- ---------- DM calls, by age ----------
+  -- A call's row is the conversation's record of it, so it goes when the
+  -- conversation's messages would: the same number, read the same way. There
+  -- is no count cap to mirror — a call is one row however long it ran.
+  IF EXISTS (SELECT 1 FROM servers s
+              WHERE COALESCE(s.dm_retention_days, s.message_retention_days, 0) > 0) THEN
+  DELETE FROM dm_calls WHERE id IN (
+    SELECT c.id
+      FROM dm_calls c
+      JOIN users   u ON u.id = c.caller_id
+      JOIN servers s ON s.id = u.server_id
+     WHERE COALESCE(s.dm_retention_days, s.message_retention_days) > 0
+       AND c.ended_at IS NOT NULL
+       AND c.started_at < now() - make_interval(
+             days => COALESCE(s.dm_retention_days, s.message_retention_days))
+     ORDER BY c.started_at
      LIMIT p_limit);
   END IF;
 
@@ -339,4 +358,23 @@ SELECT cron.schedule(
   '41 4 * * *',
   $$DELETE FROM reports
      WHERE outcome IS NOT NULL AND resolved_at < now() - interval '90 days'$$
+);
+
+-- ============================================================
+-- Calls nobody hung up
+-- ============================================================
+-- A ring past its window is missed, and an answered call whose clients have
+-- stopped saying they are there is over. Every minute, because this is what
+-- decides when "Call, 12 min" stops counting after both ends crashed, and a
+-- call that looks live for ten minutes after it ended would stop either of
+-- them ringing the other again. `start_dm_call` closes a pair's own stale
+-- call before it looks, so nobody waits on this to call back.
+
+SELECT cron.unschedule('rift-dm-call-sweep')
+  WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'rift-dm-call-sweep');
+
+SELECT cron.schedule(
+  'rift-dm-call-sweep',
+  '* * * * *',
+  $$SELECT app.close_stale_dm_calls()$$
 );

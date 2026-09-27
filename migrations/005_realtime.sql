@@ -89,6 +89,20 @@ BEGIN
   RETURN NULL;
 END $$;
 
+-- A call changing state rings both people's own topics: the callee's devices
+-- start or stop ringing, the caller's learn it was answered or refused, and
+-- each person's *other* devices learn a call they are not on has moved. Empty,
+-- like every doorbell here — `user:` topics are writable by co-members for DM
+-- typing, so a payload could be forged, and the client asks `my_dm_calls`.
+-- The heartbeat is not a change anybody needs to hear about.
+CREATE OR REPLACE FUNCTION app.announce_dm_call() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  PERFORM app.announce_to_member(NEW.caller_id, 'dm_calls');
+  PERFORM app.announce_to_member(NEW.callee_id, 'dm_calls');
+  RETURN NULL;
+END $$;
+
 -- Either party can react, so both hear it; the reactor's own devices refresh
 -- one message for nothing, which is the cheapest way to keep them in step.
 CREATE OR REPLACE FUNCTION app.announce_dm_reaction() RETURNS TRIGGER
@@ -608,6 +622,19 @@ DROP TRIGGER IF EXISTS dm_messages_announce ON dm_messages;
 CREATE TRIGGER dm_messages_announce
   AFTER INSERT OR UPDATE OR DELETE ON dm_messages
   FOR EACH ROW EXECUTE FUNCTION app.announce_dm();
+
+DROP TRIGGER IF EXISTS dm_calls_announce ON dm_calls;
+CREATE TRIGGER dm_calls_announce
+  AFTER INSERT ON dm_calls
+  FOR EACH ROW EXECUTE FUNCTION app.announce_dm_call();
+
+DROP TRIGGER IF EXISTS dm_calls_announce_change ON dm_calls;
+CREATE TRIGGER dm_calls_announce_change
+  AFTER UPDATE OF answered_at, ended_at ON dm_calls
+  FOR EACH ROW
+  WHEN (OLD.answered_at IS DISTINCT FROM NEW.answered_at
+        OR OLD.ended_at IS DISTINCT FROM NEW.ended_at)
+  EXECUTE FUNCTION app.announce_dm_call();
 
 DROP TRIGGER IF EXISTS dm_message_reactions_announce ON dm_message_reactions;
 CREATE TRIGGER dm_message_reactions_announce
