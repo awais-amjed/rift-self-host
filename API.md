@@ -6,8 +6,8 @@ uses is a deliberate line rather than an accident of history:
 - **Direct PostgREST**, under the policies in `migrations/008_security.sql`.
   This is almost everything: reading and sending messages, editing your own, member lists,
   channels, invites, reactions, read cursors.
-- **Edge functions**, in [`edge_functions/supabase/functions/`](edge_functions/supabase/functions/),
-  for the twelve things that genuinely can't be a table call.
+- **Edge functions**, in [`supabase/functions/`](supabase/functions/), for the things that
+  genuinely can't be a table call.
 
 The client mirror is `lib/data/repositories/server_repository.dart` (+ `server_db.dart`); keep
 them in sync.

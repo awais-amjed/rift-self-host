@@ -10,5 +10,4 @@ Upstream's set also includes `logs.sql` and `pooler.sql`. Both are omitted: this
 runs neither the analytics service nor Supavisor.
 
 Refresh them by hand against a matching `supabase/postgres` tag if the image in
-`docker-compose.yml` is ever bumped — they are not covered by `scripts/sync.sh`, which
-only tracks the Rift app repo.
+`docker-compose.yml` is ever bumped — nothing refreshes them automatically.
