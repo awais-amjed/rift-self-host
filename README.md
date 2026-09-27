@@ -229,7 +229,7 @@ The console's own checks:
 
 ```bash
 cd console
-deno task test     # 145 cases, no Docker or Postgres needed
+deno task test     # no Docker or Postgres needed
 deno task check    # type check, lint, fmt --check
 ```
 
@@ -275,6 +275,13 @@ private channel stayed invisible to the member who was not in it; and a bot
 joined through the SDK, was summoned into that private channel, and opened the
 media key a member had sealed for it.
 
+**Audio, both ways.** Two desktop clients in an end-to-end encrypted call on a
+stack built from this repo, each playing into its own virtual audio device and
+recording the other's: the sound came out the other side in both directions,
+and LiveKit reported the tracks as encrypted. A phone on the Android emulator
+heard the desktop the same way. (These were one-to-one DM calls; a channel call
+runs through the same media path.)
+
 **An upgrade, applied.** A stack built at one release was brought to the next
 by rebuilding the console image and restarting it: it installed the new
 endpoints, refused to touch the schema because a migration had been edited
@@ -296,19 +303,19 @@ Not yet proved, and worth doing before anyone else runs one:
 
 - **A real certificate.** The runs used a domain that does not exist, so Caddy
   never completed an ACME challenge; clients reached Kong directly over http.
-- **Audio actually arriving.** Two clients hold an encrypted call and see each
-  other, but nobody has spoken into one and heard it come out the other side.
 - **The `studio` profile**, which has not been started once.
 - **Backups stay on the same disk.** The console makes them daily and keeps the newest few in `backups/`; copying them off the machine is up to the operator.
 
 ## Where this sits
 
-Rift is five repositories, meant to be cloned as siblings.
+Rift is seven repositories, meant to be cloned as siblings.
 
 | Repo | Holds |
 |---|---|
 | `rift` | the client: Flutter app, Rust crate, `rift_crypto` |
 | `rift-self-host` | a server's schema, endpoints and console — anyone runs one |
-| `rift-central` | accounts, the public directory, the push relay — we run it |
+| `rift-central` | accounts, the server and bot directories, the push relay — we run it |
 | `rift-bot-sdk` | the TypeScript bot SDK |
+| `rift-admin` | the directory moderation dashboard — its own site and accounts |
+| `rift-models` | the on-device image classifier and the tooling that builds it |
 | `rift-website` | joinrift.app, and the self-hosting docs |
