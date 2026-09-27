@@ -322,3 +322,21 @@ SELECT cron.schedule(
   '0 * * * *',
   $$SELECT app.expire_bot_voice_summons()$$
 );
+
+-- ============================================================
+-- Closed reports go after ninety days
+-- ============================================================
+-- An open report stays until somebody answers it, however long that takes.
+-- A closed one is a record of what was done, and ninety days is long enough
+-- to see a pattern in who keeps being reported and short enough that a
+-- server is not keeping everybody's complaints about everybody forever.
+
+SELECT cron.unschedule('rift-report-retention')
+  WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'rift-report-retention');
+
+SELECT cron.schedule(
+  'rift-report-retention',
+  '41 4 * * *',
+  $$DELETE FROM reports
+     WHERE outcome IS NOT NULL AND resolved_at < now() - interval '90 days'$$
+);

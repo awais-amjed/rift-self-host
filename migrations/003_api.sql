@@ -32,10 +32,12 @@ BEGIN
   -- Two permissions, because these are not the same act. Muting and deafening
   -- are what a channel manager is *for* — they already move and disconnect
   -- people — and gating them on admin meant the client offered buttons that
-  -- always came back not_authorized. Banning stays with admins: it ends
-  -- somebody's membership, which is the same weight as granting a role.
+  -- always came back not_authorized. Banning is its own bit, `BAN_MEMBERS`:
+  -- it ends somebody's membership, and a server that wants its moderators
+  -- to act on a report without an admin awake gives them that and nothing
+  -- more. Admins hold it by implication.
   IF p_banned IS NOT NULL THEN
-    IF NOT app.is_admin() THEN
+    IF NOT app.has_perm('BAN_MEMBERS') THEN
       RAISE EXCEPTION 'not_authorized';
     END IF;
   ELSIF NOT app.can_manage_channels() THEN
@@ -55,6 +57,13 @@ BEGIN
   IF v_target.is_server_admin THEN
     RAISE EXCEPTION 'cannot_moderate_admin';
   END IF;
+  -- Nor is somebody who could ban you back. Without this, two moderators
+  -- holding the bit settle a disagreement by banning each other, and the
+  -- first to click wins a server.
+  IF p_banned IS NOT NULL
+     AND (app.permissions_of(v_target.id) & app.perm('BAN_MEMBERS')) <> 0 THEN
+    RAISE EXCEPTION 'cannot_ban_peer';
+  END IF;
 
   UPDATE users SET
     is_muted    = COALESCE(p_muted,    is_muted),
@@ -63,6 +72,204 @@ BEGIN
    WHERE id = p_target;
 
   RETURN jsonb_build_object('reason', 'ok');
+END; $$;
+
+-- ============================================================
+-- Time-outs
+-- ============================================================
+-- Text's mute: no messages, DMs or reactions until the time is up. Answers to
+-- `MUTE_MEMBERS`, the bit that already says "this person may be made quiet",
+-- and follows the same rules as a ban about who it may reach — not yourself,
+-- not an admin, not somebody who could do it back to you.
+--
+-- Minutes rather than a timestamp, so the clock that matters is this one and
+-- not whatever the moderator's device thinks the time is. 0 lifts it. The
+-- ceiling is 28 days: anything longer is a ban somebody did not want to say.
+
+CREATE OR REPLACE FUNCTION time_out_member(p_target UUID, p_minutes INTEGER)
+  RETURNS TIMESTAMPTZ
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_target users%ROWTYPE;
+  v_until  TIMESTAMPTZ;
+BEGIN
+  IF NOT app.has_perm('MUTE_MEMBERS') THEN
+    RAISE EXCEPTION 'not_authorized';
+  END IF;
+  IF p_minutes IS NULL OR p_minutes < 0 OR p_minutes > 28 * 24 * 60 THEN
+    RAISE EXCEPTION 'invalid_duration';
+  END IF;
+
+  SELECT * INTO v_target FROM users
+   WHERE id = p_target AND server_id = app.server_id();
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'user_not_found';
+  END IF;
+  IF v_target.id = auth.uid() THEN
+    RAISE EXCEPTION 'cannot_moderate_self';
+  END IF;
+  IF v_target.is_server_admin THEN
+    RAISE EXCEPTION 'cannot_moderate_admin';
+  END IF;
+  IF (app.permissions_of(v_target.id) & app.perm('MUTE_MEMBERS')) <> 0 THEN
+    RAISE EXCEPTION 'cannot_moderate_peer';
+  END IF;
+
+  v_until := CASE WHEN p_minutes = 0 THEN NULL
+                  ELSE now() + make_interval(mins => p_minutes) END;
+  UPDATE users SET timed_out_until = v_until WHERE id = p_target;
+  RETURN v_until;
+END; $$;
+
+-- ============================================================
+-- Reports
+-- ============================================================
+-- Two ways in and one way out. `report_message` and `report_member` are any
+-- member's; `resolve_report` is a reviewer's. Reading the list is not a
+-- function at all — `reports_select` in 008 lets a reviewer select their
+-- server's rows, which is the whole of what the page needs.
+--
+-- Twenty open reports per reporter. It is a lot for somebody reporting in good
+-- faith and a small number for somebody trying to bury the moderators, and it
+-- frees up as the moderators work through them.
+
+CREATE OR REPLACE FUNCTION app.report_room(p_reporter UUID) RETURNS VOID
+  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF (SELECT count(*) FROM reports r
+       WHERE r.reporter_id = p_reporter AND r.outcome IS NULL) >= 20 THEN
+    RAISE EXCEPTION 'too_many_reports';
+  END IF;
+END; $$;
+
+-- The envelope is copied here, from the row, so the reporter supplies nothing
+-- but which message and why. Anything they could see they may report, their
+-- own messages and the server's notices apart.
+CREATE OR REPLACE FUNCTION report_message(
+  p_message BIGINT,
+  p_reason  report_reason,
+  p_note    TEXT DEFAULT NULL
+) RETURNS BIGINT
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID := app.server_id();
+  v_msg    messages%ROWTYPE;
+  v_note   TEXT := NULLIF(btrim(COALESCE(p_note, '')), '');
+  v_id     BIGINT;
+BEGIN
+  IF v_server IS NULL THEN RAISE EXCEPTION 'not_authorized'; END IF;
+  IF p_reason IS NULL THEN RAISE EXCEPTION 'reason_required'; END IF;
+  IF length(v_note) > 1000 THEN RAISE EXCEPTION 'note_too_long'; END IF;
+  IF NOT app.can_see_message(p_message) THEN
+    RAISE EXCEPTION 'message_not_found';
+  END IF;
+
+  SELECT * INTO v_msg FROM messages WHERE id = p_message;
+  IF v_msg.is_system THEN RAISE EXCEPTION 'message_not_found'; END IF;
+  IF v_msg.sender_id = auth.uid() THEN RAISE EXCEPTION 'cannot_report_self'; END IF;
+  PERFORM app.report_room(auth.uid());
+
+  INSERT INTO reports (server_id, reporter_id, target_id, reason, note,
+                       message_id, channel_id, message_created_at, origin_name,
+                       ciphertext, nonce, signature, key_version)
+  VALUES (v_server, auth.uid(), v_msg.sender_id, p_reason, v_note,
+          v_msg.id, v_msg.channel_id, v_msg.created_at, v_msg.origin_name,
+          v_msg.ciphertext, v_msg.nonce, v_msg.signature, v_msg.key_version)
+  ON CONFLICT (reporter_id, message_id) WHERE message_id IS NOT NULL
+  DO NOTHING
+  RETURNING id INTO v_id;
+
+  IF v_id IS NULL THEN RAISE EXCEPTION 'already_reported'; END IF;
+  RETURN v_id;
+END; $$;
+
+-- A person rather than a message: what somebody reports from a profile, or
+-- from a DM, whose words no moderator could open (the key belongs to the
+-- two of them). The note carries whatever they want to say about it.
+CREATE OR REPLACE FUNCTION report_member(
+  p_target UUID,
+  p_reason report_reason,
+  p_note   TEXT DEFAULT NULL
+) RETURNS BIGINT
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID := app.server_id();
+  v_note   TEXT := NULLIF(btrim(COALESCE(p_note, '')), '');
+  v_id     BIGINT;
+BEGIN
+  IF v_server IS NULL THEN RAISE EXCEPTION 'not_authorized'; END IF;
+  IF p_reason IS NULL THEN RAISE EXCEPTION 'reason_required'; END IF;
+  IF length(v_note) > 1000 THEN RAISE EXCEPTION 'note_too_long'; END IF;
+  IF p_target = auth.uid() THEN RAISE EXCEPTION 'cannot_report_self'; END IF;
+  IF NOT app.is_co_member(p_target) THEN RAISE EXCEPTION 'user_not_found'; END IF;
+  PERFORM app.report_room(auth.uid());
+
+  INSERT INTO reports (server_id, reporter_id, target_id, reason, note)
+  VALUES (v_server, auth.uid(), p_target, p_reason, v_note)
+  ON CONFLICT (reporter_id, target_id)
+     WHERE message_id IS NULL AND outcome IS NULL
+  DO NOTHING
+  RETURNING id INTO v_id;
+
+  IF v_id IS NULL THEN RAISE EXCEPTION 'already_reported'; END IF;
+  RETURN v_id;
+END; $$;
+
+-- Recording what was done. The action itself happens first, through the path
+-- it always takes — deleting a message is the client's (it holds the blob
+-- keys), a ban is `moderate_user`, a time-out is `time_out_member` — and this
+-- checks it did, so the log cannot say "banned" about somebody who is not.
+--
+-- One action answers every open report it settles: deleting a message closes
+-- each report about that message, and a ban closes each report about that
+-- person. Dismissing and timing out close only the one in hand, because the
+-- next report about the same person may be about something new.
+--
+-- Nobody closes a report about themselves, which is the same line
+-- `reports_select` draws around reading one.
+CREATE OR REPLACE FUNCTION resolve_report(
+  p_report  BIGINT,
+  p_outcome report_outcome
+) RETURNS INTEGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_report reports%ROWTYPE;
+  v_closed INTEGER;
+BEGIN
+  IF NOT app.has_perm('REVIEW_REPORTS') THEN RAISE EXCEPTION 'not_authorized'; END IF;
+  IF p_outcome IS NULL THEN RAISE EXCEPTION 'outcome_required'; END IF;
+
+  SELECT * INTO v_report FROM reports
+   WHERE id = p_report AND server_id = app.server_id()
+     AND target_id IS DISTINCT FROM auth.uid()
+   FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'report_not_found'; END IF;
+  IF v_report.outcome IS NOT NULL THEN RAISE EXCEPTION 'already_resolved'; END IF;
+
+  IF p_outcome = 'deleted' AND (v_report.message_id IS NULL
+       OR EXISTS (SELECT 1 FROM messages m WHERE m.id = v_report.message_id)) THEN
+    RAISE EXCEPTION 'outcome_not_done';
+  END IF;
+  IF p_outcome = 'timed_out' AND NOT EXISTS (
+       SELECT 1 FROM users u WHERE u.id = v_report.target_id
+          AND u.timed_out_until > now()) THEN
+    RAISE EXCEPTION 'outcome_not_done';
+  END IF;
+  IF p_outcome = 'banned' AND NOT EXISTS (
+       SELECT 1 FROM users u WHERE u.id = v_report.target_id AND u.is_banned) THEN
+    RAISE EXCEPTION 'outcome_not_done';
+  END IF;
+
+  UPDATE reports r
+     SET outcome = p_outcome, resolved_by = auth.uid(), resolved_at = now()
+   WHERE r.server_id = v_report.server_id
+     AND r.outcome IS NULL
+     AND r.target_id IS DISTINCT FROM auth.uid()
+     AND (r.id = p_report
+          OR (p_outcome = 'deleted' AND r.message_id = v_report.message_id)
+          OR (p_outcome = 'banned'  AND r.target_id  = v_report.target_id));
+  GET DIAGNOSTICS v_closed = ROW_COUNT;
+  RETURN v_closed;
 END; $$;
 
 -- Move a cursor forward. Never backward: two devices race on the same
@@ -1807,7 +2014,10 @@ BEGIN
          WHERE d.recipient_id = auth.uid()
            AND d.id > COALESCE(r.last_read_id, 0)
          GROUP BY d.sender_id
-      ) d), '{}'::jsonb),
+      ) d
+      -- A request is not mail until it is accepted. Asked per sender, after
+      -- the grouping, so it is one question per conversation, not per row.
+      WHERE NOT app.dm_is_request(d.sender_id, auth.uid())), '{}'::jsonb),
     -- Only what has been set: an absent key means "no opinion here, ask the
     -- next scope out".
     'prefs', jsonb_build_object(
@@ -1905,6 +2115,138 @@ $$;
 COMMENT ON FUNCTION dm_conversations(INTEGER, BIGINT) IS
   'The caller''s DM conversations, newest first, a page at a time. Read from '
   'dm_conversation_heads, so it costs a page rather than a history.';
+
+-- ============================================================
+-- Requests
+-- ============================================================
+-- A member set to `requests` receives a first message from somebody new as a
+-- request: it does not ring, it is not in their conversation list, and the
+-- sender may send nothing more until it is answered. `app.gate_dm` (004)
+-- decides that on the way in; these three are how each side sees it after.
+
+-- Where the caller stands with one other member:
+--
+--   none     nothing between you yet
+--   open     an ordinary conversation
+--   waiting  you asked and have not been answered
+--   asked    they asked you
+--   ignored  they asked you and you put it away
+--
+-- `waiting` covers the recipient having ignored it. That is the one fact this
+-- function exists to keep from the sender.
+CREATE OR REPLACE FUNCTION dm_link_state(p_peer UUID) RETURNS TEXT
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT CASE
+           WHEN l.status IS NULL          THEN 'none'
+           WHEN l.status = 'open'         THEN 'open'
+           WHEN l.opened_by = auth.uid()  THEN 'waiting'
+           WHEN l.status = 'requested'    THEN 'asked'
+           ELSE 'ignored'
+         END
+    FROM (SELECT 1) AS one
+    LEFT JOIN dm_links l
+      ON l.user_low  = LEAST(p_peer, auth.uid())
+     AND l.user_high = GREATEST(p_peer, auth.uid())
+   WHERE app.server_id() IS NOT NULL
+$$;
+
+-- The caller's waiting requests, newest first, each with the message that
+-- opened it — the same shape `dm_conversations` gives a row, so one parser
+-- reads both. Not the ignored ones, and not from anybody the caller has
+-- blocked or who has since been banned.
+CREATE OR REPLACE FUNCTION dm_requests() RETURNS JSONB
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  WITH mine AS (
+    SELECT l.opened_by AS peer, l.opened_at
+      FROM dm_links l
+     WHERE (l.user_low = auth.uid() OR l.user_high = auth.uid())
+       AND l.status = 'requested'
+       AND l.opened_by <> auth.uid()
+       AND app.server_id() IS NOT NULL
+  )
+  SELECT COALESCE(jsonb_agg(row ORDER BY opened_at DESC), '[]'::jsonb)
+    FROM (
+      SELECT m.opened_at, jsonb_build_object(
+               'peer_id',              u.id,
+               'peer_name',            u.display_name,
+               'peer_username',        u.username,
+               'peer_avatar_path',     u.avatar_path,
+               'peer_chat_public_key', u.chat_public_key,
+               'peer_public_key',      u.public_key,
+               'opened_at',            m.opened_at,
+               'last_message', (
+                 SELECT jsonb_build_object(
+                          'id',           d.id,
+                          'created_at',   d.created_at,
+                          'sender_id',    d.sender_id,
+                          'recipient_id', d.recipient_id,
+                          'ciphertext',   d.ciphertext,
+                          'nonce',        d.nonce,
+                          'signature',    d.signature,
+                          'key_version',  d.key_version,
+                          'edited_at',    d.edited_at)
+                   FROM dm_messages d
+                  WHERE d.sender_id = u.id AND d.recipient_id = auth.uid()
+                  ORDER BY d.id DESC
+                  LIMIT 1)) AS row
+        FROM mine m
+        JOIN users u ON u.id = m.peer
+       WHERE NOT u.is_banned
+         AND NOT EXISTS (SELECT 1 FROM member_blocks b
+                          WHERE b.blocker_id = auth.uid() AND b.blocked_id = u.id)
+       ORDER BY m.opened_at DESC
+       LIMIT 100
+    ) page
+$$;
+
+-- Accept or ignore. Accepting opens the conversation and puts it in the
+-- caller's list, where the request's message becomes ordinary mail. Ignoring
+-- tells nobody: the sender's side reads `waiting` either way.
+--
+-- An ignored request can still be accepted later, and replying to one — from
+-- the conversation, without pressing anything — accepts it too (004).
+CREATE OR REPLACE FUNCTION answer_dm_request(p_peer UUID, p_accept BOOLEAN)
+  RETURNS TEXT
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_me     UUID := auth.uid();
+  v_link   dm_links%ROWTYPE;
+  v_newest BIGINT;
+BEGIN
+  IF app.server_id() IS NULL THEN RAISE EXCEPTION 'not_authorized'; END IF;
+  IF p_accept IS NULL THEN RAISE EXCEPTION 'answer_required'; END IF;
+
+  SELECT * INTO v_link FROM dm_links l
+   WHERE l.user_low  = LEAST(p_peer, v_me)
+     AND l.user_high = GREATEST(p_peer, v_me)
+   FOR UPDATE;
+  IF NOT FOUND OR v_link.status = 'open' OR v_link.opened_by = v_me THEN
+    RAISE EXCEPTION 'no_request';
+  END IF;
+
+  UPDATE dm_links l
+     SET status = CASE WHEN p_accept THEN 'open'::dm_link_status
+                       ELSE 'ignored'::dm_link_status END,
+         answered_at = now()
+   WHERE l.user_low = v_link.user_low AND l.user_high = v_link.user_high;
+
+  IF p_accept THEN
+    SELECT max(d.id) INTO v_newest
+      FROM dm_messages d
+     WHERE LEAST(d.sender_id, d.recipient_id)    = v_link.user_low
+       AND GREATEST(d.sender_id, d.recipient_id) = v_link.user_high;
+    IF v_newest IS NOT NULL THEN
+      INSERT INTO dm_conversation_heads (user_id, peer_id, last_message_id)
+      VALUES (v_me, p_peer, v_newest)
+          ON CONFLICT (user_id, peer_id) DO UPDATE
+         SET last_message_id = GREATEST(dm_conversation_heads.last_message_id,
+                                        EXCLUDED.last_message_id);
+    END IF;
+  END IF;
+
+  PERFORM app.announce_to_member(v_me, 'dm_requests');
+  RETURN CASE WHEN p_accept THEN 'open' ELSE 'ignored' END;
+END; $$;
 
 -- ============================================================
 -- One question about a server
@@ -2404,6 +2746,8 @@ AS $$
         'is_banned',       me.is_banned,
         'is_bot',          me.is_bot,
         'manifest',        me.manifest,
+        'timed_out_until', me.timed_out_until,
+        'dm_policy',       me.dm_policy,
         'permissions', jsonb_build_object(
           'is_server_admin',    me.is_server_admin,
           'is_channel_manager', me.is_channel_manager,
@@ -2441,6 +2785,8 @@ AS $$
                   (SELECT srv.max_members            FROM srv),
                 'max_storage_bytes',
                   (SELECT srv.max_storage_bytes      FROM srv),
+                'dm_openings_per_hour',
+                  (SELECT srv.dm_openings_per_hour   FROM srv),
                 -- Not a limit but the thing limits are judged against, and
                 -- free here: one indexed read, in the call the client already
                 -- makes. It is what lets the composer say a file will not fit

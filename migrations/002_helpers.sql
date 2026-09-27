@@ -64,6 +64,27 @@ CREATE OR REPLACE FUNCTION app.can_see_dm(p_message BIGINT) RETURNS BOOLEAN
                     AND auth.uid() IN (d.sender_id, d.recipient_id))
 $$;
 
+-- Is this a request its recipient has not accepted? A message in a request
+-- is not mail yet: it does not ring, it does not badge, and it is not in the
+-- recipient's conversation list. `ignored` counts too — put away is not
+-- accepted.
+CREATE OR REPLACE FUNCTION app.dm_is_request(p_sender UUID, p_recipient UUID)
+  RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (SELECT 1 FROM dm_links l
+                  WHERE l.user_low  = LEAST(p_sender, p_recipient)
+                    AND l.user_high = GREATEST(p_sender, p_recipient)
+                    AND l.opened_by = p_sender
+                    AND l.status <> 'open')
+$$;
+
+-- Am I timed out? Checked by every policy that lets a member say something.
+CREATE OR REPLACE FUNCTION app.timed_out() RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE((SELECT u.timed_out_until > now() FROM users u
+                    WHERE u.id = auth.uid()), false)
+$$;
+
 -- The level actually in force, chain and defaults folded in. SECURITY DEFINER
 -- because the ring triggers ask it about *other* people, whose rows no session
 -- may read.
@@ -510,6 +531,11 @@ $$;
 --
 -- Neither bit reaches the *listener*: turning a soundboard down is a setting
 -- on the device hearing it and has nothing to ask a server about.
+--
+-- `REVIEW_REPORTS` is the last: reading what members have reported, and
+-- recording what was done about it. It goes to `Moderator` by default and
+-- is the only bit that reads another member's words about a third — which is
+-- why it is its own, and not folded into managing messages.
 
 CREATE OR REPLACE FUNCTION app.perm_bit(p_name TEXT) RETURNS BIGINT
   LANGUAGE sql IMMUTABLE AS $$
@@ -545,12 +571,13 @@ CREATE OR REPLACE FUNCTION app.perm_bit(p_name TEXT) RETURNS BIGINT
     WHEN 'USE_SOUNDBOARD'         THEN 1::BIGINT << 25  -- fire one in a call
     WHEN 'PIN_MESSAGES'           THEN 1::BIGINT << 26  -- pin and unpin
     WHEN 'CREATE_POLLS'           THEN 1::BIGINT << 27  -- post a poll
+    WHEN 'REVIEW_REPORTS'         THEN 1::BIGINT << 28  -- read and close reports
     ELSE NULL
   END
 $$;
 
 CREATE OR REPLACE FUNCTION app.perm_all() RETURNS BIGINT
-  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 28) - 1 $$;
+  LANGUAGE sql IMMUTABLE AS $$ SELECT (1::BIGINT << 29) - 1 $$;
 
 CREATE OR REPLACE FUNCTION app.bot_summoned_to(p_channel UUID, p_bot UUID)
   RETURNS BOOLEAN
@@ -1231,7 +1258,12 @@ CREATE OR REPLACE VIEW member_directory
          -- Last, and out of the grouping it belongs to, because that is the
          -- only place `CREATE OR REPLACE VIEW` will take a new column: this
          -- file is re-runnable and nothing in these migrations drops.
-         u.created_at AS joined_at
+         u.created_at AS joined_at,
+         -- Appended for the same reason. Whether a first DM will arrive, wait
+         -- as a request, or be refused, which the sender's composer says
+         -- before anybody types; and a time-out, which a moderator is shown.
+         u.dm_policy,
+         u.timed_out_until
     FROM users u;
 
 CREATE OR REPLACE VIEW member_role_list

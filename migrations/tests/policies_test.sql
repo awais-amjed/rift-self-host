@@ -6493,6 +6493,580 @@ END $$;
 RESET ROLE;
 
 -- ============================================================
+-- 30. Reports, time-outs, blocks and who may start a DM
+-- ============================================================
+-- Six new people on Alpha, so nothing earlier in the suite decides what they
+-- may do:
+--   r_mod   Moderator            r_amy, r_ben, r_cal, r_dee, r_eve   plain
+-- `rift_test.as` is a shorthand for "the next statements run as this member":
+-- it sets the claim, and the caller has already done SET LOCAL ROLE.
+--
+-- The claim outlives RESET ROLE, and `attest_message` stamps whoever it names
+-- as the sender of anything inserted — so a fixture written by hand clears it
+-- first, or its messages belong to the last member a test pretended to be.
+
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+
+INSERT INTO auth.users (id) VALUES
+  ('11111111-aaaa-4aaa-8aaa-000000000300'), ('11111111-aaaa-4aaa-8aaa-000000000301'),
+  ('11111111-aaaa-4aaa-8aaa-000000000302'), ('11111111-aaaa-4aaa-8aaa-000000000303'),
+  ('11111111-aaaa-4aaa-8aaa-000000000304'), ('11111111-aaaa-4aaa-8aaa-000000000305');
+
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+SELECT ('11111111-aaaa-4aaa-8aaa-00000000030' || n)::UUID,
+       'aaaa0000-0000-4000-8000-000000000001',
+       name, initcap(name), 'pk-' || name, 'sid-' || name, 'chat-' || name
+  FROM (VALUES (0, 'r_mod'), (1, 'r_amy'), (2, 'r_ben'),
+               (3, 'r_cal'), (4, 'r_dee'), (5, 'r_eve')) v(n, name);
+
+INSERT INTO member_roles (user_id, role_id)
+SELECT '11111111-aaaa-4aaa-8aaa-000000000300', r.id FROM roles r
+ WHERE r.server_id = 'aaaa0000-0000-4000-8000-000000000001' AND r.name = 'Moderator';
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000300');
+
+CREATE FUNCTION pg_temp.as_member(p_user TEXT) RETURNS VOID LANGUAGE sql AS $$
+  SELECT set_config('request.jwt.claims',
+    json_build_object('sub', p_user, 'role', 'authenticated')::TEXT, true)
+$$;
+
+-- A message from each of amy and ben in #general, to report.
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature, key_version)
+VALUES (9800, 'aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000301', 'sealed-amy', 'n-amy', 's-amy', 1),
+       (9801, 'aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000302', 'sealed-ben', 'n-ben', 's-ben', 1);
+
+DO $$
+BEGIN
+  IF (SELECT permissions & app.perm('REVIEW_REPORTS') FROM roles
+       WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Moderator') = 0 THEN
+    RAISE EXCEPTION 'FAIL: a new server''s Moderator cannot review reports';
+  END IF;
+  IF (SELECT permissions & app.perm('REVIEW_REPORTS') FROM roles
+       WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_everyone) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: everybody reviews reports by default';
+  END IF;
+  IF (app.perm_all() & app.perm('REVIEW_REPORTS')) = 0 THEN
+    RAISE EXCEPTION 'FAIL: REVIEW_REPORTS is outside perm_all';
+  END IF;
+  RAISE NOTICE 'ok  reviewing reports is a Moderator''s by default, and nobody else''s';
+END $$;
+
+-- ---------- banning is BAN_MEMBERS ----------
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000301', NULL, NULL, true);
+    RAISE EXCEPTION 'FAIL: a Moderator without BAN_MEMBERS banned';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_authorized' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a ban takes BAN_MEMBERS, which Moderator lacks by default';
+END $$;
+
+RESET ROLE;
+UPDATE roles SET permissions = permissions | app.perm('BAN_MEMBERS')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Moderator';
+-- A second holder of the bit: the peer rule's target.
+INSERT INTO member_roles (user_id, role_id)
+SELECT '11111111-aaaa-4aaa-8aaa-000000000305', r.id FROM roles r
+ WHERE r.server_id = 'aaaa0000-0000-4000-8000-000000000001' AND r.name = 'Moderator';
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000305');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+BEGIN
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000304', NULL, NULL, true);
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000304', NULL, NULL, false);
+  BEGIN
+    PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000305', NULL, NULL, true);
+    RAISE EXCEPTION 'FAIL: one moderator banned another';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_ban_peer' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000001', NULL, NULL, true);
+    RAISE EXCEPTION 'FAIL: a moderator banned an admin';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_moderate_admin' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  with the bit a moderator bans and unbans, but never a peer or an admin';
+END $$;
+
+RESET ROLE;
+DELETE FROM member_roles
+ WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000305';
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000305');
+UPDATE roles SET permissions = permissions & ~app.perm('BAN_MEMBERS')
+ WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Moderator';
+
+-- ---------- time-outs ----------
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM time_out_member('11111111-aaaa-4aaa-8aaa-000000000301', 60);
+    RAISE EXCEPTION 'FAIL: a plain member timed somebody out';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_authorized' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a time-out takes MUTE_MEMBERS';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+DECLARE v_until TIMESTAMPTZ;
+BEGIN
+  BEGIN
+    PERFORM time_out_member('11111111-aaaa-4aaa-8aaa-000000000301', 28 * 24 * 60 + 1);
+    RAISE EXCEPTION 'FAIL: a time-out longer than 28 days was accepted';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'invalid_duration' THEN RAISE; END IF;
+  END;
+  v_until := time_out_member('11111111-aaaa-4aaa-8aaa-000000000301', 60);
+  IF v_until IS NULL OR v_until < now() + interval '59 minutes' THEN
+    RAISE EXCEPTION 'FAIL: the time-out ends at %', v_until;
+  END IF;
+  RAISE NOTICE 'ok  a moderator times a member out, for no more than 28 days';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000301', 'c', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a timed-out member posted';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO message_reactions (message_id, user_id, emoji)
+    VALUES (9801, '11111111-aaaa-4aaa-8aaa-000000000301', '👍');
+    RAISE EXCEPTION 'FAIL: a timed-out member reacted';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000302', 'c', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a timed-out member sent a DM';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'timed_out' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a timed-out member cannot post, react or DM';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+SELECT time_out_member('11111111-aaaa-4aaa-8aaa-000000000301', 0);
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+  VALUES ('aaaa1111-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-000000000301', 'c', 'n', 's', 1);
+  RAISE NOTICE 'ok  and lifting it lets them speak again';
+END $$;
+
+-- ---------- a first DM, by each setting ----------
+-- amy → ben is ordinary (ben: everyone). cal asks for requests, dee for
+-- nobody. The ledger itself is out of reach.
+
+RESET ROLE;
+UPDATE users SET dm_policy = 'requests' WHERE id = '11111111-aaaa-4aaa-8aaa-000000000303';
+UPDATE users SET dm_policy = 'nobody'   WHERE id = '11111111-aaaa-4aaa-8aaa-000000000304';
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000302', 'hi-ben', 'n', 's', 1);
+  IF dm_link_state('11111111-aaaa-4aaa-8aaa-000000000302') <> 'open' THEN
+    RAISE EXCEPTION 'FAIL: a first DM to somebody taking everyone did not open';
+  END IF;
+
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000303', 'hi-cal', 'n', 's', 1);
+  IF dm_link_state('11111111-aaaa-4aaa-8aaa-000000000303') <> 'waiting' THEN
+    RAISE EXCEPTION 'FAIL: a first DM to somebody taking requests is not waiting';
+  END IF;
+  BEGIN
+    INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000303', 'again', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a second message went out on an unanswered request';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'dm_request_pending' THEN RAISE; END IF;
+  END;
+
+  BEGIN
+    INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000304', 'hi-dee', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a first DM reached somebody taking nobody';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'dm_not_accepted' THEN RAISE; END IF;
+  END;
+
+  BEGIN
+    PERFORM 1 FROM dm_links;
+    RAISE EXCEPTION 'FAIL: a member read the pair ledger';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a first DM opens, waits as a request, or is refused, by the recipient''s setting';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  IF dm_link_state('11111111-aaaa-4aaa-8aaa-000000000301') <> 'asked' THEN
+    RAISE EXCEPTION 'FAIL: the person asked does not see a request';
+  END IF;
+  v := dm_requests();
+  IF jsonb_array_length(v) <> 1
+     OR v->0->>'peer_id' <> '11111111-aaaa-4aaa-8aaa-000000000301'
+     OR v->0->'last_message'->>'ciphertext' <> 'hi-cal' THEN
+    RAISE EXCEPTION 'FAIL: the request list is %', v;
+  END IF;
+  IF EXISTS (SELECT 1 FROM dm_conversation_heads
+              WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000303') THEN
+    RAISE EXCEPTION 'FAIL: a request is in the recipient''s conversation list';
+  END IF;
+  IF unread_counts()->'dms' ? '11111111-aaaa-4aaa-8aaa-000000000301' THEN
+    RAISE EXCEPTION 'FAIL: a request badges as unread mail';
+  END IF;
+
+  PERFORM answer_dm_request('11111111-aaaa-4aaa-8aaa-000000000301', false);
+  IF dm_link_state('11111111-aaaa-4aaa-8aaa-000000000301') <> 'ignored'
+     OR jsonb_array_length(dm_requests()) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: ignoring did not put it away';
+  END IF;
+  RAISE NOTICE 'ok  a request is listed apart, not badged, and can be put away';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  IF dm_link_state('11111111-aaaa-4aaa-8aaa-000000000303') <> 'waiting' THEN
+    RAISE EXCEPTION 'FAIL: the sender can tell they were ignored';
+  END IF;
+  BEGIN
+    PERFORM answer_dm_request('11111111-aaaa-4aaa-8aaa-000000000303', true);
+    RAISE EXCEPTION 'FAIL: the sender accepted their own request';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'no_request' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  the sender reads the same answer ignored or not, and cannot accept for them';
+END $$;
+
+-- cal changes their mind: replying accepts.
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+
+DO $$
+BEGIN
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000303', '11111111-aaaa-4aaa-8aaa-000000000301', 'hello', 'n', 's', 1);
+  IF dm_link_state('11111111-aaaa-4aaa-8aaa-000000000301') <> 'open' THEN
+    RAISE EXCEPTION 'FAIL: a reply did not accept the request';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM dm_conversation_heads
+                  WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000303'
+                    AND peer_id = '11111111-aaaa-4aaa-8aaa-000000000301') THEN
+    RAISE EXCEPTION 'FAIL: the accepted conversation is not in the list';
+  END IF;
+  RAISE NOTICE 'ok  replying to a request accepts it';
+END $$;
+
+-- Changing the setting later leaves an existing conversation alone.
+RESET ROLE;
+UPDATE users SET dm_policy = 'nobody' WHERE id = '11111111-aaaa-4aaa-8aaa-000000000303';
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000303', 'still', 'n', 's', 1);
+  RAISE NOTICE 'ok  turning DMs off leaves the conversations you already have';
+END $$;
+
+-- ---------- blocks ----------
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+BEGIN
+  INSERT INTO member_blocks (blocker_id, blocked_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000302', '11111111-aaaa-4aaa-8aaa-000000000301');
+  BEGIN
+    INSERT INTO member_blocks (blocker_id, blocked_id)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000303');
+    RAISE EXCEPTION 'FAIL: a member blocked on somebody else''s behalf';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO member_blocks (blocker_id, blocked_id)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000302', '22222222-bbbb-4bbb-8bbb-000000000001');
+    RAISE EXCEPTION 'FAIL: a member blocked somebody on another server';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a member blocks for themselves, and only people on their server';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM member_blocks) THEN
+    RAISE EXCEPTION 'FAIL: the blocked member can see the block';
+  END IF;
+  BEGIN
+    INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000301', '11111111-aaaa-4aaa-8aaa-000000000302', 'hey', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a blocked member DMed through an open conversation';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'dm_not_accepted' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a block stops DMs, reads like a setting, and is invisible to the blocked';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+DELETE FROM member_blocks WHERE blocked_id = '11111111-aaaa-4aaa-8aaa-000000000301';
+
+-- ---------- the opening limit ----------
+
+RESET ROLE;
+UPDATE servers SET dm_openings_per_hour = 2 WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+UPDATE users SET dm_policy = 'everyone'
+ WHERE id IN ('11111111-aaaa-4aaa-8aaa-000000000303', '11111111-aaaa-4aaa-8aaa-000000000304');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000305');
+
+DO $$
+BEGIN
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000305', '11111111-aaaa-4aaa-8aaa-000000000302', 'a', 'n', 's', 1),
+         ('11111111-aaaa-4aaa-8aaa-000000000305', '11111111-aaaa-4aaa-8aaa-000000000303', 'b', 'n', 's', 1);
+  BEGIN
+    INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000305', '11111111-aaaa-4aaa-8aaa-000000000304', 'c', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a third opening inside the hour went out';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'dm_rate_limited' THEN RAISE; END IF;
+  END;
+  -- Talking to people already talked to is never counted.
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000305', '11111111-aaaa-4aaa-8aaa-000000000302', 'more', 'n', 's', 1);
+  RAISE NOTICE 'ok  new conversations are limited per hour, and existing ones never are';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+
+DO $$
+BEGIN
+  INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000001', '11111111-aaaa-4aaa-8aaa-000000000301', 'x', 'n', 's', 1),
+         ('11111111-aaaa-4aaa-8aaa-000000000001', '11111111-aaaa-4aaa-8aaa-000000000303', 'y', 'n', 's', 1),
+         ('11111111-aaaa-4aaa-8aaa-000000000001', '11111111-aaaa-4aaa-8aaa-000000000304', 'z', 'n', 's', 1);
+  RAISE NOTICE 'ok  an admin is not limited';
+END $$;
+
+RESET ROLE;
+UPDATE servers SET dm_openings_per_hour = 10 WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+-- ---------- reports ----------
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+DECLARE v_id BIGINT;
+BEGIN
+  v_id := report_message(9800, 'spam', '  selling things  ');
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE id = 9800) THEN
+    RAISE EXCEPTION 'FAIL: reporting touched the message';
+  END IF;
+  BEGIN
+    PERFORM report_message(9800, 'harassment');
+    RAISE EXCEPTION 'FAIL: one member reported one message twice';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'already_reported' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM report_message(9801, 'spam');
+    RAISE EXCEPTION 'FAIL: a member reported their own message';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_report_self' THEN RAISE; END IF;
+  END;
+  PERFORM report_member('11111111-aaaa-4aaa-8aaa-000000000301', 'harassment', 'in DMs');
+  BEGIN
+    PERFORM report_member('11111111-aaaa-4aaa-8aaa-000000000301', 'spam');
+    RAISE EXCEPTION 'FAIL: two open reports about one member from one reporter';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'already_reported' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM report_member('22222222-bbbb-4bbb-8bbb-000000000001', 'spam');
+    RAISE EXCEPTION 'FAIL: a member reported somebody on another server';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'user_not_found' THEN RAISE; END IF;
+  END;
+  IF EXISTS (SELECT 1 FROM reports) THEN
+    RAISE EXCEPTION 'FAIL: a plain member can read reports';
+  END IF;
+  BEGIN
+    UPDATE reports SET note = 'x';
+    RAISE EXCEPTION 'FAIL: a member wrote to reports';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a member reports a message or a person once, and reads none of it';
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE r reports%ROWTYPE;
+BEGIN
+  SELECT * INTO r FROM reports WHERE message_id = 9800;
+  IF r.ciphertext <> 'sealed-amy' OR r.nonce <> 'n-amy' OR r.signature <> 's-amy'
+     OR r.key_version <> 1 OR r.target_id <> '11111111-aaaa-4aaa-8aaa-000000000301'
+     OR r.note <> 'selling things' THEN
+    RAISE EXCEPTION 'FAIL: the report did not copy the envelope as it was: %', row_to_json(r);
+  END IF;
+  RAISE NOTICE 'ok  a message report is the sealed envelope, copied by the server';
+END $$;
+
+-- A second reporter, so closing by message is seen to close both.
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+SELECT report_message(9800, 'spam');
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM reports WHERE outcome IS NULL) <> 3 THEN
+    RAISE EXCEPTION 'FAIL: the moderator sees % open reports, expected 3',
+      (SELECT count(*) FROM reports WHERE outcome IS NULL);
+  END IF;
+  BEGIN
+    PERFORM resolve_report((SELECT id FROM reports WHERE message_id = 9800 LIMIT 1), 'deleted');
+    RAISE EXCEPTION 'FAIL: a report was closed as deleted with the message still there';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'outcome_not_done' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM resolve_report((SELECT id FROM reports WHERE message_id IS NULL), 'banned');
+    RAISE EXCEPTION 'FAIL: a report was closed as banned with nobody banned';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'outcome_not_done' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a reviewer reads them all, and cannot record what did not happen';
+END $$;
+
+RESET ROLE;
+DELETE FROM messages WHERE id = 9800;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+DECLARE v_closed INTEGER;
+BEGIN
+  v_closed := resolve_report((SELECT id FROM reports WHERE message_id = 9800 ORDER BY id LIMIT 1), 'deleted');
+  IF v_closed <> 2 THEN
+    RAISE EXCEPTION 'FAIL: deleting closed % reports, expected both about the message', v_closed;
+  END IF;
+  IF (SELECT ciphertext FROM reports WHERE message_id = 9800 LIMIT 1) <> 'sealed-amy' THEN
+    RAISE EXCEPTION 'FAIL: the evidence went with the message';
+  END IF;
+  PERFORM resolve_report((SELECT id FROM reports WHERE message_id IS NULL), 'dismissed');
+  BEGIN
+    PERFORM resolve_report((SELECT id FROM reports WHERE message_id IS NULL), 'dismissed');
+    RAISE EXCEPTION 'FAIL: a report was closed twice';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'already_resolved' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  one deletion closes every report about the message, and the envelope stays';
+END $$;
+
+-- A reviewer is never shown, nor closes, a report about themselves.
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+SELECT report_member('11111111-aaaa-4aaa-8aaa-000000000300', 'other', 'about the mod');
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM reports WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000300') THEN
+    RAISE EXCEPTION 'FAIL: a moderator can read a report about themselves';
+  END IF;
+  RAISE NOTICE 'ok  a reviewer never sees a report about themselves';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM reports WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000300') THEN
+    RAISE EXCEPTION 'FAIL: an admin cannot read a report about a moderator';
+  END IF;
+  RAISE NOTICE 'ok  ...which an admin does';
+END $$;
+
+-- Twenty open reports is the ceiling.
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature, key_version)
+SELECT 9810 + g, 'aaaa1111-0000-4000-8000-000000000001',
+       '11111111-aaaa-4aaa-8aaa-000000000301', 'c', 'n', 's', 1
+  FROM generate_series(0, 20) AS g;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000304');
+
+DO $$
+BEGIN
+  PERFORM report_message(9810 + g, 'spam') FROM generate_series(0, 19) AS g;
+  BEGIN
+    PERFORM report_message(9830, 'spam');
+    RAISE EXCEPTION 'FAIL: a twenty-first open report was filed';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'too_many_reports' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  twenty open reports each, no more';
+END $$;
+
+-- A ban answers every open report about the person, whoever filed it.
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+
+DO $$
+DECLARE v_closed INTEGER;
+BEGIN
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000301', NULL, NULL, true);
+  v_closed := resolve_report((SELECT min(id) FROM reports
+                               WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                                 AND outcome IS NULL), 'banned');
+  IF v_closed <> 20 OR EXISTS (SELECT 1 FROM reports
+                                WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                                  AND outcome IS NULL) THEN
+    RAISE EXCEPTION 'FAIL: a ban closed % reports and left some open', v_closed;
+  END IF;
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000301', NULL, NULL, false);
+  RAISE NOTICE 'ok  a ban closes every open report about the person';
+END $$;
+
+RESET ROLE;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

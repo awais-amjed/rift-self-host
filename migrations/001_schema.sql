@@ -139,6 +139,47 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================================
+-- Who may start a DM with you
+-- ============================================================
+-- A member's answer, per server, to somebody they have never talked to:
+--
+--   everyone  the first message arrives like any other
+--   requests  it arrives as a request — no ring, not in the conversation
+--             list, one message until it is accepted
+--   nobody    it is refused
+--
+-- Only a *first* message asks. A conversation that already exists is never
+-- affected by changing this, which is what makes turning it up safe: the
+-- people you already talk to do not find the door shut behind them.
+
+DO $$ BEGIN
+  CREATE TYPE dm_policy AS ENUM ('everyone', 'requests', 'nobody');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Where a pair of members stands. `open` is an ordinary conversation.
+-- `requested` is a first message waiting for its recipient, and `ignored` is
+-- one the recipient has put away — which the sender must not be able to tell
+-- from `requested`, so no function answers them with the difference.
+DO $$ BEGIN
+  CREATE TYPE dm_link_status AS ENUM ('open', 'requested', 'ignored');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ============================================================
+-- Reports
+-- ============================================================
+
+DO $$ BEGIN
+  CREATE TYPE report_reason AS ENUM ('spam', 'harassment', 'explicit', 'other');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- What was done about a report. `NULL` on the row is "open". Each value is
+-- checked against the world when it is recorded (`resolve_report`), so the
+-- log says what happened rather than what somebody clicked.
+DO $$ BEGIN
+  CREATE TYPE report_outcome AS ENUM ('dismissed', 'deleted', 'timed_out', 'banned');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ============================================================
 -- Servers
 -- ============================================================
 -- One Supabase project can host several servers (identity is derived per
@@ -178,6 +219,9 @@ CREATE TABLE IF NOT EXISTS servers (
   max_members            INTEGER NOT NULL DEFAULT 0,
   max_storage_bytes      BIGINT  NOT NULL DEFAULT 0,
 
+  -- ── What one member may do to the others ──
+  dm_openings_per_hour   INTEGER NOT NULL DEFAULT 10,
+
   -- 500 MB is not arbitrary: Supabase Storage caps an object there on the
   -- free plan, and a larger number would fail silently at upload.
   CONSTRAINT servers_limits_sane CHECK (
@@ -194,7 +238,8 @@ CREATE TABLE IF NOT EXISTS servers (
   ),
   CONSTRAINT servers_size_limits_sane CHECK (
     max_members >= 0 AND max_storage_bytes >= 0
-  )
+  ),
+  CONSTRAINT servers_dm_openings_sane CHECK (dm_openings_per_hour >= 0)
 );
 
 COMMENT ON COLUMN servers.max_attachment_bytes IS
@@ -237,6 +282,12 @@ COMMENT ON COLUMN servers.max_members IS
 COMMENT ON COLUMN servers.max_storage_bytes IS
   'How many bytes of attachments the server keeps; 0 is no limit. Enforced '
   'by a trigger on storage.objects against a running total, never a SUM.';
+
+COMMENT ON COLUMN servers.dm_openings_per_hour IS
+  'How many people one member may start a DM with in an hour; 0 is no limit. '
+  'Only a first message to somebody counts — replies and existing '
+  'conversations never do — so it stops a member messaging the whole list '
+  'and nobody else notices it. Admins are exempt. Enforced by app.gate_dm.';
 
 -- LiveKit credentials live in their own table, not as columns on `servers`.
 --
@@ -386,6 +437,11 @@ CREATE TABLE IF NOT EXISTS users (
 
   is_muted           BOOLEAN     NOT NULL DEFAULT false,
   is_deafened        BOOLEAN     NOT NULL DEFAULT false,
+  -- Text's version of a mute: until then, no messages, DMs or reactions.
+  -- `is_muted` is the voice one and stops nobody typing, which is what a
+  -- report about spam needs stopped. A time rather than a flag, because the
+  -- point of it is that it ends without anybody remembering to end it.
+  timed_out_until    TIMESTAMPTZ,
 
   -- ── Bots ──
   is_bot             BOOLEAN     NOT NULL DEFAULT false,
@@ -396,6 +452,11 @@ CREATE TABLE IF NOT EXISTS users (
   manifest           JSONB,
 
   is_owner           BOOLEAN     NOT NULL DEFAULT false,
+
+  -- Who may start a DM with this member. Readable by everyone on the server,
+  -- because the sender's client has to know before typing whether a first
+  -- message will arrive, wait as a request, or be refused.
+  dm_policy          dm_policy   NOT NULL DEFAULT 'everyone',
 
   -- Per-server uniqueness, not global: two servers in one project are two
   -- different communities and may each have a "sam".
@@ -1162,6 +1223,159 @@ COMMENT ON TABLE dm_conversation_heads IS
 -- The whole point: your conversations, newest first, without a sort.
 CREATE INDEX IF NOT EXISTS idx_dm_conversation_heads_recent
   ON dm_conversation_heads (user_id, last_message_id DESC);
+
+-- ============================================================
+-- Who has let whom in
+-- ============================================================
+-- One row per pair of members who have ever exchanged a DM, written by the
+-- first message between them (`app.gate_dm`, 004) and never by a client.
+--
+-- It is not the heads table under another name. A head exists while there are
+-- messages and goes when retention takes the last of them; a link outlives
+-- that, because "we have talked before" is what a member's DM setting is
+-- asked about, and a conversation emptied by a 30-day sweep is still one
+-- somebody accepted.
+--
+-- It is also what the opening limit counts: `opened_by` and `opened_at` are
+-- "who started a conversation, and when", which is the one number a member
+-- messaging the whole list cannot keep low.
+--
+-- Nothing reads it directly. A member asks `dm_link_state` about one peer,
+-- and that answer hides `ignored` from the person who was ignored.
+
+CREATE TABLE IF NOT EXISTS dm_links (
+  user_low    UUID           NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_high   UUID           NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  opened_by   UUID           NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  opened_at   TIMESTAMPTZ    NOT NULL DEFAULT now(),
+  status      dm_link_status NOT NULL,
+  answered_at TIMESTAMPTZ,
+  PRIMARY KEY (user_low, user_high),
+  CHECK (user_low < user_high),
+  CHECK (opened_by IN (user_low, user_high))
+);
+
+-- The limit: how many this member opened in the last hour.
+CREATE INDEX IF NOT EXISTS idx_dm_links_opened
+  ON dm_links (opened_by, opened_at);
+
+-- A member's waiting requests are rows where they are the other half. Either
+-- column can be that half, so the list is two index ranges.
+CREATE INDEX IF NOT EXISTS idx_dm_links_waiting_high
+  ON dm_links (user_high) WHERE status <> 'open';
+CREATE INDEX IF NOT EXISTS idx_dm_links_waiting_low
+  ON dm_links (user_low)  WHERE status <> 'open';
+
+-- ============================================================
+-- Blocks
+-- ============================================================
+-- Directed, and invisible to the person blocked, as on central: no policy
+-- lets you read a row where you are `blocked_id`, and a DM refused by a block
+-- fails with the same error as one refused by a member's DM setting. Being
+-- told you have been blocked is an invitation to make a second account.
+
+CREATE TABLE IF NOT EXISTS member_blocks (
+  blocker_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_id UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (blocker_id, blocked_id),
+  CHECK (blocker_id <> blocked_id)
+);
+
+-- ============================================================
+-- Reports
+-- ============================================================
+-- A member telling the people who moderate this server about a message or
+-- another member. The person reported is never told who reported them, or
+-- that anybody did.
+--
+-- **A message report keeps the sealed envelope, never the words.** The row
+-- copies what `messages` holds — ciphertext, nonce, key version, signature,
+-- author — at the moment of reporting, copied by `report_message` rather than
+-- sent by the reporter. A moderator's client opens it with the channel key it
+-- already holds and checks the author's signature, which gives three things
+-- at once:
+--
+--   * the report cannot be forged: the reporter never supplies the bytes, and
+--     a signature the reporter cannot make says who wrote them;
+--   * it outlives the message: an author deleting what was reported does not
+--     delete the evidence of it;
+--   * this database still never holds the text, which is the promise every
+--     other table here keeps.
+--
+-- A moderator who is not inside a private channel has no key for it and sees
+-- that the message is locked, which is the truth. Attachments are the one
+-- thing not kept: their blobs go with the message, so a report outliving it
+-- names files that are gone.
+--
+-- `target_id` is NULL for a message no member sent (a webhook's), whose
+-- `origin_name` is kept instead. `reporter_id` survives the reporter leaving
+-- as NULL: a report is about the target, and it stays true.
+
+CREATE TABLE IF NOT EXISTS reports (
+  id           BIGSERIAL      PRIMARY KEY,
+  created_at   TIMESTAMPTZ    NOT NULL DEFAULT now(),
+  server_id    UUID           NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  reporter_id  UUID           REFERENCES users(id) ON DELETE SET NULL,
+  target_id    UUID           REFERENCES users(id) ON DELETE CASCADE,
+  reason       report_reason  NOT NULL,
+  note         TEXT           CHECK (length(note) <= 1000),
+
+  -- ── The message, as it was ──
+  -- No foreign key on the id: the whole point is to outlive it.
+  message_id          BIGINT,
+  channel_id          UUID        REFERENCES channels(id) ON DELETE CASCADE,
+  message_created_at  TIMESTAMPTZ,
+  origin_name         TEXT,
+  ciphertext          TEXT,
+  nonce               TEXT,
+  signature           TEXT,
+  key_version         INTEGER,
+
+  -- ── What was done ──
+  outcome      report_outcome,
+  resolved_by  UUID           REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at  TIMESTAMPTZ,
+
+  CONSTRAINT reports_about_something
+    CHECK (target_id IS NOT NULL OR message_id IS NOT NULL),
+  CONSTRAINT reports_message_whole CHECK (
+    (message_id IS NULL) = (channel_id IS NULL)
+    AND (message_id IS NULL) = (ciphertext IS NULL)
+    AND (message_id IS NULL) = (key_version IS NULL)),
+  CONSTRAINT reports_resolved_whole
+    CHECK ((outcome IS NULL) = (resolved_at IS NULL))
+);
+
+-- The page moderators read: this server's open reports, newest first.
+CREATE INDEX IF NOT EXISTS idx_reports_open
+  ON reports (server_id, id DESC) WHERE outcome IS NULL;
+
+-- Retention walks closed ones by age.
+CREATE INDEX IF NOT EXISTS idx_reports_closed
+  ON reports (resolved_at) WHERE outcome IS NOT NULL;
+
+-- The per-reporter cap counts these.
+CREATE INDEX IF NOT EXISTS idx_reports_reporter_open
+  ON reports (reporter_id) WHERE outcome IS NULL;
+
+-- Closing everything about one message or one member at once.
+CREATE INDEX IF NOT EXISTS idx_reports_message ON reports (message_id)
+  WHERE message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_reports_target  ON reports (target_id);
+
+-- Reporting the same thing twice is one report. A message once, ever; a
+-- member once while an earlier report about them is still open.
+CREATE UNIQUE INDEX IF NOT EXISTS reports_once_per_message
+  ON reports (reporter_id, message_id) WHERE message_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS reports_once_per_member
+  ON reports (reporter_id, target_id)
+  WHERE message_id IS NULL AND outcome IS NULL;
+
+COMMENT ON TABLE reports IS
+  'A member reporting a message or a member to this server''s moderators. A '
+  'message report holds the sealed envelope, copied server-side, never the '
+  'text. Written by report_message / report_member, closed by resolve_report.';
 
 -- ============================================================
 -- Channel keys and read cursors

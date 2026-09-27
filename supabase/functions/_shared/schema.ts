@@ -28,6 +28,9 @@ const DBSchema = {
     // arrive, and the database owns each.
     maxMembers: "max_members",
     maxStorageBytes: "max_storage_bytes",
+    // How many people one member may start a DM with in an hour. 0 = off.
+    // Enforced by the database's DM gate; admins are exempt.
+    dmOpeningsPerHour: "dm_openings_per_hour",
   },
   // Split out of `servers` so the rest of that row can be read directly by
   // members under RLS. This table has no grant and no policy: the service role

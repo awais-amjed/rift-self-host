@@ -25,6 +25,18 @@ CREATE OR REPLACE FUNCTION app.realtime_ready() RETURNS BOOLEAN
   SELECT to_regprocedure('realtime.send(jsonb,text,text,boolean)') IS NOT NULL
 $$;
 
+-- One member's own topic, empty payload: "go and look". For the things that
+-- concern one person and every device they have — their requests, their
+-- blocks — and nobody else.
+CREATE OR REPLACE FUNCTION app.announce_to_member(p_user UUID, p_event TEXT)
+  RETURNS VOID
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF app.realtime_ready() THEN
+    PERFORM realtime.send('{}'::jsonb, p_event, 'user:' || p_user, true);
+  END IF;
+END $$;
+
 CREATE OR REPLACE FUNCTION app.announce_reaction() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -57,7 +69,13 @@ BEGIN
   IF NOT app.realtime_ready() THEN
     RETURN NULL;
   END IF;
-  IF TG_OP = 'INSERT' THEN
+  -- A request is announced under its own name, so a client adds to the
+  -- Requests badge rather than opening a conversation the recipient has not
+  -- accepted.
+  IF TG_OP = 'INSERT' AND app.dm_is_request(NEW.sender_id, NEW.recipient_id) THEN
+    PERFORM realtime.send(jsonb_build_object('sender_id', NEW.sender_id),
+      'dm_requests', 'user:' || NEW.recipient_id, true);
+  ELSIF TG_OP = 'INSERT' THEN
     PERFORM realtime.send(
       jsonb_build_object('id', NEW.id, 'sender_id', NEW.sender_id),
       'dm', 'user:' || NEW.recipient_id, true);
@@ -214,6 +232,68 @@ BEGIN
   IF TG_OP = 'UPDATE' AND OLD.is_banned IS DISTINCT FROM NEW.is_banned THEN
     PERFORM realtime.send('{}'::jsonb, 'sweep', 'server:' || v_row.server_id, true);
   END IF;
+  RETURN NULL;
+END $$;
+
+-- ---------- blocks ----------
+-- The blocker's other devices, so a request from somebody just blocked goes
+-- from every list at once. Never the blocked person's: they are not told.
+
+CREATE OR REPLACE FUNCTION app.announce_block() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    PERFORM app.announce_to_member(OLD.blocker_id, 'blocks');
+  ELSE
+    PERFORM app.announce_to_member(NEW.blocker_id, 'blocks');
+  END IF;
+  RETURN NULL;
+END $$;
+
+-- ---------- reports ----------
+-- Whoever may review this server's reports hears that the list changed: a
+-- new one to look at, or one somebody else just closed. Each on their own
+-- topic, because a server topic would tell every member that somebody had
+-- reported something.
+--
+-- Found through the roles that carry the bit, not by asking every member: a
+-- server of fifty thousand has a handful of moderators, and `permissions_of`
+-- per member is fifty thousand queries. If `@everyone` carries it, everybody
+-- reviews, and the server's own topic is the honest address.
+--
+-- Not the member the report is about, who may hold the bit too.
+
+CREATE OR REPLACE FUNCTION app.announce_reports() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_row  reports%ROWTYPE;
+  v_user UUID;
+  v_bits BIGINT := app.perm('ADMINISTRATOR') | app.perm('REVIEW_REPORTS');
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'DELETE' THEN v_row := OLD; ELSE v_row := NEW; END IF;
+
+  IF EXISTS (SELECT 1 FROM roles r
+              WHERE r.server_id = v_row.server_id AND r.is_everyone
+                AND (r.permissions & v_bits) <> 0) THEN
+    PERFORM realtime.send('{}'::jsonb, 'reports', 'server:' || v_row.server_id, true);
+    RETURN NULL;
+  END IF;
+
+  FOR v_user IN
+    SELECT DISTINCT mr.user_id
+      FROM roles r
+      JOIN member_roles mr ON mr.role_id = r.id
+      JOIN users u ON u.id = mr.user_id
+     WHERE r.server_id = v_row.server_id
+       AND (r.permissions & v_bits) <> 0
+       AND NOT u.is_banned
+       AND u.id IS DISTINCT FROM v_row.target_id
+  LOOP
+    PERFORM realtime.send('{}'::jsonb, 'reports', 'user:' || v_user, true);
+  END LOOP;
   RETURN NULL;
 END $$;
 
@@ -536,6 +616,16 @@ DROP TRIGGER IF EXISTS users_announce ON users;
 CREATE TRIGGER users_announce
   AFTER INSERT OR UPDATE OR DELETE ON users
   FOR EACH ROW EXECUTE FUNCTION app.announce_member();
+
+DROP TRIGGER IF EXISTS member_blocks_announce ON member_blocks;
+CREATE TRIGGER member_blocks_announce
+  AFTER INSERT OR DELETE ON member_blocks
+  FOR EACH ROW EXECUTE FUNCTION app.announce_block();
+
+DROP TRIGGER IF EXISTS reports_announce ON reports;
+CREATE TRIGGER reports_announce
+  AFTER INSERT OR UPDATE ON reports
+  FOR EACH ROW EXECUTE FUNCTION app.announce_reports();
 
 DROP TRIGGER IF EXISTS notification_prefs_announce ON notification_prefs;
 CREATE TRIGGER notification_prefs_announce

@@ -654,7 +654,8 @@ BEGIN
      | app.perm('MUTE_MEMBERS')    | app.perm('DEAFEN_MEMBERS')
      | app.perm('MOVE_MEMBERS')    | app.perm('ADD_BOTS')
      | app.perm('CREATE_PRIVATE_CHANNEL')
-     | app.perm('MANAGE_SOUNDBOARD') | app.perm('PIN_MESSAGES'), false, false),
+     | app.perm('MANAGE_SOUNDBOARD') | app.perm('PIN_MESSAGES')
+     | app.perm('REVIEW_REPORTS'), false, false),
     (NEW.id, 'Admin',     300, app.perm('ADMINISTRATOR'), false, false),
     (NEW.id, 'Owner',     400, app.perm('ADMINISTRATOR'), false, true)
   ON CONFLICT (server_id, name) DO NOTHING;
@@ -702,11 +703,95 @@ BEGIN
   IF app.notify_level(NEW.recipient_id, 'dm', NEW.sender_id) = 'none' THEN
     RETURN NEW;
   END IF;
+  -- A request waits to be looked at; it does not come looking.
+  IF app.dm_is_request(NEW.sender_id, NEW.recipient_id) THEN
+    RETURN NEW;
+  END IF;
   IF has_unread_before(NEW.recipient_id, 'dm', NEW.sender_id, NEW.id) THEN
     RETURN NEW;
   END IF;
 
   PERFORM ring_devices(v_server_id, ARRAY[NEW.recipient_id]);
+  RETURN NEW;
+END $$;
+
+-- ============================================================
+-- The door a DM comes through
+-- ============================================================
+-- Every DM passes here before it is written, and the questions are asked in
+-- the order that keeps each answer from leaking the one before it:
+--
+--   1. Is the sender timed out? Then nothing they say goes anywhere.
+--   2. Has the recipient blocked them? Refused with `dm_not_accepted` — the
+--      same words a `nobody` setting gets, so a block reads as a setting.
+--   3. Have these two talked before (`dm_links`)? Then it is an ordinary
+--      message, unless it is the sender's second try at an unanswered
+--      request, which is refused. A message *from* the person who was asked
+--      is them replying, and a reply is an acceptance.
+--   4. First contact. The recipient's `dm_policy` decides: refused,
+--      a request, or open. And the sender's opening limit is counted —
+--      admins apart, since telling everybody something is their job.
+--
+-- Locked on the pair, so two first messages crossing in flight do not both
+-- decide they are first. The second waits, finds the link, and goes down 3.
+
+CREATE OR REPLACE FUNCTION app.gate_dm() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_low    UUID := LEAST(NEW.sender_id, NEW.recipient_id);
+  v_high   UUID := GREATEST(NEW.sender_id, NEW.recipient_id);
+  v_link   dm_links%ROWTYPE;
+  v_sender users%ROWTYPE;
+  v_policy dm_policy;
+  v_limit  INTEGER;
+BEGIN
+  SELECT * INTO v_sender FROM users WHERE id = NEW.sender_id;
+  IF v_sender.timed_out_until > now() THEN
+    RAISE EXCEPTION 'timed_out';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM member_blocks b
+              WHERE b.blocker_id = NEW.recipient_id
+                AND b.blocked_id = NEW.sender_id) THEN
+    RAISE EXCEPTION 'dm_not_accepted';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(v_low::TEXT || v_high::TEXT, 0));
+
+  SELECT * INTO v_link FROM dm_links l
+   WHERE l.user_low = v_low AND l.user_high = v_high;
+  IF FOUND THEN
+    IF v_link.status = 'open' THEN
+      RETURN NEW;
+    END IF;
+    IF v_link.opened_by = NEW.sender_id THEN
+      RAISE EXCEPTION 'dm_request_pending';
+    END IF;
+    UPDATE dm_links l SET status = 'open', answered_at = now()
+     WHERE l.user_low = v_low AND l.user_high = v_high;
+    PERFORM app.announce_to_member(NEW.sender_id, 'dm_requests');
+    RETURN NEW;
+  END IF;
+
+  SELECT u.dm_policy INTO v_policy FROM users u WHERE u.id = NEW.recipient_id;
+  IF v_policy = 'nobody' THEN
+    RAISE EXCEPTION 'dm_not_accepted';
+  END IF;
+
+  IF NOT v_sender.is_server_admin THEN
+    SELECT s.dm_openings_per_hour INTO v_limit
+      FROM servers s WHERE s.id = v_sender.server_id;
+    IF v_limit > 0 AND (SELECT count(*) FROM dm_links l
+                         WHERE l.opened_by = NEW.sender_id
+                           AND l.opened_at > now() - interval '1 hour') >= v_limit THEN
+      RAISE EXCEPTION 'dm_rate_limited';
+    END IF;
+  END IF;
+
+  INSERT INTO dm_links (user_low, user_high, opened_by, status)
+  VALUES (v_low, v_high, NEW.sender_id,
+          CASE WHEN v_policy = 'requests' THEN 'requested'::dm_link_status
+               ELSE 'open'::dm_link_status END);
   RETURN NEW;
 END $$;
 
@@ -717,13 +802,18 @@ END $$;
 -- sides move forward. GREATEST rather than a bare assignment because a
 -- backfill or a repair may run beside it, and a head that goes backwards is a
 -- conversation that jumps down the list.
-
+--
+-- A request moves only the sender's head. The recipient's conversation list
+-- is the one place a request must not appear; `answer_dm_request` writes
+-- their head when they accept.
 CREATE OR REPLACE FUNCTION app.remember_dm_head() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   INSERT INTO dm_conversation_heads (user_id, peer_id, last_message_id)
-  VALUES (NEW.sender_id, NEW.recipient_id, NEW.id),
-         (NEW.recipient_id, NEW.sender_id, NEW.id)
+  SELECT v.user_id, v.peer_id, NEW.id
+    FROM (VALUES (NEW.sender_id, NEW.recipient_id, true),
+                 (NEW.recipient_id, NEW.sender_id, false)) AS v(user_id, peer_id, is_sender)
+   WHERE v.is_sender OR NOT app.dm_is_request(NEW.sender_id, NEW.recipient_id)
       ON CONFLICT (user_id, peer_id) DO UPDATE
      SET last_message_id = GREATEST(dm_conversation_heads.last_message_id,
                                     EXCLUDED.last_message_id);
@@ -871,6 +961,13 @@ CREATE TRIGGER attest_dm_messages BEFORE INSERT OR UPDATE ON dm_messages
 DROP TRIGGER IF EXISTS device_tokens_stamp ON device_tokens;
 CREATE TRIGGER device_tokens_stamp BEFORE INSERT OR UPDATE ON device_tokens
   FOR EACH ROW EXECUTE FUNCTION stamp_device_owner();
+
+-- After `attest_dm_messages`, which is what makes `sender_id` the caller's:
+-- BEFORE triggers run in name order, and the gate must judge the sender the
+-- server vouches for, not the one the client wrote.
+DROP TRIGGER IF EXISTS dm_messages_gate ON dm_messages;
+CREATE TRIGGER dm_messages_gate BEFORE INSERT ON dm_messages
+  FOR EACH ROW EXECUTE FUNCTION app.gate_dm();
 
 DROP TRIGGER IF EXISTS dm_messages_ring ON dm_messages;
 CREATE TRIGGER dm_messages_ring AFTER INSERT ON dm_messages

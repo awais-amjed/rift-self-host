@@ -13,8 +13,8 @@ import { livePermissions, micDenied, moderationMetadata } from "../_shared/moder
  * Server-side mute / deafen / ban.
  *
  * The authorisation and the row write stay in the `moderate_user` RPC — this
- * calls it as the caller, so the "admins only, not yourself, not another
- * admin" rules live in one place. What the RPC cannot do is reach LiveKit:
+ * calls it as the caller, so the "`BAN_MEMBERS` to ban, not yourself, not an
+ * admin, not another who can ban" rules live in one place. What the RPC cannot do is reach LiveKit:
  * moderation used to be enforced *only* in the grant minted by
  * `get_channel_token`, which meant flipping the flag did nothing to anyone
  * already in the call, and nothing on rejoin either while the client's cached
@@ -44,6 +44,9 @@ function rpcErrorResponse(message: string): Response {
   if (message.includes("cannot_moderate_admin")) {
     return CustomResponse.error("Admins cannot be moderated", EC.PERMISSION_DENIED);
   }
+  if (message.includes("cannot_ban_peer")) {
+    return CustomResponse.error("Somebody who can ban cannot be banned", EC.PERMISSION_DENIED);
+  }
   if (message.includes("user_not_found")) {
     return CustomResponse.error("Member not found", EC.USER_NOT_FOUND);
   }
@@ -66,7 +69,7 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Missing required field: target_user_id", EC.MISSING_FIELDS);
     }
 
-    // 1. The row write, with the caller's own JWT so the RPC's app.is_admin()
+    // 1. The row write, with the caller's own JWT so the RPC's permission
     //    check applies to them and not to the service role.
     const asCaller = createClient(
       Deno.env.get("SUPABASE_URL")!,

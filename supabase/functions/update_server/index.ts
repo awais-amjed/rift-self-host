@@ -41,6 +41,7 @@ const LIMIT_FIELDS = [
   { key: "max_share_mbps", column: DBSchema.servers.maxShareMbps, min: 0 },
   { key: "max_members", column: DBSchema.servers.maxMembers, min: 0 },
   { key: "max_storage_bytes", column: DBSchema.servers.maxStorageBytes, min: 0 },
+  { key: "dm_openings_per_hour", column: DBSchema.servers.dmOpeningsPerHour, min: 0 },
 ] as const;
 
 /** Every column this endpoint reads back, so the client's copy stays whole. */

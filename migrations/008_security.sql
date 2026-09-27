@@ -40,7 +40,9 @@ GRANT SELECT                       ON users    TO authenticated;
 
 -- Your own profile, and nothing else on the row: moderation flags and
 -- permissions are not yours to write, they go through the RPCs in 003.
-GRANT UPDATE (display_name, chat_public_key, avatar_path) ON users TO authenticated;
+-- `dm_policy` is yours — who may start a DM with you is nobody else's call.
+GRANT UPDATE (display_name, chat_public_key, avatar_path, dm_policy)
+  ON users TO authenticated;
 
 GRANT SELECT, DELETE ON channels TO authenticated;
 
@@ -153,6 +155,7 @@ CREATE POLICY message_reactions_insert ON message_reactions FOR INSERT TO authen
     user_id = auth.uid()
     AND app.can_see_message(message_id)
     AND app.has_perm('ADD_REACTIONS')
+    AND NOT app.timed_out()
   );
 
 DROP POLICY IF EXISTS message_reactions_delete_own ON message_reactions;
@@ -182,7 +185,7 @@ DROP POLICY IF EXISTS dm_reactions_insert ON dm_message_reactions;
 -- other side just as a message does.
 CREATE POLICY dm_reactions_insert ON dm_message_reactions FOR INSERT TO authenticated
   WITH CHECK (user_id = auth.uid() AND app.can_see_dm(message_id)
-              AND app.server_id() IS NOT NULL);
+              AND app.server_id() IS NOT NULL AND NOT app.timed_out());
 
 DROP POLICY IF EXISTS dm_reactions_delete_own ON dm_message_reactions;
 CREATE POLICY dm_reactions_delete_own ON dm_message_reactions FOR DELETE TO authenticated
@@ -619,6 +622,7 @@ CREATE POLICY messages_insert ON messages FOR INSERT TO authenticated
   WITH CHECK (
     app.can_see_channel(channel_id)
     AND app.has_perm('SEND_MESSAGES')
+    AND NOT app.timed_out()
     AND sender_id = auth.uid()
     AND webhook_id IS NULL AND origin_name IS NULL AND NOT is_system
     AND (key_version >= 1 OR to_bot IS NOT NULL OR app.is_bot())
@@ -1179,3 +1183,69 @@ ALTER TABLE listing_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE dm_conversation_heads ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE soundboard_sounds ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- Reports, blocks and who has let whom in
+-- ============================================================
+
+-- The pair ledger is the gate's (004) and nobody else's. Read only through
+-- `dm_link_state` and `dm_requests`, which hide `ignored` from the person
+-- ignored; a policy could not.
+REVOKE ALL ON dm_links FROM PUBLIC, anon, authenticated;
+ALTER TABLE dm_links ENABLE ROW LEVEL SECURITY;
+
+-- Your own blocks, and only yours. Nobody reads a row naming them as the one
+-- blocked — that is the whole of what keeps a block silent.
+REVOKE ALL ON member_blocks FROM PUBLIC, anon, authenticated;
+GRANT SELECT, DELETE ON member_blocks TO authenticated;
+GRANT INSERT (blocker_id, blocked_id) ON member_blocks TO authenticated;
+ALTER TABLE member_blocks ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS member_blocks_select_own ON member_blocks;
+CREATE POLICY member_blocks_select_own ON member_blocks FOR SELECT TO authenticated
+  USING (blocker_id = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS member_blocks_insert_own ON member_blocks;
+CREATE POLICY member_blocks_insert_own ON member_blocks FOR INSERT TO authenticated
+  WITH CHECK (blocker_id = auth.uid() AND app.is_co_member(blocked_id));
+
+DROP POLICY IF EXISTS member_blocks_delete_own ON member_blocks;
+CREATE POLICY member_blocks_delete_own ON member_blocks FOR DELETE TO authenticated
+  USING (blocker_id = (SELECT auth.uid()));
+
+-- Read by reviewers, written by nobody directly: filing goes through
+-- `report_message` / `report_member`, which copy the envelope themselves, and
+-- closing through `resolve_report`, which checks the outcome happened.
+--
+-- A reviewer never sees a report about themselves. The questions are wrapped
+-- in sub-selects so each is asked once per query rather than once per row.
+REVOKE ALL ON reports FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON reports TO authenticated;
+ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS reports_select ON reports;
+CREATE POLICY reports_select ON reports FOR SELECT TO authenticated
+  USING (server_id = (SELECT app.server_id())
+         AND (SELECT app.has_perm('REVIEW_REPORTS'))
+         AND target_id IS DISTINCT FROM (SELECT auth.uid()));
+
+REVOKE ALL ON FUNCTION time_out_member(UUID, INTEGER)                     FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION report_message(BIGINT, report_reason, TEXT)        FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION report_member(UUID, report_reason, TEXT)           FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION resolve_report(BIGINT, report_outcome)             FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION dm_link_state(UUID)                                FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION dm_requests()                                      FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION answer_dm_request(UUID, BOOLEAN)                   FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION time_out_member(UUID, INTEGER)                  TO authenticated;
+GRANT EXECUTE ON FUNCTION report_message(BIGINT, report_reason, TEXT)     TO authenticated;
+GRANT EXECUTE ON FUNCTION report_member(UUID, report_reason, TEXT)        TO authenticated;
+GRANT EXECUTE ON FUNCTION resolve_report(BIGINT, report_outcome)          TO authenticated;
+GRANT EXECUTE ON FUNCTION dm_link_state(UUID)                             TO authenticated;
+GRANT EXECUTE ON FUNCTION dm_requests()                                   TO authenticated;
+GRANT EXECUTE ON FUNCTION answer_dm_request(UUID, BOOLEAN)                TO authenticated;
+
+-- Internal. The cap is a check the two report functions make, and a member's
+-- topic is rung by the server, not by the member.
+REVOKE ALL ON FUNCTION app.report_room(UUID)              FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.announce_to_member(UUID, TEXT) FROM PUBLIC, anon, authenticated;
