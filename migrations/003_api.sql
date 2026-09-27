@@ -2337,10 +2337,20 @@ $$;
 
 -- Ring somebody. Returns the call.
 --
--- If the two of them already have one going it is returned instead of a
+-- If the two of them already have one ringing it is returned instead of a
 -- second — and if that one is *them* ringing *you*, calling back is picking
 -- up: it is answered here, so two people pressing Call at the same moment
 -- end up in one call rather than each hearing the other's line busy.
+--
+-- One the pair already *answered* is a different matter. Pressing Call means
+-- the presser is not in it — the app hides the button on a device that is —
+-- so it is either dead (both apps closed, and the sweep has not got to it
+-- yet) or the other person is waiting in it alone after this device dropped
+-- out. Rejoining would be right for the second and silent for the first:
+-- found live, the presser sat alone in a dead call and nobody was rung. So
+-- the old call ends where it last showed signs of life, and this one rings.
+-- Somebody still in the old one has it hung up by their app, and sees this
+-- one ringing.
 CREATE OR REPLACE FUNCTION start_dm_call(p_peer UUID) RETURNS JSONB
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -2386,13 +2396,18 @@ BEGIN
    WHERE c.ended_at IS NULL
      AND LEAST(c.caller_id, c.callee_id)    = v_low
      AND GREATEST(c.caller_id, c.callee_id) = v_high;
-  IF FOUND THEN
-    IF v_call.answered_at IS NULL AND v_call.callee_id = v_me THEN
+  IF FOUND AND v_call.answered_at IS NULL THEN
+    IF v_call.callee_id = v_me THEN
       UPDATE dm_calls c SET answered_at = now(), alive_at = now()
        WHERE c.id = v_call.id
       RETURNING * INTO v_call;
     END IF;
     RETURN app.dm_call_json(v_call, v_me);
+  ELSIF FOUND THEN
+    UPDATE dm_calls c
+       SET ended_at = GREATEST(c.alive_at, c.answered_at),
+           outcome  = 'completed'
+     WHERE c.id = v_call.id;
   END IF;
 
   IF (SELECT count(*) FROM dm_calls c

@@ -7293,6 +7293,35 @@ BEGIN
   RAISE NOTICE 'ok  both ends hanging up is one hang-up';
 END $$;
 
+-- ---------- calling again over an answered call ----------
+-- A call left marked answered — both apps closed, the sweep not yet round —
+-- is ended, and a new one rings, rather than the presser rejoining a room
+-- nobody is in.
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+DO $$
+DECLARE v_old UUID; v_new JSONB;
+BEGIN
+  v_old := (start_dm_call('11111111-aaaa-4aaa-8aaa-000000000303')->>'id')::UUID;
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', '11111111-aaaa-4aaa-8aaa-000000000303',
+                      'role', 'authenticated')::TEXT, true);
+  PERFORM answer_dm_call(v_old);
+  PERFORM pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+
+  v_new := start_dm_call('11111111-aaaa-4aaa-8aaa-000000000303');
+  IF (v_new->>'id')::UUID = v_old OR v_new->>'answered_at' IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: calling again rejoined the answered call: %', v_new;
+  END IF;
+  IF my_dm_calls(ARRAY[v_old])->0->>'outcome' IS DISTINCT FROM 'completed'
+     AND my_dm_calls(ARRAY[v_old])->1->>'outcome' IS DISTINCT FROM 'completed' THEN
+    RAISE EXCEPTION 'FAIL: the answered call was not ended';
+  END IF;
+  PERFORM end_dm_call((v_new->>'id')::UUID);
+  RAISE NOTICE 'ok  calling again over an answered call ends it and rings anew';
+END $$;
+
 -- ---------- declined, cancelled, missed ----------
 
 SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
