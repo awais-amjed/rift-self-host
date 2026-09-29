@@ -186,6 +186,13 @@ services:
       GOTRUE_URI_ALLOW_LIST: http://localhost,http://localhost/**
       GOTRUE_DISABLE_SIGNUP: "false"
 
+      # Sign-in's per-address limits apply only when Auth is told which header
+      # holds the address; without this it limits nothing, and a key can be
+      # tried against the server as fast as it can be sent. Caddy writes this
+      # header with the address it saw, replacing any a client sent. With no
+      # Caddy in front (local testing) it is absent and the limits are off.
+      GOTRUE_RATE_LIMIT_HEADER: X-Rift-Client-IP
+
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
@@ -487,6 +494,11 @@ services:
     profiles: [full]
     restart: unless-stopped
     command: ["--config", "/etc/livekit.yaml"]
+    # The network has IPv6 (below) and LiveKit is kept off it: it offers
+    # callers every address it can see, and a private IPv6 one inside Docker
+    # is one none of them can reach. Calls behave exactly as before.
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
     ports:
       # One multiplexed UDP port rather than a range: a range means 100+
       # published ports, which is slow to start and awkward to forward on a
@@ -542,6 +554,14 @@ services:
       PG_META_DB_NAME: postgres
       PG_META_DB_USER: supabase_admin
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD:-}
+
+# IPv6 on the stack's own network, so a member reaching Caddy over IPv6 keeps
+# their address. On an IPv4-only network Docker relays those connections itself
+# and every one arrives from the network's gateway — one address for every
+# IPv6 member, which sign-in's per-address limit would count as one person.
+networks:
+  default:
+    enable_ipv6: true
 
 volumes:
   db-data:

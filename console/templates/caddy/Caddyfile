@@ -34,6 +34,11 @@
 	# Everything else is the Supabase API gateway.
 	handle {
 		reverse_proxy kong:8000 {
+			# The address sign-in's limits count by (GOTRUE_RATE_LIMIT_HEADER).
+			# Set, not appended: a value a client sent is replaced, so it
+			# cannot choose whose limit it spends.
+			header_up X-Rift-Client-IP {client_ip}
+
 			# Realtime and LiveKit both hold connections open for as long as
 			# somebody is in a channel. The default would cut them.
 			transport http {
