@@ -105,7 +105,7 @@ Deno.serve(async (req) => {
       case "exhausted":
         return CustomResponse.error("Invite code has reached its maximum uses", EC.INVITE_EXHAUSTED);
       case "already_registered":
-        return CustomResponse.error("Already registered on this server", EC.IDENTITY_TAKEN);
+        return await rejoin(invite_code, authUid);
       case "identity_taken":
         return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
       case "username_taken":
@@ -141,3 +141,44 @@ Deno.serve(async (req) => {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }
 });
+
+/**
+ * Sign a returning member back in to the membership they already have.
+ *
+ * Leaving a server is local to the device: the member row stays, and with it
+ * the keyring entries that open the channels' history. The same seed derives
+ * the same identity, so coming back through a new invite finds that row — and
+ * refusing it ("already registered") left the account with no way in at all.
+ * So the existing profile comes back as it was, with its username, roles and
+ * messages; what was typed into the join form is not applied, and the invite
+ * is not used up (register_user refused before counting it).
+ *
+ * The invite still has to be live and for this server — register_user checks
+ * it before it looks at the caller — so this is exactly "you need a new
+ * invite", and nothing more. A ban is not undone by rejoining: that member is
+ * told so rather than handed a server that refuses everything.
+ */
+async function rejoin(inviteCode: string, authUid: string): Promise<Response> {
+  const { data: member } = await supabase
+    .from(DBSchema.users.tableName)
+    .select(`${DBSchema.users.serverId}, ${DBSchema.users.isBanned}`)
+    .eq(DBSchema.users.id, authUid)
+    .maybeSingle();
+  const { data: invite } = await supabase
+    .from(DBSchema.invites.tableName)
+    .select(DBSchema.invites.serverId)
+    .eq(DBSchema.invites.code, inviteCode)
+    .maybeSingle();
+
+  const serverId = (member as Record<string, any> | null)?.[DBSchema.users.serverId];
+  if (!serverId || serverId !== (invite as Record<string, any> | null)?.[DBSchema.invites.serverId]) {
+    return CustomResponse.error("Already registered on this server", EC.IDENTITY_TAKEN);
+  }
+  if ((member as Record<string, any>)[DBSchema.users.isBanned]) {
+    return CustomResponse.error("You are banned from this server", EC.USER_BANNED);
+  }
+
+  const context = await fetchServerContext(supabase, { serverId, userId: authUid });
+  if (context instanceof Response) return context;
+  return CustomResponse.success({ ...context, rejoined: true });
+}
