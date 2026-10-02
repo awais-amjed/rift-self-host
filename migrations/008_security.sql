@@ -148,8 +148,12 @@ CREATE POLICY dm_messages_delete_own ON dm_messages FOR DELETE TO authenticated
   USING (sender_id = auth.uid());
 
 DROP POLICY IF EXISTS message_reactions_select ON message_reactions;
+-- `app.can_see_message`, rearranged so the channel set is built once rather
+-- than asked per reaction: 201 ms → 6 ms for a lively page (see the note on
+-- policy shapes in the helpers).
 CREATE POLICY message_reactions_select ON message_reactions FOR SELECT TO authenticated
-  USING (app.can_see_message(message_id));
+  USING (app.message_channel(message_id) IN (SELECT unnest(app.visible_channels()))
+         AND ((SELECT NOT app.is_bot()) OR app.message_reaches_me(message_id)));
 
 -- `ADD_REACTIONS` is checked here and nowhere else. A reaction is a plain row
 -- the server can read — unlike a mention, which is inside the ciphertext — so
@@ -168,10 +172,14 @@ DROP POLICY IF EXISTS message_reactions_delete_own ON message_reactions;
 CREATE POLICY message_reactions_delete_own ON message_reactions FOR DELETE TO authenticated
   USING (user_id = auth.uid());
 
--- A pin is visible to whoever can see the message it names.
+-- A pin is visible to whoever can see the message it names — the same
+-- rearrangement of `app.can_see_message` as the reactions above. Through the
+-- message rather than the pin's own `channel_id`, so the rule does not rest on
+-- that copy staying true.
 DROP POLICY IF EXISTS message_pins_select ON message_pins;
 CREATE POLICY message_pins_select ON message_pins FOR SELECT TO authenticated
-  USING (app.can_see_message(message_id));
+  USING (app.message_channel(message_id) IN (SELECT unnest(app.visible_channels()))
+         AND ((SELECT NOT app.is_bot()) OR app.message_reaches_me(message_id)));
 
 DROP POLICY IF EXISTS dm_message_pins_select ON dm_message_pins;
 CREATE POLICY dm_message_pins_select ON dm_message_pins FOR SELECT TO authenticated
@@ -937,6 +945,14 @@ GRANT EXECUTE ON FUNCTION app.bot_channels() TO authenticated;
 REVOKE ALL ON FUNCTION app.server_roles() FROM PUBLIC, anon;
 
 GRANT EXECUTE ON FUNCTION app.server_roles() TO authenticated;
+
+REVOKE ALL ON FUNCTION app.message_channel(BIGINT) FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION app.message_channel(BIGINT) TO authenticated;
+
+REVOKE ALL ON FUNCTION app.message_reaches_me(BIGINT) FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION app.message_reaches_me(BIGINT) TO authenticated;
 
 DROP POLICY IF EXISTS messages_select ON messages;
 CREATE POLICY messages_select ON messages FOR SELECT TO authenticated

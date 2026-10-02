@@ -4692,6 +4692,92 @@ END $real$;
 DELETE FROM push_config WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
 
 -- ============================================================
+-- 24b. Who sees a reaction or a pin
+-- ============================================================
+-- `message_reactions_select` and `message_pins_select` are
+-- `app.can_see_message` rearranged so the channel set is built once instead of
+-- asked per row. A rearrangement is only allowed to be faster, so beside the
+-- cases that say what each person sees, every person here is checked against
+-- `app.can_see_message` itself, message by message.
+
+RESET ROLE;
+
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000a7',
+   'aaaa0000-0000-4000-8000-000000000001', 'react-private', 'text', true),
+  ('aaaa1111-0000-4000-8000-0000000000a8',
+   'aaaa0000-0000-4000-8000-000000000001', 'react-open', 'text', false);
+-- The owner is put into a new private room already; said again so the case
+-- does not lean on that.
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000a7', '11111111-aaaa-4aaa-8aaa-000000000001')
+ON CONFLICT DO NOTHING;
+
+-- 9701 in the private room; 9702 in the open one, to nobody in particular;
+-- 9703 there addressed to the bot; 9704 there sent by the bot. Nobody signed
+-- in, or `attest_message` makes the caller the sender of all four.
+SELECT set_config('request.jwt.claims', '', true);
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature,
+                      key_version, to_bot)
+VALUES (9701, 'aaaa1111-0000-4000-8000-0000000000a7',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'c', 'n', 's', 1, NULL),
+       (9702, 'aaaa1111-0000-4000-8000-0000000000a8',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'c', 'n', 's', 1, NULL),
+       (9703, 'aaaa1111-0000-4000-8000-0000000000a8',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'c', 'n', 's', 0,
+        '11111111-aaaa-4aaa-8aaa-0000000000b0'),
+       (9704, 'aaaa1111-0000-4000-8000-0000000000a8',
+        '11111111-aaaa-4aaa-8aaa-0000000000b0', 'c', 'n', 's', 0, NULL);
+INSERT INTO message_reactions (message_id, user_id, emoji)
+SELECT id, '11111111-aaaa-4aaa-8aaa-000000000001', '👍'
+  FROM messages WHERE id BETWEEN 9701 AND 9704;
+INSERT INTO message_pins (message_id, channel_id, pinned_by)
+SELECT id, channel_id, '11111111-aaaa-4aaa-8aaa-000000000001'
+  FROM messages WHERE id BETWEEN 9701 AND 9704;
+
+SET LOCAL ROLE authenticated;
+
+DO $$
+DECLARE
+  -- who, and the messages whose reactions and pins they should see
+  v_cases CONSTANT JSONB := '{
+    "11111111-aaaa-4aaa-8aaa-000000000001": [9701, 9702, 9703, 9704],
+    "11111111-aaaa-4aaa-8aaa-000000000002": [9702, 9703, 9704],
+    "11111111-aaaa-4aaa-8aaa-0000000000b0": [9703, 9704],
+    "22222222-bbbb-4bbb-8bbb-000000000001": []
+  }';
+  v_who      TEXT;
+  v_want     BIGINT[];
+  v_reacts   BIGINT[];
+  v_pins     BIGINT[];
+  v_id       BIGINT;
+BEGIN
+  FOR v_who IN SELECT jsonb_object_keys(v_cases) LOOP
+    PERFORM set_config('request.jwt.claims',
+      json_build_object('sub', v_who, 'role', 'authenticated')::text, true);
+    v_want := ARRAY(SELECT jsonb_array_elements_text(v_cases -> v_who)::BIGINT
+                    ORDER BY 1);
+    v_reacts := ARRAY(SELECT message_id FROM message_reactions
+                       WHERE message_id BETWEEN 9701 AND 9704 ORDER BY 1);
+    v_pins   := ARRAY(SELECT message_id FROM message_pins
+                       WHERE message_id BETWEEN 9701 AND 9704 ORDER BY 1);
+    FOR v_id IN 9701..9704 LOOP
+      IF app.can_see_message(v_id) <> (v_id = ANY (v_reacts)) THEN
+        RAISE EXCEPTION 'FAIL: for %, the reaction rule and app.can_see_message disagree on %',
+          v_who, v_id;
+      END IF;
+    END LOOP;
+    IF v_reacts <> v_want THEN
+      RAISE EXCEPTION 'FAIL: % sees reactions on % (expected %)', v_who, v_reacts, v_want;
+    END IF;
+    IF v_pins <> v_want THEN
+      RAISE EXCEPTION 'FAIL: % sees pins on % (expected %)', v_who, v_pins, v_want;
+    END IF;
+  END LOOP;
+  RAISE NOTICE 'ok  reactions and pins follow the message: private room, bot, other server';
+END $$;
+
+-- ============================================================
 -- 27. The member list carries its own scope (026)
 -- ============================================================
 -- These five became SECURITY DEFINER so the planner would stop tripping over

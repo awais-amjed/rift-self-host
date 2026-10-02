@@ -916,10 +916,21 @@ COMMENT ON FUNCTION app.unread_thresholds(UUID, BIGINT) IS
 -- once — it is the caller's channels, and there are tens of them — and the
 -- per-row test is a hash lookup.
 --
--- One policy is deliberately *not* rewritten. `message_reactions_select`
--- asks about a message id rather than a channel, so there is no small set to
--- hoist into; rewriting it as an EXISTS measured slower than what it
--- replaced (16 ms against 8.8 ms for a page of tallies), so it stays.
+-- **A question about a message** is the channel question one step removed.
+-- `message_reactions_select` and `message_pins_select` used to ask
+-- `app.can_see_message(message_id)` per row, and that function asks
+-- `can_see_channel`, `server_id` and `is_bot` all over again for each one.
+-- They now look the message's channel up (`app.message_channel`, a primary
+-- key read) and test it against the same hoisted set. On the data above, the
+-- page of messages with its reactions embedded, as the client asks for it:
+--
+--   102 reactions on the page ............   20 ms  →  2.3 ms
+--   1,122 reactions on the page ..........  201 ms  →  6.0 ms
+--   message_reaction_tallies, 1,122 ......  200 ms  →  6.5 ms
+--
+-- (Measured Oct 2 2026. An earlier attempt, an EXISTS on `messages`, had
+-- measured slower than what it replaced, so this policy was left alone until
+-- then; deferring to `messages_select` would also have changed who sees what.)
 
 -- ============================================================
 -- 1. The sets, built once
@@ -963,6 +974,37 @@ $$;
 
 COMMENT ON FUNCTION app.server_roles() IS
   'The roles of the caller''s server, as one array.';
+
+-- The two halves of `app.can_see_message`, split so a policy can hoist the
+-- half that is about the channel. Only `message_reactions_select` and
+-- `message_pins_select` use them, and together they mean exactly what
+-- `app.can_see_message` means:
+--
+--   app.message_channel(message_id) IN (SELECT unnest(app.visible_channels()))
+--   AND ((SELECT NOT app.is_bot()) OR app.message_reaches_me(message_id))
+--
+-- A message that does not exist has no channel, and NULL is in no set.
+CREATE OR REPLACE FUNCTION app.message_channel(p_message BIGINT) RETURNS UUID
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT m.channel_id FROM messages m WHERE m.id = p_message
+$$;
+
+COMMENT ON FUNCTION app.message_channel(BIGINT) IS
+  'The channel a message is in, for a policy to test against '
+  'app.visible_channels(). Says nothing about whether the caller may see it.';
+
+-- The bot half: a bot sees only what was addressed to it or what it sent.
+-- Asked per row, but only of a bot — a person short-circuits on the InitPlan.
+CREATE OR REPLACE FUNCTION app.message_reaches_me(p_message BIGINT) RETURNS BOOLEAN
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (SELECT 1 FROM messages m
+                  WHERE m.id = p_message
+                    AND (m.to_bot = auth.uid() OR m.sender_id = auth.uid()))
+$$;
+
+COMMENT ON FUNCTION app.message_reaches_me(BIGINT) IS
+  'Whether a message was addressed to the caller or sent by them — the rule '
+  'that narrows what a bot may see.';
 
 -- ============================================================
 -- 3b. One page of a channel, as ids
