@@ -106,6 +106,10 @@ Deno.serve(async (req) => {
         return CustomResponse.error("Invite code has reached its maximum uses", EC.INVITE_EXHAUSTED);
       case "already_registered":
         return await rejoin(invite_code, authUid);
+      // A kicked member, let back in by this invite (register_user lifted
+      // the kick and spent a use). From here it is a rejoin like any other.
+      case "readmitted":
+        return await rejoin(invite_code, authUid, reg[DBSchema.invites.serverId] as string);
       case "identity_taken":
         return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
       case "username_taken":
@@ -156,22 +160,31 @@ Deno.serve(async (req) => {
  * The invite still has to be live and for this server — register_user checks
  * it before it looks at the caller — so this is exactly "you need a new
  * invite", and nothing more. A ban is not undone by rejoining: that member is
- * told so rather than handed a server that refuses everything.
+ * told so rather than handed a server that refuses everything. A kick is, and
+ * register_user has already lifted it by the time a `readmitted` gets here.
  */
-async function rejoin(inviteCode: string, authUid: string): Promise<Response> {
+async function rejoin(
+  inviteCode: string,
+  authUid: string,
+  readmittedTo?: string,
+): Promise<Response> {
   const { data: member } = await supabase
     .from(DBSchema.users.tableName)
     .select(`${DBSchema.users.serverId}, ${DBSchema.users.isBanned}`)
     .eq(DBSchema.users.id, authUid)
     .maybeSingle();
-  const { data: invite } = await supabase
+  // A readmission may have spent the invite's last use, which deletes it, so
+  // the server it was for comes from register_user rather than a lookup.
+  const { data: invite } = readmittedTo ? { data: null } : await supabase
     .from(DBSchema.invites.tableName)
     .select(DBSchema.invites.serverId)
     .eq(DBSchema.invites.code, inviteCode)
     .maybeSingle();
+  const inviteServer = readmittedTo ??
+    (invite as Record<string, any> | null)?.[DBSchema.invites.serverId];
 
   const serverId = (member as Record<string, any> | null)?.[DBSchema.users.serverId];
-  if (!serverId || serverId !== (invite as Record<string, any> | null)?.[DBSchema.invites.serverId]) {
+  if (!serverId || serverId !== inviteServer) {
     return CustomResponse.error("Already registered on this server", EC.IDENTITY_TAKEN);
   }
   if ((member as Record<string, any>)[DBSchema.users.isBanned]) {

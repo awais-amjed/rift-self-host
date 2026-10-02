@@ -438,6 +438,10 @@ CREATE TABLE IF NOT EXISTS users (
   chat_public_key    TEXT,
   avatar_path        TEXT,
   is_banned          BOOLEAN     NOT NULL DEFAULT false,
+  -- Set beside `is_banned` by a kick (`kick_member`): the same lock-out,
+  -- which the member's next invite lifts (`register_user`). A ban clears it,
+  -- so a kick can be made permanent and never the other way round.
+  kicked_at          TIMESTAMPTZ,
 
   -- ── The cache of what this member's roles add up to ──
   -- (`is_owner` sits at the end of the row with the rest of the later

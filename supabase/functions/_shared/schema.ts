@@ -51,6 +51,7 @@ const DBSchema = {
     publicKey: "public_key",
     stableId: "stable_id",
     isBanned: "is_banned",
+    kickedAt: "kicked_at",
     isServerAdmin: "is_server_admin",
     isChannelManager: "is_channel_manager",
     canCreateTokens: "can_create_tokens",

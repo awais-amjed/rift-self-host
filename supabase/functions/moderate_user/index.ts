@@ -10,7 +10,7 @@ import { livekitRoomServices, roomParticipantsAcross } from "../_shared/livekit.
 import { livePermissions, micDenied, moderationMetadata } from "../_shared/moderation.ts";
 
 /**
- * Server-side mute / deafen / ban.
+ * Server-side mute / deafen / ban / kick.
  *
  * The authorisation and the row write stay in the `moderate_user` RPC — this
  * calls it as the caller, so the "`BAN_MEMBERS` to ban, not yourself, not an
@@ -26,6 +26,10 @@ import { livePermissions, micDenied, moderationMetadata } from "../_shared/moder
  * every live connection the target has — every device, plus their screenshare
  * — and force-mutes a published microphone so the audio stops now rather than
  * at their next publish.
+ *
+ * A kick (`kicked: true`, alone) goes through `kick_member` instead, which has
+ * its own permission, `KICK_MEMBERS`. To LiveKit it is a ban: the row says
+ * `is_banned` until an invite brings them back, so they are removed outright.
  */
 
 const supabase = createClient(
@@ -47,6 +51,15 @@ function rpcErrorResponse(message: string): Response {
   if (message.includes("cannot_ban_peer")) {
     return CustomResponse.error("Somebody who can ban cannot be banned", EC.PERMISSION_DENIED);
   }
+  if (message.includes("cannot_kick_peer")) {
+    return CustomResponse.error("Somebody who can kick or ban cannot be kicked", EC.PERMISSION_DENIED);
+  }
+  if (message.includes("cannot_kick_bot")) {
+    return CustomResponse.error("A bot is removed from Bots, not kicked", EC.PERMISSION_DENIED);
+  }
+  if (message.includes("user_banned")) {
+    return CustomResponse.error("They are already banned", EC.USER_BANNED);
+  }
   if (message.includes("user_not_found")) {
     return CustomResponse.error("Member not found", EC.USER_NOT_FOUND);
   }
@@ -59,7 +72,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { target_user_id, muted, deafened, banned } = await req.json();
+    const { target_user_id, muted, deafened, banned, kicked } = await req.json();
     const token = extractBearerToken(req);
 
     const auth = await authenticateToken(supabase, token);
@@ -77,12 +90,14 @@ Deno.serve(async (req) => {
       { global: { headers: { Authorization: `Bearer ${token}` } } },
     );
 
-    const { error: rpcError } = await asCaller.rpc("moderate_user", {
-      p_target: target_user_id,
-      p_muted: muted ?? null,
-      p_deafened: deafened ?? null,
-      p_banned: banned ?? null,
-    });
+    const { error: rpcError } = kicked === true
+      ? await asCaller.rpc("kick_member", { p_target: target_user_id })
+      : await asCaller.rpc("moderate_user", {
+        p_target: target_user_id,
+        p_muted: muted ?? null,
+        p_deafened: deafened ?? null,
+        p_banned: banned ?? null,
+      });
 
     if (rpcError) return rpcErrorResponse(rpcError.message ?? String(rpcError));
 
@@ -90,7 +105,10 @@ Deno.serve(async (req) => {
     //    and a permission update replaces all of them at once.
     const { data: targetData, error: targetError } = await supabase
       .from(DBSchema.users.tableName)
-      .select(`${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ${DBSchema.users.isBanned}`)
+      .select(
+        `${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ${DBSchema.users.isBanned}, ` +
+          DBSchema.users.kickedAt,
+      )
       .eq(DBSchema.users.id, target_user_id)
       .single();
 
@@ -102,6 +120,7 @@ Deno.serve(async (req) => {
     const isMuted: boolean = target[DBSchema.users.isMuted] === true;
     const isDeafened: boolean = target[DBSchema.users.isDeafened] === true;
     const isBanned: boolean = target[DBSchema.users.isBanned] === true;
+    const isKicked: boolean = target[DBSchema.users.kickedAt] != null;
 
     // 3. Apply it to whatever they are connected to right now. The row is
     //    already written, so a LiveKit failure must not fail the request —
@@ -118,6 +137,7 @@ Deno.serve(async (req) => {
       muted: isMuted,
       deafened: isDeafened,
       banned: isBanned,
+      kicked: isKicked,
       connections_updated: applied.updated,
       livekit_error: applied.error,
     });

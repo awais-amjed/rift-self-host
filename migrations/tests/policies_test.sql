@@ -6728,6 +6728,152 @@ SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000305');
 UPDATE roles SET permissions = permissions & ~app.perm('BAN_MEMBERS')
  WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND name = 'Moderator';
 
+-- ---------- kicking is KICK_MEMBERS, and an invite lifts it ----------
+-- r_kim holds a role and a private seat, so the kick has something to take.
+
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-000000000309');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000309', 'aaaa0000-0000-4000-8000-000000000001',
+        'r_kim', 'Kim', 'pk-r_kim', 'sid-r_kim', 'chat-r_kim');
+INSERT INTO roles (id, server_id, name, position, permissions)
+VALUES ('aaaa2222-0000-4000-8000-0000000000c1', 'aaaa0000-0000-4000-8000-000000000001',
+        'Regular', 50, app.perm('ATTACH_FILES'));
+INSERT INTO member_roles (user_id, role_id)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000309', 'aaaa2222-0000-4000-8000-0000000000c1');
+INSERT INTO channels (id, server_id, name, channel_type, is_private)
+VALUES ('aaaa1111-0000-4000-8000-0000000000e9', 'aaaa0000-0000-4000-8000-000000000001',
+        'kim-room', 'text', true);
+INSERT INTO channel_members (channel_id, user_id, can_manage) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000e9', '11111111-aaaa-4aaa-8aaa-000000000001', true),
+  ('aaaa1111-0000-4000-8000-0000000000e9', '11111111-aaaa-4aaa-8aaa-000000000309', false);
+INSERT INTO invites (server_id, code, role_id, max_uses)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', 'kickback', NULL, 1);
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000309');
+    RAISE EXCEPTION 'FAIL: a plain member kicked somebody';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_authorized' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a kick takes KICK_MEMBERS';
+END $$;
+
+RESET ROLE;
+-- A second Moderator: holds KICK_MEMBERS, so is the peer rule's target.
+INSERT INTO member_roles (user_id, role_id)
+SELECT '11111111-aaaa-4aaa-8aaa-000000000305', r.id FROM roles r
+ WHERE r.server_id = 'aaaa0000-0000-4000-8000-000000000001' AND r.name = 'Moderator';
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000305');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000305');
+    RAISE EXCEPTION 'FAIL: one moderator kicked another';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_kick_peer' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000001');
+    RAISE EXCEPTION 'FAIL: a moderator kicked an admin';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_moderate_admin' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000300');
+    RAISE EXCEPTION 'FAIL: a moderator kicked themselves';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'cannot_moderate_self' THEN RAISE; END IF;
+  END;
+
+  PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000309');
+  BEGIN
+    PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000309');
+    RAISE EXCEPTION 'FAIL: a kicked member was kicked again';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'user_banned' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a moderator kicks a member, but never a peer, an admin or themselves';
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE v_reason TEXT; v_uses INTEGER;
+BEGIN
+  IF NOT (SELECT is_banned AND kicked_at IS NOT NULL FROM users
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: a kick did not lock the member out';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles
+              WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000309')
+     OR EXISTS (SELECT 1 FROM channel_members
+                 WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: a kicked member kept a role or a private seat';
+  END IF;
+  IF NOT (SELECT is_kicked FROM member_directory
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: the member list cannot tell a kick from a ban';
+  END IF;
+  RAISE NOTICE 'ok  a kick locks them out and takes their roles and private seats';
+
+  -- The way back: any live invite to this server, counted like a new join.
+  v_reason := register_user('kickback', '11111111-aaaa-4aaa-8aaa-000000000309',
+                            'pk-r_kim', 'sid-r_kim', 'ignored', 'Ignored') ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'readmitted' THEN
+    RAISE EXCEPTION 'FAIL: an invite did not bring a kicked member back: %', v_reason;
+  END IF;
+  IF (SELECT is_banned OR kicked_at IS NOT NULL OR username <> 'r_kim' FROM users
+       WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: readmission left them out, or renamed them';
+  END IF;
+  IF EXISTS (SELECT 1 FROM invites WHERE code = 'kickback') THEN
+    RAISE EXCEPTION 'FAIL: a single-use invite survived the readmission it was spent on';
+  END IF;
+  RAISE NOTICE 'ok  a new invite brings a kicked member back as themselves, and is spent';
+END $$;
+
+-- A ban is the stronger of the two: banning a kicked member makes it stick.
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+DO $$
+BEGIN
+  PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000309');
+  PERFORM moderate_user('11111111-aaaa-4aaa-8aaa-000000000309', NULL, NULL, true);
+END $$;
+
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+INSERT INTO invites (server_id, code) VALUES ('aaaa0000-0000-4000-8000-000000000001', 'kickback2');
+DO $$
+DECLARE v_reason TEXT;
+BEGIN
+  IF (SELECT kicked_at IS NOT NULL OR NOT is_banned FROM users
+       WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: banning a kicked member left the kick in place';
+  END IF;
+  v_reason := register_user('kickback2', '11111111-aaaa-4aaa-8aaa-000000000309',
+                            'pk-r_kim', 'sid-r_kim', 'r_kim', 'Kim') ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'already_registered'
+     OR NOT (SELECT is_banned FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: an invite lifted a ban: %', v_reason;
+  END IF;
+  RAISE NOTICE 'ok  a ban on a kicked member is a ban, and no invite lifts it';
+END $$;
+
+DELETE FROM member_roles
+ WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000305';
+SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000305');
+
 -- ---------- time-outs ----------
 
 SET LOCAL ROLE authenticated;

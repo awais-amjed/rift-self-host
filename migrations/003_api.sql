@@ -65,11 +65,70 @@ BEGIN
     RAISE EXCEPTION 'cannot_ban_peer';
   END IF;
 
+  -- A ban, or lifting one, settles the question a kick left open: banning a
+  -- kicked member makes it permanent, and lifting it lets them straight back.
   UPDATE users SET
     is_muted    = COALESCE(p_muted,    is_muted),
     is_deafened = COALESCE(p_deafened, is_deafened),
-    is_banned   = COALESCE(p_banned,   is_banned)
+    is_banned   = COALESCE(p_banned,   is_banned),
+    kicked_at   = CASE WHEN p_banned IS NULL THEN kicked_at END
    WHERE id = p_target;
+
+  RETURN jsonb_build_object('reason', 'ok');
+END; $$;
+
+-- ============================================================
+-- Kicks
+-- ============================================================
+-- Removal that a new invite undoes. It is a ban in every way the server
+-- enforces — the same flag, so every policy, the key sweep, the call
+-- teardown and the member count already treat a kicked member as gone — with
+-- `kicked_at` beside it saying an invite may lift it (`register_user`).
+--
+-- What made them more than a newcomer goes with them: their roles and their
+-- seats in private channels. They come back as what the invite grants, under
+-- the same name and with the messages they wrote, because the row is theirs
+-- and nobody else's identity can use it.
+--
+-- `KICK_MEMBERS`, and the ban's rules about who it may reach: not yourself,
+-- not an admin, not a bot (removed from Bots, never invited back), and not
+-- somebody who could remove you in return. A banned member cannot be kicked:
+-- that would turn a ban into something any invite lifts.
+
+CREATE OR REPLACE FUNCTION kick_member(p_target UUID) RETURNS JSONB
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_target users%ROWTYPE;
+BEGIN
+  IF NOT app.has_perm('KICK_MEMBERS') THEN
+    RAISE EXCEPTION 'not_authorized';
+  END IF;
+
+  SELECT * INTO v_target FROM users
+   WHERE id = p_target AND server_id = app.server_id();
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'user_not_found';
+  END IF;
+  IF v_target.id = auth.uid() THEN
+    RAISE EXCEPTION 'cannot_moderate_self';
+  END IF;
+  IF v_target.is_server_admin THEN
+    RAISE EXCEPTION 'cannot_moderate_admin';
+  END IF;
+  IF v_target.is_bot THEN
+    RAISE EXCEPTION 'cannot_kick_bot';
+  END IF;
+  IF (app.permissions_of(v_target.id)
+      & (app.perm('KICK_MEMBERS') | app.perm('BAN_MEMBERS'))) <> 0 THEN
+    RAISE EXCEPTION 'cannot_kick_peer';
+  END IF;
+  IF v_target.is_banned THEN
+    RAISE EXCEPTION 'user_banned';
+  END IF;
+
+  DELETE FROM member_roles    WHERE user_id = p_target;
+  DELETE FROM channel_members WHERE user_id = p_target;
+  UPDATE users SET is_banned = true, kicked_at = now() WHERE id = p_target;
 
   RETURN jsonb_build_object('reason', 'ok');
 END; $$;
@@ -2925,6 +2984,44 @@ BEGIN
   END IF;
 
   IF EXISTS (SELECT 1 FROM users WHERE id = p_user_id) THEN
+    -- A kicked member coming back. A kick is lifted by exactly this, so they
+    -- are let in the way anybody arriving is: the cap applies (a kicked
+    -- member holds no seat, like a banned one), the invite's role is theirs,
+    -- and the invite is counted. Everyone else already here — a member, one
+    -- who left, one who is banned — is the `register` edge function's to
+    -- answer, and `already_registered` sends it there.
+    IF NOT v_invite.is_bot AND EXISTS (
+         SELECT 1 FROM users u
+          WHERE u.id = p_user_id AND u.server_id = v_invite.server_id
+            AND u.kicked_at IS NOT NULL) THEN
+      SELECT s.max_members INTO v_max
+        FROM servers s WHERE s.id = v_invite.server_id FOR UPDATE;
+      IF COALESCE(v_max, 0) > 0 THEN
+        SELECT count(*) INTO v_members
+          FROM users u
+         WHERE u.server_id = v_invite.server_id AND NOT u.is_banned;
+        IF v_members >= v_max THEN
+          RETURN jsonb_build_object('reason', 'server_full');
+        END IF;
+      END IF;
+
+      UPDATE users SET is_banned = false, kicked_at = NULL WHERE id = p_user_id;
+      INSERT INTO member_roles (user_id, role_id)
+      SELECT p_user_id, r.id
+        FROM roles r
+       WHERE r.server_id = v_invite.server_id
+         AND r.id = v_invite.role_id
+         AND NOT r.is_everyone
+         AND NOT r.is_owner
+      ON CONFLICT DO NOTHING;
+
+      UPDATE invites SET uses = uses + 1 WHERE id = v_invite.id;
+      IF v_invite.max_uses IS NOT NULL AND v_invite.uses + 1 >= v_invite.max_uses THEN
+        DELETE FROM invites WHERE id = v_invite.id;
+      END IF;
+      RETURN jsonb_build_object('reason', 'readmitted',
+                                'server_id', v_invite.server_id);
+    END IF;
     RETURN jsonb_build_object('reason', 'already_registered');
   END IF;
   IF EXISTS (SELECT 1 FROM users
@@ -3107,6 +3204,7 @@ AS $$
         'is_muted',        me.is_muted,
         'is_deafened',     me.is_deafened,
         'is_banned',       me.is_banned,
+        'is_kicked',       me.kicked_at IS NOT NULL,
         'is_bot',          me.is_bot,
         'manifest',        me.manifest,
         'timed_out_until', me.timed_out_until,

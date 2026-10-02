@@ -227,6 +227,10 @@ GRANT EXECUTE ON FUNCTION mark_all_read()          TO authenticated;
 
 GRANT EXECUTE ON FUNCTION moderate_user(UUID, BOOLEAN, BOOLEAN, BOOLEAN) TO authenticated;
 
+-- Through the `moderate_user` edge function in practice, which also takes the
+-- member out of any call; the function itself is the gate.
+GRANT EXECUTE ON FUNCTION kick_member(UUID) TO authenticated;
+
 -- Additive to the UPDATE (name) grant above. Who may write is still decided by
 -- `channels_update_managers`; this only widens which columns their UPDATE may
 -- name.

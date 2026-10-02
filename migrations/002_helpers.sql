@@ -1315,7 +1315,10 @@ CREATE OR REPLACE VIEW member_directory
          -- as a request, or be refused, which the sender's composer says
          -- before anybody types; and a time-out, which a moderator is shown.
          u.dm_policy,
-         u.timed_out_until
+         u.timed_out_until,
+         -- A kicked member is banned until an invite brings them back; this
+         -- lets a moderator's list say which of the two it is.
+         u.kicked_at IS NOT NULL AS is_kicked
     FROM users u;
 
 CREATE OR REPLACE VIEW member_role_list
