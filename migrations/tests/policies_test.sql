@@ -6783,8 +6783,23 @@ END $$;
 -- ---------- a first DM, by each setting ----------
 -- amy → ben is ordinary (ben: everyone). cal asks for requests, dee for
 -- nobody. The ledger itself is out of reach.
+--
+-- `app.announce_to_member` is a recorder for the length of this section, so
+-- who was told about a request can be read off directly; it is restored after
+-- the explicit accept.
 
 RESET ROLE;
+
+CREATE TEMP TABLE told (user_id UUID, event TEXT);
+CREATE TEMP TABLE real_announce (def TEXT);
+INSERT INTO real_announce
+SELECT pg_get_functiondef('app.announce_to_member(uuid, text)'::regprocedure);
+
+CREATE OR REPLACE FUNCTION app.announce_to_member(p_user UUID, p_event TEXT)
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $recorder$
+BEGIN
+  INSERT INTO told VALUES (p_user, p_event);
+END $recorder$;
 UPDATE users SET dm_policy = 'requests' WHERE id = '11111111-aaaa-4aaa-8aaa-000000000303';
 UPDATE users SET dm_policy = 'nobody'   WHERE id = '11111111-aaaa-4aaa-8aaa-000000000304';
 
@@ -6891,6 +6906,32 @@ BEGIN
   END IF;
   RAISE NOTICE 'ok  replying to a request accepts it';
 END $$;
+
+-- ben asks cal too, and cal accepts with the button: ben is told, so his
+-- composer opens without reopening the conversation.
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000302', '11111111-aaaa-4aaa-8aaa-000000000303', 'hi-cal', 'n', 's', 1);
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+SELECT answer_dm_request('11111111-aaaa-4aaa-8aaa-000000000302', true);
+
+RESET ROLE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM told
+              WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                AND event = 'dm_requests') THEN
+    RAISE EXCEPTION 'FAIL: amy was told about her request being ignored or replied to';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM told
+                  WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000302'
+                    AND event = 'dm_requests') THEN
+    RAISE EXCEPTION 'FAIL: ben was not told his request was accepted';
+  END IF;
+  RAISE NOTICE 'ok  accepting tells the sender; ignoring tells nobody';
+END $$;
+DO $$ BEGIN EXECUTE (SELECT def FROM real_announce); END $$;
+SET LOCAL ROLE authenticated;
 
 -- Changing the setting later leaves an existing conversation alone.
 RESET ROLE;

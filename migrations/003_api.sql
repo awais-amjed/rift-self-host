@@ -2211,8 +2211,10 @@ CREATE OR REPLACE FUNCTION dm_requests() RETURNS JSONB
 $$;
 
 -- Accept or ignore. Accepting opens the conversation and puts it in the
--- caller's list, where the request's message becomes ordinary mail. Ignoring
--- tells nobody: the sender's side reads `waiting` either way.
+-- caller's list, where the request's message becomes ordinary mail, and rings
+-- the sender: their composer stays locked on "waiting" until they read the
+-- state again. Ignoring tells nobody: the sender's side reads `waiting` either
+-- way.
 --
 -- An ignored request can still be accepted later, and replying to one — from
 -- the conversation, without pressing anything — accepts it too (004).
@@ -2256,6 +2258,9 @@ BEGIN
   END IF;
 
   PERFORM app.announce_to_member(v_me, 'dm_requests');
+  IF p_accept THEN
+    PERFORM app.announce_to_member(p_peer, 'dm_requests');
+  END IF;
   RETURN CASE WHEN p_accept THEN 'open' ELSE 'ignored' END;
 END; $$;
 
