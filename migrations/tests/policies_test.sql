@@ -7445,8 +7445,45 @@ BEGIN
   RAISE NOTICE 'ok  twenty open reports each, no more';
 END $$;
 
--- A ban answers every open report about the person, whoever filed it.
+-- So does a kick, and each is recorded as what it was. Undone afterwards, so
+-- the ban below finds the same person and the same reports.
 SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');
+
+DO $$
+DECLARE v_closed INTEGER;
+BEGIN
+  BEGIN
+    PERFORM kick_member('11111111-aaaa-4aaa-8aaa-000000000301');
+    BEGIN
+      PERFORM resolve_report((SELECT min(id) FROM reports
+                               WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                                 AND outcome IS NULL), 'banned');
+      RAISE EXCEPTION 'FAIL: a kick was recorded as a ban';
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM <> 'outcome_not_done' THEN RAISE; END IF;
+    END;
+    v_closed := resolve_report((SELECT min(id) FROM reports
+                                 WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                                   AND outcome IS NULL), 'kicked');
+    IF v_closed <> 20 THEN
+      RAISE EXCEPTION 'FAIL: a kick closed % reports, expected 20', v_closed;
+    END IF;
+    RAISE EXCEPTION 'undo';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'undo' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM resolve_report((SELECT min(id) FROM reports
+                             WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                               AND outcome IS NULL), 'kicked');
+    RAISE EXCEPTION 'FAIL: a report was closed as kicked with nobody kicked';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'outcome_not_done' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a kick closes every open report about the person, as a kick';
+END $$;
+
+-- A ban answers every open report about the person, whoever filed it.
 
 DO $$
 DECLARE v_closed INTEGER;

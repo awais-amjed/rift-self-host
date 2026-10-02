@@ -174,9 +174,10 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- What was done about a report. `NULL` on the row is "open". Each value is
 -- checked against the world when it is recorded (`resolve_report`), so the
--- log says what happened rather than what somebody clicked.
+-- log says what happened rather than what somebody clicked. `kicked` and
+-- `banned` are told apart by `users.kicked_at`, since a kick is a ban too.
 DO $$ BEGIN
-  CREATE TYPE report_outcome AS ENUM ('dismissed', 'deleted', 'timed_out', 'banned');
+  CREATE TYPE report_outcome AS ENUM ('dismissed', 'deleted', 'timed_out', 'banned', 'kicked');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ============================================================

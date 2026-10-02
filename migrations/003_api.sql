@@ -276,13 +276,15 @@ END; $$;
 
 -- Recording what was done. The action itself happens first, through the path
 -- it always takes — deleting a message is the client's (it holds the blob
--- keys), a ban is `moderate_user`, a time-out is `time_out_member` — and this
--- checks it did, so the log cannot say "banned" about somebody who is not.
+-- keys), a ban is `moderate_user`, a kick `kick_member`, a time-out is
+-- `time_out_member` — and this checks it did, so the log cannot say "banned"
+-- about somebody who is not, nor about somebody who was only kicked.
 --
 -- One action answers every open report it settles: deleting a message closes
--- each report about that message, and a ban closes each report about that
--- person. Dismissing and timing out close only the one in hand, because the
--- next report about the same person may be about something new.
+-- each report about that message, and a ban or a kick closes each report
+-- about that person, who is no longer there to be reported. Dismissing and
+-- timing out close only the one in hand, because the next report about the
+-- same person may be about something new.
 --
 -- Nobody closes a report about themselves, which is the same line
 -- `reports_select` draws around reading one.
@@ -315,7 +317,13 @@ BEGIN
     RAISE EXCEPTION 'outcome_not_done';
   END IF;
   IF p_outcome = 'banned' AND NOT EXISTS (
-       SELECT 1 FROM users u WHERE u.id = v_report.target_id AND u.is_banned) THEN
+       SELECT 1 FROM users u WHERE u.id = v_report.target_id AND u.is_banned
+          AND u.kicked_at IS NULL) THEN
+    RAISE EXCEPTION 'outcome_not_done';
+  END IF;
+  IF p_outcome = 'kicked' AND NOT EXISTS (
+       SELECT 1 FROM users u WHERE u.id = v_report.target_id AND u.is_banned
+          AND u.kicked_at IS NOT NULL) THEN
     RAISE EXCEPTION 'outcome_not_done';
   END IF;
 
@@ -326,7 +334,8 @@ BEGIN
      AND r.target_id IS DISTINCT FROM auth.uid()
      AND (r.id = p_report
           OR (p_outcome = 'deleted' AND r.message_id = v_report.message_id)
-          OR (p_outcome = 'banned'  AND r.target_id  = v_report.target_id));
+          OR (p_outcome IN ('banned', 'kicked')
+              AND r.target_id = v_report.target_id));
   GET DIAGNOSTICS v_closed = ROW_COUNT;
   RETURN v_closed;
 END; $$;
