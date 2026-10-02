@@ -2,9 +2,11 @@
 -- Rift self-hosted server — 001: the tables
 -- ============================================================
 -- Every table, type and index this schema has, in the shape it is meant to
--- have. Nothing here describes how it got that way: a server is built by
--- running these eight files in order against an empty database, and that is
--- the only path any of them describe.
+-- have. Nothing here describes how it got that way: 001 to 008 are the
+-- baseline, run in order against an empty database, and that is the only
+-- path any of them describe. They are locked from Oct 3 2026
+-- (`locked.sha256`): a later change is a new numbered file, which a server
+-- runs once, after these.
 --
 -- Where the rest of it lives:
 --   002_helpers    the permission bits, the predicates policies are written in,

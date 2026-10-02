@@ -18,15 +18,18 @@ scripts/db_test.sh     runs both suites against a Postgres container
 directories in the app repo, refreshed by a sync script; they now live here,
 where the thing that ships them lives, and the app repo has none.
 
-There are eight files and they are split by *kind* — tables, helpers, RPCs,
-triggers, realtime, storage, jobs, security — not by feature. Nothing in them
-describes how the schema got here: each one states the shape it is meant to
-have, so a table is created with its final columns rather than altered into
-them afterwards. There are no real deployments yet, so there is nothing to
-migrate *from*; when that changes, a change becomes 009 and the eight stay put.
+`001` to `008` are the baseline, split by *kind* — tables, helpers, RPCs,
+triggers, realtime, storage, jobs, security — not by feature, and each states
+the shape it is meant to have. Since Oct 3 2026 they are locked: a change to
+the schema is the next numbered file, which the console runs once on every
+server after the ones it has, and the existing files stay put.
+`migrations/locked.sha256` holds each file's checksum, and
+`./scripts/check_locked.sh` (the first thing `db_test.sh` runs) fails on an
+edit or on a new file without its line. A new file revokes and grants what it
+adds itself, since the baseline's blanket revoke ran before it.
 
 That also means the schema's tests are here. `./scripts/db_test.sh` builds a
-scratch database from these files, applies all eight, and runs both suites
+scratch database from these files, applies every one in order, and runs both suites
 against it — so it tests the schema this repository ships rather than whatever
 is in a long-lived development database. (It used to run the policy suite
 against the dev stack's live database, which meant applying each new migration

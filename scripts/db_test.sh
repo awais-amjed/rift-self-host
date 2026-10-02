@@ -29,6 +29,10 @@ MIGRATIONS="$ROOT/migrations"
 
 ok_line() { echo "   ok  $1"; }
 
+echo "── no shipped migration was edited ─────────────────────────"
+"$ROOT/scripts/check_locked.sh"
+echo
+
 rift_scratch_create
 trap rift_scratch_drop EXIT
 rift_scratch_shim

@@ -302,8 +302,10 @@ silent re-login still triggers.
 Defined by `migrations/`, run in order on a fresh instance. The central
 project has its own set, in the `rift-central` repository.
 
-Eight files, split by *kind* rather than by feature, so an object is defined in
-exactly one place and the order is a dependency order.
+The baseline, `001` to `008`, is split by *kind* rather than by feature, so an
+object is defined in exactly one place and the order is a dependency order.
+It is locked (`migrations/locked.sha256`): later changes are further numbered
+files, each run once after it, and the list below grows with them.
 
 1. **001_schema.sql** — every type, table and index, in final shape. Notable shapes:
    `server_secrets` split out of `servers` so the rest of that row is safe to read directly;
