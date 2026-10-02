@@ -1847,96 +1847,12 @@ END; $$;
 -- ============================================================
 -- 2. Registration grants only what the invite names
 -- ============================================================
-
-CREATE OR REPLACE FUNCTION register_user(
-  p_invite_code  TEXT,
-  p_user_id      UUID,
-  p_public_key   TEXT,
-  p_stable_id    TEXT,
-  p_username     TEXT,
-  p_display_name TEXT
-) RETURNS JSONB
-  LANGUAGE plpgsql SET search_path = public AS $$
-DECLARE
-  v_invite invites%ROWTYPE;
-BEGIN
-  SELECT * INTO v_invite FROM invites WHERE code = p_invite_code FOR UPDATE;
-
-  IF NOT FOUND THEN
-    RETURN jsonb_build_object('reason', 'not_found');
-  END IF;
-  IF v_invite.expires_at IS NOT NULL AND v_invite.expires_at <= now() THEN
-    DELETE FROM invites WHERE id = v_invite.id;
-    RETURN jsonb_build_object('reason', 'expired');
-  END IF;
-  IF v_invite.max_uses IS NOT NULL AND v_invite.uses >= v_invite.max_uses THEN
-    RETURN jsonb_build_object('reason', 'exhausted');
-  END IF;
-
-  IF EXISTS (SELECT 1 FROM users WHERE id = p_user_id) THEN
-    RETURN jsonb_build_object('reason', 'already_registered');
-  END IF;
-  IF EXISTS (SELECT 1 FROM users
-              WHERE server_id = v_invite.server_id
-                AND (public_key = p_public_key OR stable_id = p_stable_id)) THEN
-    RETURN jsonb_build_object('reason', 'identity_taken');
-  END IF;
-  IF EXISTS (SELECT 1 FROM users
-              WHERE server_id = v_invite.server_id AND username = p_username) THEN
-    RETURN jsonb_build_object('reason', 'username_taken');
-  END IF;
-  -- Named rather than left to `users_username_shape`, so a caller that went
-  -- round the client's field gets a reason it can show instead of a check
-  -- violation it has to guess at.
-  IF p_username !~ '^[A-Za-z0-9_.-]{2,32}$' THEN
-    RETURN jsonb_build_object('reason', 'username_invalid');
-  END IF;
-
-  INSERT INTO users (
-    id, server_id, username, display_name, public_key, stable_id, is_bot
-  ) VALUES (
-    p_user_id, v_invite.server_id, p_username, p_display_name,
-    p_public_key, p_stable_id, v_invite.is_bot
-  );
-
-  -- The role the invite names, if any. Nothing else: the baseline is not
-  -- assigned, and there is no default role.
-  INSERT INTO member_roles (user_id, role_id)
-  SELECT p_user_id, r.id
-    FROM roles r
-   WHERE r.server_id = v_invite.server_id
-     AND r.id = v_invite.role_id
-     AND NOT r.is_everyone
-     AND NOT r.is_owner
-  ON CONFLICT DO NOTHING;
-
-  -- The first person in owns the place.
-  IF NOT v_invite.is_bot AND NOT EXISTS (
-       SELECT 1 FROM member_roles mr
-         JOIN roles r ON r.id = mr.role_id
-        WHERE r.server_id = v_invite.server_id AND r.is_owner) THEN
-    INSERT INTO member_roles (user_id, role_id)
-    SELECT p_user_id, r.id FROM roles r
-     WHERE r.server_id = v_invite.server_id AND r.is_owner;
-  END IF;
-
-  INSERT INTO read_state (user_id, scope, scope_id, last_read_id)
-  SELECT p_user_id, 'channel', c.id,
-         COALESCE((SELECT max(m.id) FROM messages m WHERE m.channel_id = c.id), 0)
-    FROM channels c
-   WHERE c.server_id = v_invite.server_id;
-
-  UPDATE invites SET uses = uses + 1 WHERE id = v_invite.id;
-  IF v_invite.max_uses IS NOT NULL AND v_invite.uses + 1 >= v_invite.max_uses THEN
-    DELETE FROM invites WHERE id = v_invite.id;
-  END IF;
-
-  RETURN jsonb_build_object(
-    'reason', 'ok',
-    'server_id', v_invite.server_id,
-    'is_bot', v_invite.is_bot
-  );
-END; $$;
+-- `register_user` is defined once, further down under "Refusing the member
+-- who would go over": the same function with the member cap and a kicked
+-- member's readmission added. A second `CREATE OR REPLACE` of the same
+-- signature in the same file replaced the one that stood here, and two bodies
+-- claiming to be one function is a trap for whoever edits the first and
+-- watches nothing change.
 
 -- ============================================================
 -- A badge stops reading the whole server
@@ -2969,11 +2885,18 @@ COMMENT ON FUNCTION search_members(TEXT, UUID, BOOLEAN, BOOLEAN, INTEGER) IS
 -- 5. Refusing the member who would go over
 -- ============================================================
 
-CREATE OR REPLACE FUNCTION public.register_user(p_invite_code text, p_user_id uuid, p_public_key text, p_stable_id text, p_username text, p_display_name text)
- RETURNS jsonb
- LANGUAGE plpgsql
- SET search_path TO 'public'
-AS $$
+-- Registration grants only what the invite names: the invite's role and,
+-- for the first person in, the owner's.
+
+CREATE OR REPLACE FUNCTION register_user(
+  p_invite_code  TEXT,
+  p_user_id      UUID,
+  p_public_key   TEXT,
+  p_stable_id    TEXT,
+  p_username     TEXT,
+  p_display_name TEXT
+) RETURNS JSONB
+  LANGUAGE plpgsql SET search_path = public AS $$
 DECLARE
   v_invite  invites%ROWTYPE;
   v_max     INTEGER;
@@ -3122,8 +3045,7 @@ BEGIN
     'server_id', v_invite.server_id,
     'is_bot', v_invite.is_bot
   );
-END; $$
-;
+END; $$;
 
 -- ============================================================
 -- 6. Telling the client, in the call it already makes
