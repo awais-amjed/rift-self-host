@@ -16,6 +16,14 @@
  * simply broken: channels that never subscribe, no error anyone can read. So
  * the console installs the rules as `supabase_admin` at setup and at every
  * start, and keeps checking until the table exists to install them on.
+ *
+ * Each rule asks `app.can_use_topic` inside a subquery, so it runs once per
+ * join rather than once per partition. The table is split by day, and
+ * Realtime's join check selects its probe rows by id alone, so it reads every
+ * partition. A condition that never mentions the row is checked once per
+ * partition read: eleven partitions, eleven calls. Measured Oct 2 2026: with
+ * a 0.2 s delay in the function a join took 2.2 s, which Realtime serves one at
+ * a time per socket. The subquery is planned as an InitPlan, evaluated once.
  */
 import { type PostgresTarget, queryRows, runSql, targetFromEnv } from "../postgres.ts";
 import { adminTarget } from "./realtime.ts";
@@ -24,9 +32,16 @@ import { adminTarget } from "./realtime.ts";
 export const TOPIC_RULE_NAMES = ["rift_topic_read", "rift_topic_write"] as const;
 
 /**
+ * Written on each policy as its comment. A server whose rules carry another
+ * one has an older shape and gets them made again, which is how a changed
+ * rule reaches servers that already had the old one. Bump it with any change
+ * to the SQL below.
+ */
+export const TOPIC_RULES_VERSION = "rift topic rules 2";
+
+/**
  * Idempotent, and a no-op until Realtime has made its table. Dropped and made
- * again rather than skipped when present, so a changed rule reaches servers
- * that already had the old one.
+ * again rather than skipped when present.
  */
 export const TOPIC_RULES_SQL = `
 DO $$
@@ -37,18 +52,21 @@ BEGIN
   DROP POLICY IF EXISTS rift_topic_read ON realtime.messages;
   CREATE POLICY rift_topic_read ON realtime.messages
     FOR SELECT TO authenticated
-    USING (app.can_use_topic(realtime.topic(), false));
+    USING ((SELECT app.can_use_topic(realtime.topic(), false)));
+  COMMENT ON POLICY rift_topic_read ON realtime.messages IS '${TOPIC_RULES_VERSION}';
   DROP POLICY IF EXISTS rift_topic_write ON realtime.messages;
   CREATE POLICY rift_topic_write ON realtime.messages
     FOR INSERT TO authenticated
-    WITH CHECK (app.can_use_topic(realtime.topic(), true));
+    WITH CHECK ((SELECT app.can_use_topic(realtime.topic(), true)));
+  COMMENT ON POLICY rift_topic_write ON realtime.messages IS '${TOPIC_RULES_VERSION}';
 END $$;`;
 
-const COUNT_SQL = `SELECT count(*) FROM pg_policies
-  WHERE schemaname = 'realtime' AND tablename = 'messages'
-    AND policyname IN (${TOPIC_RULE_NAMES.map((name) => `'${name}'`).join(", ")})`;
+const COUNT_SQL = `SELECT count(*) FROM pg_policy p
+  WHERE p.polrelid = to_regclass('realtime.messages')
+    AND p.polname IN (${TOPIC_RULE_NAMES.map((name) => `'${name}'`).join(", ")})
+    AND obj_description(p.oid, 'pg_policy') = '${TOPIC_RULES_VERSION}'`;
 
-/** Whether both rules are in place. */
+/** Whether both rules are in place, in their current shape. */
 export async function topicRulesInstalled(target: PostgresTarget): Promise<boolean> {
   const rows = await queryRows(adminTarget(target), COUNT_SQL);
   return rows[0] === String(TOPIC_RULE_NAMES.length);
@@ -70,7 +88,8 @@ const CHECK_MS = 30 * 1000;
 
 /**
  * Keep the rules in place for as long as the console runs: installed once the
- * table first exists, and again if anything ever takes them away.
+ * table first exists, again if anything ever takes them away, and again when
+ * this console carries a newer shape than the server has.
  */
 export function startTopicRuleWatch(isConfigured: () => boolean): void {
   let announced = false;
