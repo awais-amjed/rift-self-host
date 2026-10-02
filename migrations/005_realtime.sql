@@ -273,6 +273,16 @@ BEGIN
   IF TG_OP = 'UPDATE' AND OLD.is_banned IS DISTINCT FROM NEW.is_banned THEN
     PERFORM realtime.send('{}'::jsonb, 'sweep', 'server:' || v_row.server_id, true);
   END IF;
+
+  -- A bot arriving, leaving or publishing a new command list. An open
+  -- channel's `/` menu, and whether a typed command goes out as one, come from
+  -- the command lists it read on opening, so without this a new verb is sent
+  -- as sealed text the bot cannot open until the channel is opened again. Its
+  -- own event rather than `members`, which rings on every mute in a call.
+  IF v_row.is_bot AND (TG_OP <> 'UPDATE'
+                       OR OLD.manifest IS DISTINCT FROM NEW.manifest) THEN
+    PERFORM realtime.send('{}'::jsonb, 'bots', 'server:' || v_row.server_id, true);
+  END IF;
   RETURN NULL;
 END $$;
 

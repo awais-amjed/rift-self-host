@@ -2455,6 +2455,43 @@ VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b0',
         'aaaa0000-0000-4000-8000-000000000001',
         'modbot', 'ModBot', 'pk-bot', 'sid-bot', 'chat-bot', true);
 
+-- A bot's new command list is news to every open channel there: what a typed
+-- `/` turns into is decided from the lists read when the channel opened, so a
+-- verb published since went out as sealed text the bot could not read. A mute
+-- is not news, though it writes the same row — `bots` would ring through every
+-- call. This database has never run Realtime, so a recorder stands in for it.
+DO $$
+DECLARE
+  v_bot  UUID := '11111111-aaaa-4aaa-8aaa-0000000000b0';
+  v_told INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($2, $3)';
+
+  UPDATE users SET manifest = '{"commands":[{"name":"ping"}]}' WHERE id = v_bot;
+  UPDATE users SET is_muted = true WHERE id = v_bot;
+  UPDATE users SET is_muted = true WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+
+  SELECT count(*) INTO v_told FROM pg_temp.said WHERE event = 'bots';
+  IF v_told <> 1 OR NOT EXISTS (
+       SELECT 1 FROM pg_temp.said
+        WHERE event = 'bots' AND topic = 'server:aaaa0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a new command list rang `bots` % times, not once on its server', v_told;
+  END IF;
+
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  UPDATE users SET manifest = NULL, is_muted = false WHERE id = v_bot;
+  UPDATE users SET is_muted = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+  RAISE NOTICE 'ok  a bot''s new command list rings its server; a mute does not';
+END $$;
+
 SET LOCAL ROLE authenticated;
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
