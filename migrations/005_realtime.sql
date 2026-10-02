@@ -215,6 +215,33 @@ BEGIN
   RETURN NULL;
 END $$;
 
+-- ---------- the bots in a voice channel ----------
+-- `voice_bots`: a summon or a listening grant came or went. Every member draws
+-- both under the voice channels in their sidebar, and before this only the
+-- client that changed one re-read them — so a bot sent away by somebody
+-- else's `/disconnect` stayed "summoned" on everyone else's screen, keeping an
+-- empty channel drawn as occupied.
+--
+-- Per statement, like `sweep`, and an empty payload: what a client does with
+-- it is re-read both lists, and which rows it may see is the lists' own
+-- policies' business, not this ring's.
+CREATE OR REPLACE FUNCTION app.announce_voice_bots() RETURNS TRIGGER
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_server UUID;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RETURN NULL;
+  END IF;
+  FOR v_server IN
+    SELECT DISTINCT c.server_id
+      FROM changed g JOIN channels c ON c.id = g.channel_id
+  LOOP
+    PERFORM realtime.send('{}'::jsonb, 'voice_bots', 'server:' || v_server, true);
+  END LOOP;
+  RETURN NULL;
+END $$;
+
 CREATE OR REPLACE FUNCTION app.announce_member() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -688,6 +715,30 @@ CREATE TRIGGER bot_channel_keys_revoked
   AFTER DELETE ON bot_channel_keys
   REFERENCING OLD TABLE AS changed
   FOR EACH STATEMENT EXECUTE FUNCTION app.announce_bot_keys();
+
+DROP TRIGGER IF EXISTS bot_voice_summons_added ON bot_voice_summons;
+CREATE TRIGGER bot_voice_summons_added
+  AFTER INSERT ON bot_voice_summons
+  REFERENCING NEW TABLE AS changed
+  FOR EACH STATEMENT EXECUTE FUNCTION app.announce_voice_bots();
+
+DROP TRIGGER IF EXISTS bot_voice_summons_removed ON bot_voice_summons;
+CREATE TRIGGER bot_voice_summons_removed
+  AFTER DELETE ON bot_voice_summons
+  REFERENCING OLD TABLE AS changed
+  FOR EACH STATEMENT EXECUTE FUNCTION app.announce_voice_bots();
+
+DROP TRIGGER IF EXISTS bot_voice_grants_added ON bot_voice_grants;
+CREATE TRIGGER bot_voice_grants_added
+  AFTER INSERT ON bot_voice_grants
+  REFERENCING NEW TABLE AS changed
+  FOR EACH STATEMENT EXECUTE FUNCTION app.announce_voice_bots();
+
+DROP TRIGGER IF EXISTS bot_voice_grants_removed ON bot_voice_grants;
+CREATE TRIGGER bot_voice_grants_removed
+  AFTER DELETE ON bot_voice_grants
+  REFERENCING OLD TABLE AS changed
+  FOR EACH STATEMENT EXECUTE FUNCTION app.announce_voice_bots();
 
 DROP TRIGGER IF EXISTS soundboard_sounds_announce ON soundboard_sounds;
 CREATE TRIGGER soundboard_sounds_announce
