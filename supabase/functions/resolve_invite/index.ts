@@ -44,8 +44,15 @@ Deno.serve(async (req) => {
     if (error) {
       return CustomResponse.error("Error resolving invite", EC.DB_ERROR, error);
     }
+    // An invite is deleted at its last use (`register_user`), and an expired
+    // one by `cleanup-expired-invites`, so either looks like a mistyped code
+    // from here. The message has to cover all three, or a used-up invite
+    // reads as a typo.
     if (!data) {
-      return CustomResponse.error("Invalid invite code", EC.INVITE_INVALID);
+      return CustomResponse.error(
+        "That invite doesn't work. It may be used up, expired or withdrawn, or mistyped.",
+        EC.INVITE_INVALID,
+      );
     }
 
     const invite = data as Record<string, any>;

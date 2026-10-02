@@ -99,7 +99,11 @@ Deno.serve(async (req) => {
       case "ok":
         break;
       case "not_found":
-        return CustomResponse.error("Invalid invite code", EC.INVITE_INVALID);
+        // Spent invites are deleted, so this covers those too (resolve_invite).
+        return CustomResponse.error(
+          "That invite doesn't work. It may be used up, expired or withdrawn, or mistyped.",
+          EC.INVITE_INVALID,
+        );
       case "expired":
         return CustomResponse.error("Invite code has expired", EC.INVITE_EXPIRED);
       case "exhausted":
