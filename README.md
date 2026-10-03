@@ -14,13 +14,16 @@ You need Docker with Compose, a domain pointing at the machine, and ports 80,
 443, UDP 7882 and TCP 7881 open.
 
 ```bash
+mkdir rift && cd rift
 curl -fsSL https://joinrift.app/self-host/docker-compose.yml -o docker-compose.yml
 docker compose up -d
 ```
 
-Then open `http://localhost:8080` (over an SSH tunnel if the machine is
-remote). The setup page asks for your domain, generates every secret, starts
-the rest of the stack, and gives you an invite link to paste into the Rift app.
+Keep that folder: it holds the server's settings and keys, and updates and
+backups run from inside it. Then open `http://localhost:8080` (over an SSH
+tunnel if the machine is remote). The setup page asks for your domain,
+generates every secret, starts the rest of the stack, and gives you an invite
+link to paste into the Rift app.
 
 The full walkthrough, including running behind your own reverse proxy, is the
 [installation guide](https://docs.joinrift.app/install/).
