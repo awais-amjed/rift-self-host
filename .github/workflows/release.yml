@@ -1,0 +1,95 @@
+# Builds the console image for amd64 and arm64 and publishes it to GitHub's
+# registry as ghcr.io/awais-amjed/rift-console, the image docker-compose.yml
+# pulls.
+#
+# A version tag starts it: scripts/release.sh makes one (v1.0.0, or
+# v1.1.0-beta.1 for a pre-release). The tag must match VERSION, which the
+# console records in the database when it brings a stack up to date. Each
+# release is pushed under its version, and a release without a `-` also moves
+# `latest`, which is what operators pull. The tag's message becomes the notes
+# of a GitHub Release.
+#
+# Run by hand from the Actions tab, it builds both architectures and pushes
+# nothing: a way to try the build without making a version.
+#
+# The workflow's own token is enough to publish: there are no secrets to set.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "::error::$GITHUB_REF_NAME does not match VERSION ($version)"
+            exit 1
+          fi
+          image=ghcr.io/awais-amjed/rift-console
+          tags=("$image:$version")
+          [[ $version == *-* ]] || tags+=("$image:latest")
+          {
+            echo "version=$version"
+            echo "push=$([[ $GITHUB_REF_TYPE == tag ]] && echo true || echo false)"
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: steps.plan.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: console/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.plan.outputs.push == 'true' }}
+          tags: ${{ steps.plan.outputs.tags }}
+          # Links the package on GitHub's registry to this repository.
+          labels: |
+            org.opencontainers.image.source=https://github.com/awais-amjed/rift-self-host
+            org.opencontainers.image.version=${{ steps.plan.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  notes:
+    needs: image
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # The checkout holds the tag without its message, which is the notes.
+      - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+      - name: Publish the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          pre=()
+          [[ $VERSION == *-* ]] && pre=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "rift-self-host $VERSION" --notes-file notes.md "${pre[@]}"

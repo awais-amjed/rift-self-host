@@ -47,7 +47,7 @@ services:
   # Docker socket.
   console:
     container_name: rift-console
-    image: ${RIFT_CONSOLE_IMAGE:-riftapp/rift-console:latest}
+    image: ${RIFT_CONSOLE_IMAGE:-ghcr.io/awais-amjed/rift-console:latest}
     restart: unless-stopped
     ports:
       # Bound to the loopback on purpose. This container can start, stop and

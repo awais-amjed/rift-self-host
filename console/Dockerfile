@@ -3,7 +3,7 @@
 # Build from the repository root, not from console/ — the migrations and the
 # functions are vendored beside it and both go into the image:
 #
-#   docker build -f console/Dockerfile -t riftapp/rift-console:latest .
+#   docker build -f console/Dockerfile -t ghcr.io/awais-amjed/rift-console:latest .
 FROM denoland/deno:alpine-2.1.4
 
 # psql parses the migrations (see src/postgres.ts for why not a driver).

@@ -8,9 +8,6 @@ A server is a standard [Supabase](https://supabase.com) stack plus
 [LiveKit](https://livekit.io) for calls, set up and kept healthy by one small
 console. You never edit a `.env` by hand.
 
-> **Status: in development.** There are no releases yet, and the schema is
-> still rewritten in place. Try it, but don't put a community on it yet.
-
 ## Quick start
 
 You need Docker with Compose, a domain pointing at the machine, and ports 80,
@@ -52,6 +49,10 @@ Fetch the compose file first: it pins every upstream image. The console applies
 new migrations and endpoints by itself on start — see
 [updating](https://docs.joinrift.app/updating/).
 
+The console image is [`ghcr.io/awais-amjed/rift-console`](https://github.com/awais-amjed/rift-self-host/pkgs/container/rift-console),
+for amd64 and arm64. Each release is tagged with its version, and `latest`
+follows the newest.
+
 ## Documentation
 
 **Running a server** — on the website:
@@ -92,7 +93,7 @@ RIFT_PG_CONTAINER=<container> ./scripts/db_test.sh
 
 # The console's own tests, and building its image.
 cd console && deno task test
-docker build -f console/Dockerfile -t riftapp/rift-console:latest .
+docker build -f console/Dockerfile -t ghcr.io/awais-amjed/rift-console:latest .
 ```
 
 The build context is the repository root, because the migrations and functions
@@ -103,10 +104,10 @@ go into the image. Details, and the gotchas, are in
 
 | Repository | What it is |
 |---|---|
-| `rift` | the app — Flutter client for desktop, mobile and web |
+| [`rift`](https://github.com/awais-amjed/rift) | the app — Flutter client for desktop, mobile and web |
 | **`rift-self-host`** | this: a server anyone can run |
-| `rift-central` | the optional shared service: accounts, the public directory, push relay |
-| `rift-bot-sdk` | the TypeScript SDK for building bots |
+| [`rift-central`](https://github.com/awais-amjed/rift-central) | the optional shared service: accounts, the public directory, push relay |
+| [`rift-bot-sdk`](https://github.com/awais-amjed/rift-bot-sdk) | the TypeScript SDK for building bots |
 
 ## License
 

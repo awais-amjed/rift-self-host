@@ -46,11 +46,28 @@ for that reason; without them the question answers itself.
 ## Building it
 
 ```bash
-docker build -f console/Dockerfile -t riftapp/rift-console:latest .
+docker build -f console/Dockerfile -t ghcr.io/awais-amjed/rift-console:latest .
 ```
 
 The build context is the repository root, not `console/` — the migrations and
 endpoints sit beside it and go into the image.
+
+## Releasing it
+
+```bash
+scripts/release.sh 1.0.0          # sets VERSION, commits, tags; opens an editor for the notes
+git push origin HEAD v1.0.0       # the tag starts the build
+```
+
+The tag reaches the GitHub mirror, where `.github/workflows/release.yml`
+builds the image for amd64 and arm64 and pushes it to GitHub's registry as
+`ghcr.io/awais-amjed/rift-console`, under its version and, unless the version
+has a `-`, as `latest`. The tag's message becomes the GitHub Release's notes.
+The workflow's own token is enough to publish; there are no secrets to set.
+
+VERSION is what the console records in the database when it brings a stack up
+to date, so any image that changes anything needs a new one. Run by hand from
+the Actions tab, the workflow builds both architectures and pushes nothing.
 
 The console's own checks:
 

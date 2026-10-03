@@ -32,13 +32,13 @@ Deno.test("a service is out of date only when its image name has changed", () =>
   const wanted = {
     db: "supabase/postgres:17.6.1.136",
     livekit: "livekit/livekit-server:v1.9",
-    console: "riftapp/rift-console:latest",
+    console: "ghcr.io/awais-amjed/rift-console:latest",
   };
   const containers = [
     running("db", "supabase/postgres:17.6.1.136"),
     running("livekit", "livekit/livekit-server:v1.8"),
     // Replacing the console is the operator's own `docker compose up -d`.
-    running("console", "riftapp/rift-console:0.1.0"),
+    running("console", "ghcr.io/awais-amjed/rift-console:0.1.0"),
     // Not in the compose file's full profile, so not this function's business.
     running("studio", "supabase/studio:old"),
   ];
