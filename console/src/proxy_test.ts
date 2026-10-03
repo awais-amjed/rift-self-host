@@ -72,3 +72,26 @@ Deno.test("the media ports are named, because no proxy can carry them", async ()
   assert(!directives.some((line) => line.includes(String(routes.mediaUdpPort))));
   assert(!directives.some((line) => line.includes(String(routes.mediaTcpPort))));
 });
+
+Deno.test("a proxy in a container gets a Caddyfile that can reach the stack", async () => {
+  const routes = await proxyRoutes(templateRoot, "chat.example.com", 9000);
+  const by = (place: string) => routes.variants.find((v) => v.place === place)!;
+
+  // The default is still the machine itself, and is what `caddyfile` holds.
+  assertEquals(routes.variants[0].place, "host");
+  assertEquals(routes.caddyfile, by("host").caddyfile);
+
+  // A container's 127.0.0.1 is its own: on a Mac mini whose Caddy ran in
+  // Docker, the host snippet gave 502 on every path.
+  const desktop = by("dockerDesktop").caddyfile;
+  assertStringIncludes(desktop, "reverse_proxy host.docker.internal:9000");
+  assertStringIncludes(desktop, "reverse_proxy host.docker.internal:7880");
+  assert(!desktop.includes("127.0.0.1"));
+
+  // On Linux the loopback is out of reach from a container, so it joins the
+  // stack's network and names the containers, on their own ports.
+  const linux = by("dockerLinux");
+  assertStringIncludes(linux.caddyfile, "reverse_proxy rift-kong:8000");
+  assertStringIncludes(linux.caddyfile, "reverse_proxy rift-livekit:7880");
+  assert(linux.steps.some((step) => step.includes("rift_default")));
+});

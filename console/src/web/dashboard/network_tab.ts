@@ -92,12 +92,14 @@ ${heading("Your reverse proxy", "proxy", PROXY_HELP, "/console/#proxy")}
   <p>Point your proxy at both addresses below. Sending everything to the API
     is the mistake to avoid: messages work and calls fail.</p>
   <div id="proxyUpstreams"></div>
-  <p class="hint">If your proxy runs in a container, attach it to this stack's
-    compose network and use <code>kong:8000</code> and
-    <code>livekit:7880</code> instead. Then nothing needs to be published at
-    all.</p>
+  <p class="hint">Those addresses are for a proxy running directly on this
+    machine. One in a container reaches the stack differently: choose where
+    yours runs below.</p>
   <h2 style="margin-top:24px">If your proxy is Caddy</h2>
-  <p>This is the stack's own Caddyfile, pointed at those addresses.</p>
+  <p>This is the stack's own Caddyfile, pointed at the stack. Where does your
+    Caddy run?</p>
+  <div class="choices" id="proxyPlaces"></div>
+  <ul class="hint" id="proxySteps"></ul>
   <pre class="block" id="proxyCaddyfile"></pre>
   <button class="quiet" id="copyCaddyfile" style="margin-top:10px">Copy</button>
 </div>
@@ -174,7 +176,36 @@ function renderProxy(proxy) {
       escapeHtml(upstream) + '</span><div class="hint">' + escapeHtml(paths) +
       "</div></td></tr>"
     ).join("") + "</table>";
-  document.getElementById("proxyCaddyfile").textContent = proxy.caddyfile;
+  drawProxyVariant(proxy);
+}
+
+/// The Caddyfile for wherever the operator's Caddy runs. Kept across the
+/// status refresh, which redraws this every few seconds.
+let proxyPlace = "host";
+
+function drawProxyVariant(proxy) {
+  const variants = proxy.variants || [];
+  const chosen = variants.find((v) => v.place === proxyPlace) || variants[0];
+  if (!chosen) {
+    document.getElementById("proxyCaddyfile").textContent = proxy.caddyfile;
+    return;
+  }
+  const places = document.getElementById("proxyPlaces");
+  places.innerHTML = "";
+  for (const v of variants) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = v.place === chosen.place ? "" : "quiet";
+    button.textContent = v.label;
+    button.addEventListener("click", () => {
+      proxyPlace = v.place;
+      drawProxyVariant(proxy);
+    });
+    places.appendChild(button);
+  }
+  document.getElementById("proxySteps").innerHTML =
+    chosen.steps.map((step) => "<li>" + escapeHtml(step) + "</li>").join("");
+  document.getElementById("proxyCaddyfile").textContent = chosen.caddyfile;
 }
 
 document.getElementById("copyCaddyfile").addEventListener("click", (event) =>

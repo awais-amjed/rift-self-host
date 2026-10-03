@@ -81,6 +81,7 @@ button {
 }
 button:disabled { opacity: 0.5; cursor: default; }
 button.quiet, a.button { background: var(--inset); color: var(--dim); border: 1px solid var(--line); }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
 a.button { display: inline-block; border-radius: 8px; padding: 8px 14px; font-size: 14px;
   font-weight: 500; text-decoration: none; flex-shrink: 0; }
 a.button:hover { color: var(--text); border-color: var(--accent); }

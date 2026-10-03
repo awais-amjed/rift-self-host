@@ -17,6 +17,31 @@ import { render } from "./setup/config_files.ts";
 /** Where LiveKit's signalling is published for the proxy. Its own port. */
 export const SIGNALLING_PORT = 7880;
 
+/**
+ * Where the operator's proxy runs, which decides how it reaches this stack.
+ *
+ * The stack publishes its API and LiveKit's signalling on this machine's
+ * loopback only. A proxy on the machine reaches that; one in a container does
+ * not, because a container's 127.0.0.1 is its own. Docker Desktop (Mac,
+ * Windows) forwards `host.docker.internal` to the machine's loopback, so that
+ * name works there. Docker on Linux does not — `host.docker.internal` is the
+ * bridge's address, and nothing on the loopback answers it — so a proxy there
+ * joins this stack's network and names the containers. Found on a Mac mini
+ * whose Caddy ran in Docker: the snippet as it was gave 502 on every path.
+ */
+export type ProxyPlace = "host" | "dockerDesktop" | "dockerLinux";
+
+/** One way of reaching the stack, with its Caddyfile and anything else to do. */
+export interface ProxyVariant {
+  place: ProxyPlace;
+  label: string;
+  apiUpstream: string;
+  signallingUpstream: string;
+  caddyfile: string;
+  /** What has to change besides the Caddyfile, if anything. */
+  steps: string[];
+}
+
 /** Everything the dashboard shows about an operator-supplied proxy. */
 export interface ProxyRoutes {
   domain: string;
@@ -39,7 +64,12 @@ export interface ProxyRoutes {
   mediaTcpPort: number;
   /** The stack's own Caddyfile, repointed at the published ports. */
   caddyfile: string;
+  /** The same, for each place the proxy may run. The first is [caddyfile]. */
+  variants: ProxyVariant[];
 }
+
+/** The network compose makes for this stack (`name: rift` in the file). */
+export const STACK_NETWORK = "rift_default";
 
 /**
  * Drop the file's opening comment block.
@@ -82,19 +112,61 @@ export async function proxyRoutes(
   const template = await Deno.readTextFile(
     join(templateRoot, "caddy", "Caddyfile"),
   );
-  const apiUpstream = `127.0.0.1:${apiPort}`;
-  const signallingUpstream = `127.0.0.1:${SIGNALLING_PORT}`;
-  const caddyfile = withoutHeader(render(template, { DOMAIN: domain }))
-    .replace("reverse_proxy livekit:7880", `reverse_proxy ${signallingUpstream}`)
-    .replace("reverse_proxy kong:8000", `reverse_proxy ${apiUpstream}`);
+  const base = withoutHeader(render(template, { DOMAIN: domain }));
+  const variant = (
+    place: ProxyPlace,
+    label: string,
+    api: string,
+    signalling: string,
+    steps: string[] = [],
+  ): ProxyVariant => ({
+    place,
+    label,
+    apiUpstream: api,
+    signallingUpstream: signalling,
+    caddyfile: base
+      .replace("reverse_proxy livekit:7880", `reverse_proxy ${signalling}`)
+      .replace("reverse_proxy kong:8000", `reverse_proxy ${api}`),
+    steps,
+  });
+
+  const variants = [
+    variant(
+      "host",
+      "On this machine",
+      `127.0.0.1:${apiPort}`,
+      `127.0.0.1:${SIGNALLING_PORT}`,
+    ),
+    variant(
+      "dockerDesktop",
+      "In Docker Desktop (Mac, Windows)",
+      `host.docker.internal:${apiPort}`,
+      `host.docker.internal:${SIGNALLING_PORT}`,
+      [
+        "Nothing else to change: Docker Desktop forwards host.docker.internal " +
+        "to this machine's own ports.",
+      ],
+    ),
+    // The containers' own ports, which do not move with RIFT_PROXY_PORT.
+    variant("dockerLinux", "In Docker on Linux", "rift-kong:8000", "rift-livekit:7880", [
+      `Put your proxy's container on this stack's network, ${STACK_NETWORK}. ` +
+      `In its compose file: networks: { rift: { external: true, name: ${STACK_NETWORK} } }, ` +
+      "and list rift under the proxy's own networks. Or, until it is next " +
+      `recreated: docker network connect ${STACK_NETWORK} <your proxy container>.`,
+      "host.docker.internal does not work here: on Linux it reaches the " +
+      "Docker bridge, and the stack publishes these ports on the loopback only.",
+    ]),
+  ];
+  const [host] = variants;
 
   return {
     domain,
-    apiUpstream,
-    signallingUpstream,
-    signallingPaths: pathsIn(caddyfile),
+    apiUpstream: host.apiUpstream,
+    signallingUpstream: host.signallingUpstream,
+    signallingPaths: pathsIn(host.caddyfile),
     mediaUdpPort: media.udp,
     mediaTcpPort: media.tcp,
-    caddyfile,
+    caddyfile: host.caddyfile,
+    variants,
   };
 }
