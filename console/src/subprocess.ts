@@ -48,6 +48,16 @@ export interface Output {
  * [timeoutMs] guards against a child that never exits — a `docker compose up`
  * waiting on a healthcheck that will never pass would otherwise hold the
  * request open forever.
+ *
+ * The child's output is read *while* its input is written, never after. A
+ * migration fed to `psql` prints a line per statement as it goes, and once a
+ * pipe is full the child stops reading its input until somebody drains the
+ * output. Writing all of the input first then waits on a child that is waiting
+ * on us, for ever, inside an open transaction that every other query queues
+ * behind. A normal pipe holds 64 KB, which hid it; Linux cuts every new pipe
+ * to 4 KB once one user's pipes pass `pipe-user-pages-soft`, and on a Mac mini
+ * whose Docker VM also ran other busy containers, setup hung on
+ * `008_security.sql` after about 10 KB of output (Oct 3 2026).
  */
 export async function run(
   command: string,
@@ -69,12 +79,6 @@ export async function run(
     stderr: "piped",
   }).spawn();
 
-  if (options.stdin !== undefined) {
-    const writer = process.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(options.stdin));
-    await writer.close();
-  }
-
   const timer = options.timeoutMs === undefined ? null : setTimeout(() => {
     try {
       process.kill("SIGTERM");
@@ -84,12 +88,27 @@ export async function run(
   }, options.timeoutMs);
 
   try {
-    const { code, stdout, stderr } = await process.output();
+    // Started before the input is written: see above.
+    const stdout = new Response(process.stdout).arrayBuffer();
+    const stderr = new Response(process.stderr).arrayBuffer();
+
+    if (options.stdin !== undefined) {
+      const writer = process.stdin.getWriter();
+      try {
+        await writer.write(new TextEncoder().encode(options.stdin));
+        await writer.close();
+      } catch {
+        // The child stopped reading and exited — `psql` does on its first
+        // error. Its exit code and stderr say why; a broken pipe here does not.
+      }
+    }
+
+    const [{ code }, out, err] = await Promise.all([process.status, stdout, stderr]);
     const decoder = new TextDecoder();
     return {
       code,
-      stdout: decoder.decode(stdout).trim(),
-      stderr: decoder.decode(stderr).trim(),
+      stdout: decoder.decode(out).trim(),
+      stderr: decoder.decode(err).trim(),
     };
   } finally {
     if (timer !== null) clearTimeout(timer);
