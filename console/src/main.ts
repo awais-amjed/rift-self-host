@@ -5,7 +5,7 @@
  * on a fresh machine `docker compose up -d` brings up this container alone,
  * and it is what creates the conditions for the rest.
  */
-import { announce, consolePort } from "./banner.ts";
+import { announce, LISTEN_PORT } from "./banner.ts";
 import { startScheduler } from "./backup/scheduler.ts";
 import { startTopicRuleWatch } from "./setup/topic_rules.ts";
 import { isDockerReachable } from "./docker.ts";
@@ -15,7 +15,7 @@ import { defaultPaths } from "./setup/run.ts";
 import { handle } from "./web/routes.ts";
 import { isConfigured } from "./web/stack_state.ts";
 
-const PORT = consolePort();
+const PORT = LISTEN_PORT;
 
 async function main(): Promise<void> {
   const configured = isConfigured();

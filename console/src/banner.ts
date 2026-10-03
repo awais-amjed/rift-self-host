@@ -11,9 +11,19 @@
  */
 import { setting } from "./env_file.ts";
 
-/** Where the console listens. */
+/**
+ * Where the console listens inside its container: always 8080.
+ *
+ * `CONSOLE_PORT` is the *host* side of the mapping — compose publishes
+ * `${CONSOLE_PORT}:8080`, and the healthcheck asks 8080 — so listening on it
+ * made a console with a moved port unreachable, and unhealthy, from its first
+ * restart after setup.
+ */
+export const LISTEN_PORT = 8080;
+
+/** Where the operator reaches the console: the host side of the mapping. */
 export function consolePort(): number {
-  return Number(setting("CONSOLE_PORT") ?? "8080");
+  return Number(setting("CONSOLE_PORT") ?? String(LISTEN_PORT));
 }
 
 /**
