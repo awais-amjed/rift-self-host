@@ -44,7 +44,11 @@ function optionInput(field: OptionField, value: unknown, shownNow: boolean): str
  * where one exists and from the defaults where it does not — the operator sees
  * what they will get, and changes only what they care about.
  */
-export function setupPage(fields: OptionField[], values: SetupOptions): string {
+export function setupPage(
+  fields: OptionField[],
+  values: SetupOptions,
+  resuming = false,
+): string {
   const draw = (f: OptionField) => optionInput(f, values[f.key], applies(f, values));
   const plain = fields.filter((f) => !f.advanced).map(draw).join("");
   const advanced = fields.filter((f) => f.advanced).map(draw).join("");
@@ -56,6 +60,13 @@ export function setupPage(fields: OptionField[], values: SetupOptions): string {
   <a href="https://docs.joinrift.app/install/" target="_blank" rel="noopener">installation
   guide</a> explains each choice.</p>
 
+${
+      resuming
+        ? `<div class="panel"><strong>The last setup didn't finish.</strong>
+  Press <strong>Set up</strong> to carry on from where it stopped, with the same
+  answers. Nothing it already did is repeated or lost.</div>`
+        : ""
+    }
 <form id="form" class="panel">
   ${plain}
   <details id="advanced">
@@ -85,6 +96,12 @@ export function setupPage(fields: OptionField[], values: SetupOptions): string {
      is not shown again — though it stays in <code>.env</code>, and
      <code>docker compose logs console</code> prints it too.</p>
   <div class="secret"><div class="mono" id="issuedPassword"></div></div>
+
+  <div id="moving" style="display:none">
+    <h2>The console is moving</h2>
+    <p>You chose a different port or interface for it, so in a few seconds it
+      restarts at <strong class="mono" id="movingTo"></strong>. Open it there.</p>
+  </div>
 
   <h2>Next</h2>
   <ol class="hint">
@@ -181,6 +198,13 @@ form.addEventListener("submit", async (event) => {
       // textContent onto an <input>, which shows nothing, and the panel
       // stayed blank while the password sat in the log.
       document.getElementById("issuedPassword").textContent = event.consolePassword || "";
+      if (event.consoleMovingTo) {
+        const to = event.consoleMovingTo;
+        const host = to.bind === "127.0.0.1" ? "localhost"
+          : to.bind === "0.0.0.0" ? location.hostname : to.bind;
+        document.getElementById("moving").style.display = "block";
+        document.getElementById("movingTo").textContent = "http://" + host + ":" + to.port;
+      }
     }
     if (event.error) {
       document.getElementById("note").style.display = "none";

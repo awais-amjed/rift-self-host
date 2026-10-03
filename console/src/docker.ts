@@ -157,6 +157,92 @@ export async function serviceStatuses(): Promise<ServiceStatus[]> {
 /** The service the console runs as, which it must never bring up. */
 const SELF = "console";
 
+/** Where the console is published, and where `.env` wants it. */
+export interface ConsoleAddress {
+  bind: string;
+  port: string;
+}
+
+/**
+ * Whether the console has to move: only when Docker could say where it is
+ * now, and that differs from what `.env` names.
+ */
+export function consoleMoveNeeded(
+  published: ConsoleAddress | null,
+  wanted: ConsoleAddress,
+): boolean {
+  return published !== null &&
+    (published.bind !== wanted.bind || published.port !== wanted.port);
+}
+
+/** The console container's image and published address, from Docker. */
+async function publishedConsole(): Promise<(ConsoleAddress & { image: string }) | null> {
+  const result = await run("docker", [
+    "inspect",
+    "rift-console",
+    "--format",
+    "{{.Config.Image}}|{{json .HostConfig.PortBindings}}",
+  ], { timeoutMs: 15_000 });
+  if (result.code !== 0) return null;
+  const [image, bindings] = result.stdout.split("|");
+  try {
+    const first = (JSON.parse(bindings)["8080/tcp"] ?? [])[0];
+    if (!first) return null;
+    return { image, bind: first.HostIp || "0.0.0.0", port: String(first.HostPort) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Recreate the console on the interface and port `.env` names, if it is not
+ * already there. Returns where it is going, or null when it stays.
+ *
+ * Setup writes both settings, but the console was published by the
+ * operator's own `docker compose up -d`, before they existed. It cannot
+ * recreate itself — `docker compose` running inside it is killed with the old
+ * container before the new one exists — so a short-lived container of the
+ * same image does it, after a pause that lets the page hear the answer first.
+ */
+export async function moveConsoleIfChanged(): Promise<ConsoleAddress | null> {
+  const published = await publishedConsole();
+  const wanted = {
+    bind: setting("CONSOLE_BIND") ?? "127.0.0.1",
+    port: setting("CONSOLE_PORT") ?? "8080",
+  };
+  if (published === null || !consoleMoveNeeded(published, wanted)) return null;
+
+  const dir = projectDir();
+  const started = await run("docker", [
+    "run",
+    "-d",
+    "--rm",
+    "--name",
+    "rift-console-move",
+    "-v",
+    "/var/run/docker.sock:/var/run/docker.sock",
+    "-v",
+    `${dir}:${dir}`,
+    "-w",
+    dir,
+    // The compose file mounts and works in ${PWD}.
+    "-e",
+    `PWD=${dir}`,
+    "-e",
+    "COMPOSE_PROJECT_NAME=rift",
+    "--entrypoint",
+    "sh",
+    published.image,
+    "-c",
+    "sleep 5; docker compose up -d --no-deps --force-recreate console",
+  ], { timeoutMs: 60_000 });
+  if (started.code !== 0) {
+    console.error("Could not move the console:", started.stderr);
+    return null;
+  }
+  return wanted;
+}
+
 /**
  * Services this stack has been configured not to run.
  *

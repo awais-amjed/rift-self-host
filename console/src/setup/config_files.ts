@@ -153,6 +153,10 @@ export function renderEnv(context: RenderContext): string {
     `CONSOLE_BIND=${context.consoleBind}`,
     `CONSOLE_PORT=${context.consolePort}`,
     "",
+    "# Setup's progress: running until its last step, then done. A setup that",
+    "# stopped part-way carries on from here with these same secrets.",
+    "RIFT_SETUP=running",
+    "",
   ];
   return lines.join("\n");
 }

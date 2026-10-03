@@ -1,5 +1,11 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { outdatedServices, recreateArgs, type ServiceStatus, upArgs } from "./docker.ts";
+import {
+  consoleMoveNeeded,
+  outdatedServices,
+  recreateArgs,
+  type ServiceStatus,
+  upArgs,
+} from "./docker.ts";
 
 Deno.test("recreating a service leaves what it depends on running", () => {
   // Kong depends on auth and rest, and both on Postgres. Without --no-deps,
@@ -43,4 +49,13 @@ Deno.test("a service is out of date only when its image name has changed", () =>
     running("studio", "supabase/studio:old"),
   ];
   assertEquals(outdatedServices(wanted, containers), ["livekit"]);
+});
+
+Deno.test("the console moves only when its address changed, and only when known", () => {
+  const home = { bind: "127.0.0.1", port: "8080" };
+  assertEquals(consoleMoveNeeded(home, { bind: "127.0.0.1", port: "8080" }), false);
+  assertEquals(consoleMoveNeeded(home, { bind: "127.0.0.1", port: "9001" }), true);
+  assertEquals(consoleMoveNeeded(home, { bind: "0.0.0.0", port: "8080" }), true);
+  // Docker could not say where it is: leave it rather than guess.
+  assertEquals(consoleMoveNeeded(null, { bind: "0.0.0.0", port: "9001" }), false);
 });

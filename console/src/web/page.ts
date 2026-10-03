@@ -7,3 +7,4 @@ export { exposedPage } from "./exposed_page.ts";
 export { loginPage } from "./login_page.ts";
 export { restorePage } from "./restore_page.ts";
 export { setupPage } from "./setup_page.ts";
+export { setupRunningPage } from "./setup_running_page.ts";

@@ -364,3 +364,15 @@ Deno.test("an edited file is kept, and a directory Docker left in a file's place
   assert((await Deno.stat(`${project}/volumes/db/roles.sql`)).isFile);
   await Deno.remove(project, { recursive: true });
 });
+
+Deno.test("setup starts unfinished, and a second run can read its secrets back", async () => {
+  // A setup that stopped part-way carries on with these, not new ones: the
+  // database it already made only opens with the password it was made with.
+  const written = await context();
+  const env = parseEnv(renderEnv(written));
+  assertEquals(env.RIFT_SETUP, "running");
+  const read = secretsFromEnv(env);
+  assertEquals(read.postgresPassword, written.secrets.postgresPassword);
+  assertEquals(read.jwtSecret, written.secrets.jwtSecret);
+  assertEquals(read.consolePassword, written.secrets.consolePassword);
+});

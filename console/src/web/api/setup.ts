@@ -10,6 +10,18 @@ import { openSealedBackup, sealedBackupPresent } from "../../backup/restore.ts";
 import { prepareStack } from "../../boot.ts";
 import { type ApiRoutes, json, progressStream } from "../responses.ts";
 import { isConfigured } from "../stack_state.ts";
+import { moveConsoleIfChanged } from "../../docker.ts";
+
+/**
+ * True while a setup is running in this process. A reload during setup shows
+ * a page that waits for it, and a second press is refused rather than run
+ * beside the first.
+ */
+let running = false;
+
+export function setupRunning(): boolean {
+  return running;
+}
 
 export const setupRoutes: ApiRoutes = async (request, url, paths) => {
   const path = url.pathname;
@@ -27,25 +39,52 @@ export const setupRoutes: ApiRoutes = async (request, url, paths) => {
           "its own database.",
       }, 409);
     }
+    if (running) {
+      return json({ error: "Setup is already running. Wait for it to finish." }, 409);
+    }
     const options = await request.json();
+    running = true;
     return progressStream(async (send) => {
       // Anything the page did not send falls back to the .env-or-default
       // set, so a caller posting only a domain still gets a whole stack.
-      const result = await runSetup(
-        { ...optionsFromEnv(paths.projectDir), ...options },
-        targetFromEnv(),
-        paths,
-        (progress: SetupProgress) => send(progress),
-      );
+      let result;
+      try {
+        result = await runSetup(
+          { ...optionsFromEnv(paths.projectDir), ...options },
+          targetFromEnv(),
+          paths,
+          (progress: SetupProgress) => {
+            // The log too, which the page tells the operator to read when a
+            // step fails.
+            if (!progress.done) {
+              console.log(
+                `[setup] ${progress.step}${
+                  progress.detail ? ` (${progress.detail})` : ""
+                }`,
+              );
+            }
+            send(progress);
+          },
+        );
+      } catch (error) {
+        console.error("[setup] stopped:", error instanceof Error ? error.message : error);
+        throw error;
+      } finally {
+        running = false;
+      }
+      console.log("[setup] finished");
       // Both channels, because the operator is on the page and the login
       // page sends them to the log. Until this existed the log's last word
       // was the startup banner's "no password yet", printed before setup
       // could possibly have made one.
       announce({ password: result.secrets.consolePassword, configured: true });
+      // Decided before the answer is sent, carried out a few seconds after.
+      const moving = await moveConsoleIfChanged();
       send({
         inviteLink: result.server.inviteLink,
         serverId: result.server.serverId,
         consolePassword: result.secrets.consolePassword,
+        consoleMovingTo: moving,
       });
     });
   }

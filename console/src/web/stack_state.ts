@@ -14,7 +14,22 @@ import { setting } from "../env_file.ts";
  * writes by hand, and nothing in the stack works without it.
  */
 export function isConfigured(): boolean {
-  return setting("JWT_SECRET") !== undefined;
+  return setting("JWT_SECRET") !== undefined && !setupUnfinished();
+}
+
+/**
+ * Setup has written `.env` and not yet reached its end: still running, or
+ * stopped part-way.
+ *
+ * `.env` is written by setup's first step, secrets and console password
+ * included, so `JWT_SECRET` alone said "configured" for the whole of setup. A
+ * reload in that window showed a login page for a password that had not been
+ * shown to anybody yet, and a setup that stopped could never be run again.
+ * `RIFT_SETUP` is `running` from the first step and `done` after the last;
+ * a stack set up before it existed has neither, and counts as done.
+ */
+export function setupUnfinished(): boolean {
+  return setting("RIFT_SETUP") === "running";
 }
 
 /**

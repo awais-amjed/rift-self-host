@@ -18,9 +18,17 @@ import {
   sessionCookie,
   tokenFrom,
 } from "./auth.ts";
-import { dashboardPage, exposedPage, loginPage, restorePage, setupPage } from "./page.ts";
+import {
+  dashboardPage,
+  exposedPage,
+  loginPage,
+  restorePage,
+  setupPage,
+  setupRunningPage,
+} from "./page.ts";
+import { setupRunning } from "./api/setup.ts";
 import { type ApiRoutes, html, json, redirect } from "./responses.ts";
-import { isConfigured, setupWasLocal } from "./stack_state.ts";
+import { isConfigured, setupUnfinished, setupWasLocal } from "./stack_state.ts";
 import { backupRoutes } from "./api/backups.ts";
 import { securityRoutes } from "./api/security.ts";
 import { serverRoutes } from "./api/servers.ts";
@@ -73,7 +81,11 @@ export async function handle(request: Request): Promise<Response> {
   // published on the loopback — an operator who moves it to 0.0.0.0 *before*
   // running setup would be handing the Docker socket to the network, so that
   // combination is refused outright rather than trusted to be deliberate.
-  const password = configuredPassword();
+  //
+  // An unfinished setup counts as no password too: setup writes one in its
+  // first step and only shows it in its last, so asking for it in between
+  // locks the operator out of their own setup.
+  const password = setupUnfinished() ? null : configuredPassword();
   if (password === null && !boundToLoopback()) {
     return html(exposedPage());
   }
@@ -92,10 +104,13 @@ export async function handle(request: Request): Promise<Response> {
 
   if (path === "/") {
     if (!isConfigured()) {
+      if (setupRunning()) return html(setupRunningPage());
       // An encrypted backup extracted here is a server waiting for its
       // passphrase, not one waiting to be set up from scratch.
       if (await sealedBackupPresent(paths.projectDir)) return html(restorePage());
-      return html(setupPage(fields, optionsFromEnv(paths.projectDir)));
+      return html(
+        setupPage(fields, optionsFromEnv(paths.projectDir), setupUnfinished()),
+      );
     }
     return html(dashboardPage(
       setupWasLocal()

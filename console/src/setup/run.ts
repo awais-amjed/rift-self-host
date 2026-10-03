@@ -15,11 +15,16 @@
  * happening. Pulling the images alone can take minutes on a small VPS, and a
  * blank screen for that long reads as a hang.
  */
-import { setting, updateSetting } from "../env_file.ts";
+import { readEnvFile, setting, updateSetting } from "../env_file.ts";
 import { type PostgresTarget, waitUntilReachable } from "../postgres.ts";
 import { restartService, startStack } from "../docker.ts";
 import { applyPlan, planMigrations } from "../migrations/runner.ts";
-import { publicUrlFor, type StackConfig, writeConfigFiles } from "./config_files.ts";
+import {
+  publicUrlFor,
+  secretsFromEnv,
+  type StackConfig,
+  writeConfigFiles,
+} from "./config_files.ts";
 import { envHasPassword, problemsWith } from "./options.ts";
 import { functionSources, installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
@@ -98,7 +103,14 @@ export async function runSetup(
   const problems = problemsWith(request);
   if (problems.length > 0) throw new Error(problems.join("\n"));
 
-  const secrets = await generateSecrets();
+  // A setup that stopped part-way left a database initialised with the
+  // secrets it generated. New ones would lock this run out of it, so a second
+  // run carries on with the same ones; the migration ledger and the steps
+  // themselves skip whatever already landed.
+  const previous = readEnvFile(paths.projectDir);
+  const secrets = previous.RIFT_SETUP === "running"
+    ? secretsFromEnv(previous)
+    : await generateSecrets();
 
   // An operator's own choice wins over a generated one, in that order of
   // preference: what they typed, then what a hand-written .env already said,
@@ -207,6 +219,7 @@ export async function runSetup(
   // stops the first boot after setup offering to "upgrade" to what it already
   // is.
   await writeState(database, APPLIED_VERSION, imageVersion());
+  await updateSetting("RIFT_SETUP", "done", paths.projectDir);
 
   return { secrets, server };
 }
