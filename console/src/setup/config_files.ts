@@ -330,6 +330,40 @@ export async function rerender(
 }
 
 /**
+ * Render kong.yml again if this release's template makes something different
+ * from the file on disk. Returns true when it rewrote it.
+ *
+ * kong.yml is otherwise written only at setup and by a key rotation, so a
+ * route added in a release — the status page, say — never reached a server
+ * set up before it. Kong reads the file only when it starts, so a caller that
+ * gets true has to recreate it. The file is generated, never edited by hand:
+ * a hand edit here is overwritten, as a rotation already would.
+ */
+export async function refreshGateway(
+  options: { templateRoot: string; projectDir: string },
+): Promise<boolean> {
+  const { destination, template } = RENDERED.find((file) =>
+    file.destination === "volumes/api/kong.yml"
+  )!;
+  const path = join(options.projectDir, destination);
+  let current: string;
+  try {
+    current = await Deno.readTextFile(path);
+  } catch {
+    return false; // Missing is restoreMissingConfig's to write.
+  }
+  const context: RenderContext = {
+    ...optionsFromEnv(options.projectDir),
+    secrets: secretsFromEnv(readEnvFile(options.projectDir)),
+  };
+  const source = await Deno.readTextFile(join(options.templateRoot, template));
+  const wanted = render(source, placeholders(context));
+  if (wanted === current) return false;
+  await Deno.writeTextFile(path, wanted);
+  return true;
+}
+
+/**
  * Write whichever generated files are missing, from what `.env` says.
  *
  * A backup is `.env` and a database dump. Everything under `volumes/` is

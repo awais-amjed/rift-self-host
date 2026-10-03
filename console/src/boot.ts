@@ -21,7 +21,7 @@
  *      Rift schema at all. On a configured stack that means a restore waiting
  *      for its dump, and migrating it would put a fresh schema underneath one.
  */
-import { restoreMissingConfig } from "./setup/config_files.ts";
+import { refreshGateway, restoreMissingConfig } from "./setup/config_files.ts";
 import {
   functionSources,
   installFunctions,
@@ -82,6 +82,13 @@ export async function prepareStack(
     console.log(`Wrote missing configuration from .env: ${written.join(", ")}`);
   }
 
+  // A release that changes the gateway's routes reaches servers set up before
+  // it this way. Never fatal: the old routes still work.
+  const gatewayChanged = await refreshGateway(paths).catch((error) => {
+    console.error("Could not refresh the gateway's configuration:", error);
+    return false;
+  });
+
   const sources = functionSources(paths);
   const missing = await missingFunctions(sources, paths.functionsTarget);
   if (missing.length > 0) {
@@ -102,10 +109,17 @@ export async function prepareStack(
     if (!started.ok) {
       console.log(`The stack is not fully up yet: ${composeProblem(started.stderr)}`);
     }
-  } else if (missing.length > 0) {
-    // A functions container that started before its endpoints existed keeps
-    // failing to find them until it is recreated.
-    await restartService("functions");
+  } else {
+    if (missing.length > 0) {
+      // A functions container that started before its endpoints existed
+      // keeps failing to find them until it is recreated.
+      await restartService("functions");
+    }
+    if (gatewayChanged) {
+      report("Updating the gateway");
+      console.log("The gateway's routes changed in this release; restarting Kong.");
+      await restartService("kong");
+    }
   }
 
   // A `docker compose pull` delivers new images, and the documented

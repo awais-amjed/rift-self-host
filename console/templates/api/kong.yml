@@ -226,3 +226,40 @@ services:
           - /functions/v1/
     plugins:
       - name: cors
+
+  ## The server's own address. Opening it in a browser used to show Kong's
+  ## "no Route matched" — or nothing at all — so a working server and a
+  ## broken one looked the same to the person checking. `/` says what this is,
+  ## and `/healthz` answers `ok` for a monitor. Neither touches anything behind
+  ## Kong: a 200 proves DNS, the certificate, the proxy and the gateway.
+  ##
+  ## Answered by post-function rather than request-termination, because only
+  ## the plugins in KONG_PLUGINS load, and a server whose compose file is older
+  ## than its console would otherwise refuse to start Kong at all.
+  - name: status
+    _comment: "The address itself and /healthz, answered by Kong"
+    url: http://localhost:1
+    routes:
+      - name: status-page
+        strip_path: false
+        # Exactly "/". This file is in Kong's 2.1 format, which marks a path
+        # holding regex characters as a regex itself; writing "~/$" here
+        # doubles the marker and Kong refuses to start.
+        paths:
+          - "/$"
+        plugins:
+          - name: post-function
+            config:
+              access:
+                - |
+                    return kong.response.exit(200, [==[<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Rift server</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#08080B;color:#F4F4F8;font:16px/1.6 system-ui,sans-serif}main{max-width:440px;padding:24px;text-align:center}h1{font-size:24px;margin:0 0 8px}p{color:#8B8C96;margin:0 0 14px}a{color:#9BA3FF}</style></head><body><main><h1>This is a Rift server</h1><p>{{DOMAIN}} is up and running.</p><p>To join it, open your invite link in the Rift app.</p><p><a href="https://joinrift.app">Get Rift</a></p></main></body></html>]==], { ["Content-Type"] = "text/html; charset=utf-8" })
+      - name: status-healthz
+        strip_path: false
+        paths:
+          - /healthz
+        plugins:
+          - name: post-function
+            config:
+              access:
+                - |
+                    return kong.response.exit(200, "ok\n", { ["Content-Type"] = "text/plain; charset=utf-8" })

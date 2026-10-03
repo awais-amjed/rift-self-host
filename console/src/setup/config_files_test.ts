@@ -11,6 +11,7 @@ import {
   OVERRIDE_FILE,
   placeholders,
   publishingFor,
+  refreshGateway,
   render,
   type RenderContext,
   renderEnv,
@@ -375,4 +376,42 @@ Deno.test("setup starts unfinished, and a second run can read its secrets back",
   assertEquals(read.postgresPassword, written.secrets.postgresPassword);
   assertEquals(read.jwtSecret, written.secrets.jwtSecret);
   assertEquals(read.consolePassword, written.secrets.consolePassword);
+});
+
+Deno.test("the gateway answers its own address and /healthz", async () => {
+  const kong = render(
+    await Deno.readTextFile(new URL("../../templates/api/kong.yml", import.meta.url)),
+    placeholders(await context()),
+  );
+  // "/$", never "~/$": the file is in Kong's 2.1 format, which adds the regex
+  // marker itself, and a doubled one stops Kong from starting.
+  assertStringIncludes(kong, '- "/$"');
+  assert(!kong.includes('- "~/$"'));
+  assertStringIncludes(kong, "- /healthz");
+  assertStringIncludes(kong, "chat.example.com is up and running");
+  // Only plugins in the compose file's KONG_PLUGINS load.
+  assert(!kong.includes("name: request-termination"));
+});
+
+Deno.test("refreshing the gateway rewrites a stale kong.yml, and only then", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const written = await context();
+    await Deno.writeTextFile(`${dir}/.env`, renderEnv(written));
+    const templateRoot = new URL("../../templates", import.meta.url).pathname;
+    await Deno.mkdir(`${dir}/volumes/api`, { recursive: true });
+    await Deno.writeTextFile(
+      `${dir}/volumes/api/kong.yml`,
+      "an older release's routes\n",
+    );
+
+    assertEquals(await refreshGateway({ templateRoot, projectDir: dir }), true);
+    assertStringIncludes(
+      await Deno.readTextFile(`${dir}/volumes/api/kong.yml`),
+      "/healthz",
+    );
+    assertEquals(await refreshGateway({ templateRoot, projectDir: dir }), false);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

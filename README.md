@@ -49,7 +49,7 @@ docker compose up -d
 ```
 
 Fetch the compose file first: it pins every upstream image. The console applies
-new migrations and endpoints by itself on start — see
+new migrations, endpoints and gateway routes by itself on start — see
 [updating](https://docs.joinrift.app/updating/).
 
 The console image is [`ghcr.io/awais-amjed/rift-console`](https://github.com/awais-amjed/rift-self-host/pkgs/container/rift-console),
