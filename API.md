@@ -410,6 +410,15 @@ than a redirect, so the allow list exists solely so the signature verifies.
 
 **Setting `SITE_URL` to the server's own domain refuses every login**, with "message was signed
 for another app" — a sentence naming neither SIWS nor the setting that caused it.
+#### The message's time
+
+GoTrue also refuses a message whose `Issued At` is more than ten minutes from its own clock
+(`GOTRUE_EXTERNAL_WEB3_SOLANA_MAXIMUM_VALIDITY_DURATION`), with "Solana message was issued too
+far in the future" or "…too long ago". `login` passes that through, and the client signs again
+once at the time in the response's `Date` header. A device whose clock is wrong could otherwise
+sign in to no server. Every function exposes `Date` to other origins (`_shared/cors.ts`) so the
+web client can read it too.
+
 Keep `FUNCTIONS_VERIFY_JWT=false` — `login`, `register` and `resolve_invite` are invoked without
 the runtime's own JWT gate (each self-validates).
 
