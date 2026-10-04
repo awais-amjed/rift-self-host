@@ -337,6 +337,9 @@ files, each run once after it, and the list below grows with them.
    `authenticated`, and `ALTER DEFAULT PRIVILEGES ... REVOKE` does not undo them — so the
    blanket `REVOKE ALL ON ALL FUNCTIONS` has to run once every function exists. Anything
    granted here is granted by name; nothing is reachable by omission.
+9. **009_region_key_check.sql** — `require_node_key` becomes `SECURITY DEFINER`. Its trigger
+   is deferred, so it runs at commit as whoever called `add_voice_region`, who may not read
+   `livekit_node_secrets`; adding or renaming a region failed until it could.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. Two of those exist

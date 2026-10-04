@@ -5714,6 +5714,16 @@ BEGIN
   RAISE NOTICE 'ok  an admin adds a node, with the key it signs with';
 END $$;
 
+-- And the add survives its own commit. The key check is deferred, so it runs
+-- at COMMIT — after `add_voice_region` has returned, as the caller rather than
+-- the function's owner — and this suite never commits. Firing it here, still
+-- as Alice, is what COMMIT does; a rename queues the same check.
+SET CONSTRAINTS livekit_nodes_require_key IMMEDIATE;
+UPDATE livekit_nodes SET label = 'Singapore' WHERE label = 'Singapore';
+SET CONSTRAINTS livekit_nodes_require_key IMMEDIATE;
+SET CONSTRAINTS livekit_nodes_require_key DEFERRED;
+DO $$ BEGIN RAISE NOTICE 'ok  adding and renaming a region pass the key check at commit'; END $$;
+
 -- And cannot add one without a key. Both halves are required by the function,
 -- and the node on its own is refused by the deferred trigger even if the
 -- function is gone round — which is the rule that matters, because a region
