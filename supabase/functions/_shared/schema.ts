@@ -89,6 +89,8 @@ const DBSchema = {
     historyCap: "history_cap",
     // Which LiveKit region calls here are pinned to. NULL is automatic.
     livekitNodeId: "livekit_node_id",
+    // Place within its section; written only by `reorder_channels`.
+    position: "position",
   },
   // Where each member's phones can be reached, and the credential this server
   // rings them over. `push_config` has no grant and no policy:

@@ -8031,6 +8031,164 @@ DO $$ BEGIN EXECUTE (SELECT def FROM real_ring); END $$;
 DELETE FROM push_config WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
 
 -- ============================================================
+-- 31. Channel order (010)
+-- ============================================================
+-- A new channel goes last in its section, and `reorder_channels` deals the
+-- channels it is given back into the places they held — so a private channel
+-- the caller cannot see neither moves nor blocks a move. Alice is a server
+-- admin outside `order-hidden`; Nia holds no role.
+
+RESET ROLE;
+
+DO $$
+DECLARE
+  v_last INTEGER;
+  v_new  INTEGER;
+BEGIN
+  SELECT max("position") INTO v_last FROM channels
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND channel_type = 'text';
+  INSERT INTO channels (id, server_id, name, channel_type) VALUES
+    ('aaaa1111-0000-4000-8000-0000000003c1', 'aaaa0000-0000-4000-8000-000000000001',
+     'order-a', 'text');
+  SELECT "position" INTO v_new FROM channels
+   WHERE id = 'aaaa1111-0000-4000-8000-0000000003c1';
+  IF v_new <> COALESCE(v_last + 1, 0) THEN
+    RAISE EXCEPTION 'FAIL: a new channel went to % rather than after %', v_new, v_last;
+  END IF;
+  RAISE NOTICE 'ok  a new channel goes last in its section';
+END $$;
+
+-- Created in this order, so they sit in it: a, hidden, b, c. As Bob, whom
+-- making a private channel seats in it, so Alice is not.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('aaaa1111-0000-4000-8000-0000000003c2', 'aaaa0000-0000-4000-8000-000000000001',
+   'order-hidden', 'text', true);
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000003c3', 'aaaa0000-0000-4000-8000-000000000001',
+   'order-b', 'text'),
+  ('aaaa1111-0000-4000-8000-0000000003c4', 'aaaa0000-0000-4000-8000-000000000001',
+   'order-c', 'text');
+
+-- The four `order-` channels by position, as one string.
+CREATE FUNCTION pg_temp.order_names() RETURNS TEXT LANGUAGE sql AS $$
+  SELECT string_agg(name, ',' ORDER BY "position", name)
+    FROM channels
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+     AND name LIKE 'order-%'
+$$;
+
+DO $$ BEGIN
+  IF pg_temp.order_names() <> 'order-a,order-hidden,order-b,order-c' THEN
+    RAISE EXCEPTION 'FAIL: the fixture is in the wrong order: %', pg_temp.order_names();
+  END IF;
+END $$;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE
+  v_others TEXT;
+  v_after  TEXT;
+  v_list   JSONB;
+BEGIN
+  -- Everything Alice can see that is not being moved, before and after.
+  SELECT string_agg(id::text, ',' ORDER BY "position", name) INTO v_others
+    FROM channels WHERE channel_type = 'text' AND name NOT LIKE 'order-%';
+
+  PERFORM reorder_channels(ARRAY[
+    'aaaa1111-0000-4000-8000-0000000003c4',
+    'aaaa1111-0000-4000-8000-0000000003c3',
+    'aaaa1111-0000-4000-8000-0000000003c1']::uuid[]);
+
+  SELECT string_agg(id::text, ',' ORDER BY "position", name) INTO v_after
+    FROM channels WHERE channel_type = 'text' AND name NOT LIKE 'order-%';
+  IF v_after IS DISTINCT FROM v_others THEN
+    RAISE EXCEPTION 'FAIL: reordering three channels moved others';
+  END IF;
+
+  -- get_server_details lists them in the new order.
+  SELECT jsonb_agg(c->>'name') INTO v_list
+    FROM jsonb_array_elements(get_server_details()->'channels') c
+   WHERE c->>'name' LIKE 'order-%';
+  IF v_list <> '["order-c","order-b","order-a"]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: get_server_details lists %', v_list;
+  END IF;
+  RAISE NOTICE 'ok  a manager reorders a section, and the list follows';
+END $$;
+
+RESET ROLE;
+DO $$ BEGIN
+  IF pg_temp.order_names() <> 'order-c,order-hidden,order-b,order-a' THEN
+    RAISE EXCEPTION 'FAIL: a private channel the mover cannot see moved: %',
+      pg_temp.order_names();
+  END IF;
+  RAISE NOTICE 'ok  a private channel the mover cannot see keeps its place';
+END $$;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM reorder_channels(ARRAY[
+      'aaaa1111-0000-4000-8000-0000000003c2',
+      'aaaa1111-0000-4000-8000-0000000003c1']::uuid[]);
+    RAISE EXCEPTION 'FAIL: a manager moved a private channel they cannot see';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%channel_not_found%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM reorder_channels(ARRAY[
+      'bbbb1111-0000-4000-8000-000000000001',
+      'aaaa1111-0000-4000-8000-0000000003c1']::uuid[]);
+    RAISE EXCEPTION 'FAIL: a manager moved another server''s channel';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%channel_not_found%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM reorder_channels(ARRAY[
+      'aaaa1111-0000-4000-8000-0000000003c1',
+      'aaaa1111-0000-4000-8000-0000000003c1']::uuid[]);
+    RAISE EXCEPTION 'FAIL: a channel was given twice';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%duplicate_channel%' THEN RAISE; END IF;
+  END;
+  -- Only through the function: a row-by-row order would collide with the
+  -- channels the writer cannot see.
+  BEGIN
+    UPDATE channels SET "position" = 0
+     WHERE id = 'aaaa1111-0000-4000-8000-0000000003c1';
+    RAISE EXCEPTION 'FAIL: a manager wrote a position directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  reorder_channels refuses what the caller cannot see, and is the only writer';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000b1","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM reorder_channels(ARRAY[
+      'aaaa1111-0000-4000-8000-0000000003c1',
+      'aaaa1111-0000-4000-8000-0000000003c3']::uuid[]);
+    RAISE EXCEPTION 'FAIL: a member without MANAGE_CHANNELS reordered channels';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%not_authorized%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  reordering takes MANAGE_CHANNELS';
+END $$;
+
+RESET ROLE;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

@@ -92,9 +92,10 @@ export async function fetchServerContext(
       )
       .eq(DBSchema.channels.serverId, opts.serverId)
       .in(DBSchema.channels.id, visibleIds)
-      // By name, as `get_server_details` lists them. Unordered, a member who
-      // had just joined saw creation order until the next refresh, so their
-      // sidebar differed from everyone else's.
+      // As `get_server_details` lists them. Unordered, a member who had just
+      // joined saw creation order until the next refresh, so their sidebar
+      // differed from everyone else's.
+      .order(DBSchema.channels.position)
       .order(DBSchema.channels.name);
 
     channels = (channelsData || []).map((c: Record<string, any>) => ({

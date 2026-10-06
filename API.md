@@ -281,6 +281,7 @@ silent re-login still triggers.
 | `list_users`, `get_server_details` | `select` on `users` / `servers` / `channels`, all scoped to your server |
 | `create_channel` | `insert` gated on `app.can_manage_channels()` |
 | `rename_channel` | `update`; the column grant covers only `name`. A LiveKit room is named by the channel's **id**, so renaming a voice channel doesn't touch the call inside it |
+| *(new)* channel order | `reorder_channels(p_channels)`: the channels in the order wanted, normally one section (text or voice) as the caller sees it. `MANAGE_CHANNELS` (`not_authorized`); every channel this server's and visible to the caller (`channel_not_found`), none twice (`duplicate_channel`). The channels given are dealt back into the places they held, so a private channel the caller cannot see keeps its own. `channels.position` has no column grant — this is its only writer — and a new channel goes last in its section. `get_server_details` lists by it, ties by name. Rings `channels` once, not once per row |
 | `delete_channel` | still policy-gated, but back behind an edge function — it is the only thing that can drop the LiveKit room (above) |
 | `create_invite` | `insert`; the code comes from a column default, and the policy refuses any permission the caller doesn't hold |
 | `update_profile`, `publish_chat_key` | `update` on your own row — the column grant covers only `display_name`, `chat_public_key`, `avatar_path` and `dm_policy` |
@@ -340,6 +341,9 @@ files, each run once after it, and the list below grows with them.
 9. **009_region_key_check.sql** — `require_node_key` becomes `SECURITY DEFINER`. Its trigger
    is deferred, so it runs at commit as whoever called `add_voice_region`, who may not read
    `livekit_node_secrets`; adding or renaming a region failed until it could.
+10. **010_channel_order.sql** — `channels.position`, numbered by name to begin with, and
+   `reorder_channels`, its only writer. An update that changes only the position no longer
+   rings `channels` per row.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. Two of those exist
