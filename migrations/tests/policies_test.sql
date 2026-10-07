@@ -9016,5 +9016,67 @@ BEGIN
 END $$;
 RESET ROLE;
 
+
+-- ============================================================
+-- 24. A stored file is read where it was sent (016)
+-- ============================================================
+-- In Gamma: g5 in a private channel, g5 and g6 in a server DM, g7 in neither.
+-- Each object is g5's.
+RESET ROLE;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('eeee1111-0000-4000-8000-0000000000f1', 'eeee0000-0000-4000-8000-000000000001', 'closed', 'text', true),
+  ('eeee1111-0000-4000-8000-0000000000f2', 'eeee0000-0000-4000-8000-000000000001', 'open', 'text', false);
+INSERT INTO channel_members (channel_id, user_id)
+VALUES ('eeee1111-0000-4000-8000-0000000000f1', '77777777-eeee-4eee-8eee-000000000005');
+INSERT INTO storage.objects (bucket_id, name, owner) VALUES
+  ('chat-eeee0000-0000-4000-8000-000000000001',
+   'eeee1111-0000-4000-8000-0000000000f1/closed.bin', '77777777-eeee-4eee-8eee-000000000005'),
+  ('chat-eeee0000-0000-4000-8000-000000000001',
+   'eeee1111-0000-4000-8000-0000000000f2/open.bin', '77777777-eeee-4eee-8eee-000000000005'),
+  ('chat-eeee0000-0000-4000-8000-000000000001',
+   'dm_77777777-eeee-4eee-8eee-000000000005_77777777-eeee-4eee-8eee-000000000006/dm.bin',
+   '77777777-eeee-4eee-8eee-000000000005'),
+  ('chat-eeee0000-0000-4000-8000-000000000001',
+   'elsewhere/stray.bin', '77777777-eeee-4eee-8eee-000000000005');
+
+CREATE FUNCTION pg_temp.files_seen() RETURNS TEXT LANGUAGE sql AS $$
+  SELECT string_agg(split_part(name, '/', 2), ',' ORDER BY split_part(name, '/', 2))
+    FROM storage.objects
+   WHERE bucket_id = 'chat-eeee0000-0000-4000-8000-000000000001'
+     AND split_part(name, '/', 2) IN ('closed.bin', 'open.bin', 'dm.bin', 'stray.bin')
+$$;
+
+SET LOCAL ROLE authenticated;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000007","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  IF pg_temp.files_seen() IS DISTINCT FROM 'open.bin' THEN
+    RAISE EXCEPTION 'FAIL: a member in neither conversation read %', pg_temp.files_seen();
+  END IF;
+  RAISE NOTICE 'ok  a member outside a private channel or a DM cannot list or read its files';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000006","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  IF pg_temp.files_seen() IS DISTINCT FROM 'dm.bin,open.bin' THEN
+    RAISE EXCEPTION 'FAIL: the other end of a DM read %', pg_temp.files_seen();
+  END IF;
+  RAISE NOTICE 'ok  the other end of a DM reads its files';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000005","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  IF pg_temp.files_seen() IS DISTINCT FROM 'closed.bin,dm.bin,open.bin,stray.bin' THEN
+    RAISE EXCEPTION 'FAIL: a member in both, and the uploader, read %', pg_temp.files_seen();
+  END IF;
+  RAISE NOTICE 'ok  a private channel''s member reads its files, and an uploader their own';
+END $$;
+
 RESET ROLE;
 ROLLBACK;

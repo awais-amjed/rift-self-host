@@ -396,6 +396,17 @@ files, each run once after it, and the list below grows with them.
 10. **010_channel_order.sql** — `channels.position`, numbered by name to begin with, and
    `reorder_channels`, its only writer. An update that changes only the position no longer
    rings `channels` per row.
+11. **011_file_ceiling.sql** — the machine's largest file (`max_file_bytes`), set by the
+   console; no server's `max_attachment_bytes` goes past it.
+12. **012–014** — channel key work found in the database (`channel_key_work`, leases), key
+   links (`store_channel_key_link`, `prune_channel_keys`), and one key change an hour for
+   removals.
+13. **015_plain_channels.sql** — `channels.is_encrypted` and `set_channel_encrypted`, for a
+   public text channel only.
+14. **016_attachment_scope.sql** — `chat_attachments_select` lets a member read a stored file
+   only where they can read the conversation it is named for (a channel they can see, or a
+   server DM they are one end of), plus their own uploads. Before it, any member could list
+   and fetch every file in the bucket.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. Two of those exist
