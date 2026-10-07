@@ -8189,6 +8189,112 @@ END $$;
 RESET ROLE;
 
 -- ============================================================
+-- 32. The machine's file ceiling (011)
+-- ============================================================
+-- Storage's FILE_SIZE_LIMIT is set by the console and recorded through
+-- `app.set_file_ceiling`. No server may be set above it, a lowered ceiling
+-- brings them down, and the old 500 MB cap is gone.
+
+DO $$
+DECLARE v_limit BIGINT;
+BEGIN
+  DELETE FROM app.file_ceiling;
+  IF max_file_bytes() <> 52428800 THEN
+    RAISE EXCEPTION 'FAIL: with nothing recorded the ceiling reads %', max_file_bytes();
+  END IF;
+
+  PERFORM app.set_file_ceiling(2147483648);  -- 2 GB, past the old 500 MB cap
+  UPDATE servers SET max_attachment_bytes = 1073741824
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  SELECT file_size_limit INTO v_limit FROM storage.buckets
+   WHERE id = 'chat-aaaa0000-0000-4000-8000-000000000001';
+  IF v_limit <> 1073741824 THEN
+    RAISE EXCEPTION 'FAIL: a 1 GB setting left the bucket at %', v_limit;
+  END IF;
+  RAISE NOTICE 'ok  a server can be set past 500 MB under a ceiling that allows it';
+
+  BEGIN
+    UPDATE servers SET max_attachment_bytes = 3221225472
+     WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: a server was set above the ceiling';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  RAISE NOTICE 'ok  but not past the ceiling';
+
+  PERFORM app.set_file_ceiling(104857600);  -- 100 MB
+  SELECT max_attachment_bytes INTO v_limit FROM servers
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  IF v_limit <> 104857600 THEN
+    RAISE EXCEPTION 'FAIL: lowering the ceiling left a server at %', v_limit;
+  END IF;
+  SELECT file_size_limit INTO v_limit FROM storage.buckets
+   WHERE id = 'chat-aaaa0000-0000-4000-8000-000000000001';
+  IF v_limit <> 104857600 THEN
+    RAISE EXCEPTION 'FAIL: lowering the ceiling left the bucket at %', v_limit;
+  END IF;
+  SELECT max_attachment_bytes INTO v_limit FROM servers
+   WHERE id = 'bbbb0000-0000-4000-8000-000000000001';
+  IF v_limit <> 26214400 THEN
+    RAISE EXCEPTION 'FAIL: lowering the ceiling moved a server under it, to %', v_limit;
+  END IF;
+  RAISE NOTICE 'ok  a lower ceiling brings down only the servers above it';
+
+  -- Saving every limit at once resends a value that is already over a
+  -- ceiling recorded after it was set. That must not block the save.
+  ALTER TABLE servers DISABLE TRIGGER servers_under_file_ceiling;
+  UPDATE servers SET max_attachment_bytes = 209715200
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  ALTER TABLE servers ENABLE TRIGGER servers_under_file_ceiling;
+  UPDATE servers SET max_attachment_bytes = 209715200, message_history_cap = 5
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+  RAISE NOTICE 'ok  an unchanged value over the ceiling still saves';
+  UPDATE servers SET max_attachment_bytes = 104857600, message_history_cap = 0
+   WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
+  INSERT INTO servers (id, name, livekit_url) VALUES
+    ('cccc0000-0000-4000-8000-0000000000f1', 'Ceiling', 'ws://lan:7880');
+  PERFORM app.set_file_ceiling(10485760);  -- 10 MB, under the 25 MB default
+  INSERT INTO servers (id, name, livekit_url) VALUES
+    ('cccc0000-0000-4000-8000-0000000000f2', 'Ceiling 2', 'ws://lan:7880');
+  SELECT max_attachment_bytes INTO v_limit FROM servers
+   WHERE id = 'cccc0000-0000-4000-8000-0000000000f2';
+  IF v_limit <> 10485760 THEN
+    RAISE EXCEPTION 'FAIL: a new server under a 10 MB ceiling got %', v_limit;
+  END IF;
+  RAISE NOTICE 'ok  a new server starts under the ceiling';
+  DELETE FROM servers WHERE id IN ('cccc0000-0000-4000-8000-0000000000f1',
+                                   'cccc0000-0000-4000-8000-0000000000f2');
+  PERFORM app.set_file_ceiling(104857600);
+END $$;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF (get_server_details()->>'max_file_bytes')::BIGINT <> 104857600 THEN
+    RAISE EXCEPTION 'FAIL: get_server_details says the ceiling is %',
+      get_server_details()->>'max_file_bytes';
+  END IF;
+  RAISE NOTICE 'ok  a member is told the ceiling';
+
+  BEGIN
+    PERFORM app.set_file_ceiling(1);
+    RAISE EXCEPTION 'FAIL: a member set the ceiling';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM 1 FROM app.file_ceiling;
+    RAISE EXCEPTION 'FAIL: a member read the ceiling table';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  and cannot set it';
+END $$;
+
+RESET ROLE;
+
+-- ============================================================
 -- 19. One owner per server (013)
 -- ============================================================
 -- Dave joined Alpha in section 12 through a plain invite, on a server whose

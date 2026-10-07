@@ -11,9 +11,6 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-/** Storage refuses an object larger than this, so a cap past it can't be met. */
-const MAX_ATTACHMENT_CEILING = 524288000; // 500 MB
-
 // Nothing here touches storage. Each server owns a `chat-<serverId>` bucket and
 // a trigger on `servers` moves that bucket's file_size_limit whenever the
 // column changes — in the same statement, so it cannot be
@@ -25,14 +22,15 @@ const MAX_ATTACHMENT_CEILING = 524288000; // 500 MB
  *
  * They are validated together rather than one `if` each because they share one
  * rule: an integer, never negative, and 0 means "no limit". Only the size cap
- * has an upper bound, because only it has to be a size Storage will accept.
+ * has an upper bound, because only it has to be a size Storage will accept:
+ * the machine's ceiling, which the console sets and `max_file_bytes` reads.
  *
  * `nullable` marks the two DM overrides, where null is a real value meaning
  * "inherit the server-wide number" — distinct from 0, which means DMs are
  * explicitly exempt from a sweep. Everything else must be a number.
  */
 const LIMIT_FIELDS = [
-  { key: "max_attachment_bytes", column: DBSchema.servers.maxAttachmentBytes, min: 1, max: MAX_ATTACHMENT_CEILING },
+  { key: "max_attachment_bytes", column: DBSchema.servers.maxAttachmentBytes, min: 1, ceiling: true },
   { key: "message_retention_days", column: DBSchema.servers.messageRetentionDays, min: 0 },
   { key: "message_history_cap", column: DBSchema.servers.messageHistoryCap, min: 0 },
   { key: "dm_retention_days", column: DBSchema.servers.dmRetentionDays, min: 0, nullable: true },
@@ -92,15 +90,25 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Asked only when the size cap is being set. The trigger behind it
+    // refuses the same thing; this is for the sentence.
+    let ceiling: number | null = null;
+    if (limitsGiven.some((f) => "ceiling" in f)) {
+      const { data, error } = await supabase.rpc("max_file_bytes");
+      if (error) return CustomResponse.error("Error reading the file ceiling", EC.DB_ERROR, error);
+      ceiling = Number(data);
+    }
+
     // Validated here as well as by the CHECK constraint, so an admin gets a
     // sentence instead of a Postgres constraint name.
     for (const field of limitsGiven) {
       const value = body[field.key];
       if (value === null && "nullable" in field) continue;
-      if (!Number.isInteger(value) || value < field.min || ("max" in field && value > field.max)) {
+      const max = "ceiling" in field ? ceiling : null;
+      if (!Number.isInteger(value) || value < field.min || (max !== null && value > max)) {
         return CustomResponse.error(
           `${field.key} must be a whole number of at least ${field.min}` +
-            ("max" in field ? ` and at most ${field.max}` : " (0 means no limit)") +
+            (max !== null ? ` and at most ${max}` : " (0 means no limit)") +
             ("nullable" in field ? ", or null to inherit the server setting" : ""),
           EC.LIMIT_INVALID,
         );

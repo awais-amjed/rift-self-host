@@ -17,7 +17,7 @@
  */
 import { join } from "jsr:@std/path@1";
 import { readEnvFile } from "../env_file.ts";
-import { optionsFromEnv, type SetupOptions } from "./options.ts";
+import { megabytes, optionsFromEnv, type SetupOptions } from "./options.ts";
 import type { LivekitCredentials, SigningSecrets, StackSecrets } from "./secrets.ts";
 import type { Jwk } from "./signing_keys.ts";
 
@@ -107,6 +107,11 @@ export function renderEnv(context: RenderContext): string {
     `HTTPS_PORT=${context.httpsPort}`,
     `LIVEKIT_TCP_PORT=${context.livekitTcpPort}`,
     `LIVEKIT_UDP_PORT=${context.livekitUdpPort}`,
+    "",
+    "# The largest file storage accepts, in MB. It reaches storage through",
+    "# docker-compose.override.yml, and no server can be set above it. Change",
+    "# it from the dashboard, which also restarts storage.",
+    `RIFT_MAX_FILE_MB=${context.maxFileMb}`,
     "",
     "# Postgres",
     `POSTGRES_PASSWORD=${secrets.postgresPassword}`,
@@ -282,10 +287,11 @@ export async function writeConfigFiles(
   }
 
   // Whatever Caddy is not fronting has to be published instead. A stack that
-  // *is* behind Caddy writes nothing and clears any override a previous run
-  // left, which would otherwise publish the API in the clear beside the TLS
-  // that replaced it.
-  if (await writeOverride(projectDir, publishingFor(context))) {
+  // *is* behind Caddy replaces any override a previous run left with one that
+  // only sets storage's limit, since the old one would otherwise publish the
+  // API in the clear beside the TLS that replaced it.
+  const maxFileBytes = megabytes(context.maxFileMb);
+  if (await writeOverride(projectDir, publishingFor(context), maxFileBytes)) {
     written.push(OVERRIDE_FILE);
   }
 
@@ -408,7 +414,7 @@ export async function restoreMissingConfig(
 
   if (
     await vacant(join(projectDir, OVERRIDE_FILE)) &&
-    await writeOverride(projectDir, publishingFor(context))
+    await writeOverride(projectDir, publishingFor(context), megabytes(context.maxFileMb))
   ) {
     written.push(OVERRIDE_FILE);
   }
@@ -478,25 +484,41 @@ export const behindCaddy: Publishing = {
 };
 
 /**
- * The compose override for [publishing], or null when there is nothing to say.
+ * The compose override for [publishing], with storage's file ceiling.
  *
  * Written as an override rather than into the compose file so the file an
  * operator downloaded stays the file they downloaded, and so deleting one file
  * undoes the whole arrangement.
+ *
+ * There is always something to say now. Every compose file shipped before
+ * 1.0.6 fixes storage's `FILE_SIZE_LIMIT` at 50 MB, and an override is how the
+ * console moves it without asking anybody to replace that file. A stack
+ * behind Caddy gets the storage part alone.
  */
-export function renderOverride(publishing: Publishing): string | null {
+export function renderOverride(publishing: Publishing, maxFileBytes: number): string {
   const { apiPort, bind, lanAddress } = publishing;
-  if (apiPort === null) return null;
+  const storage = storageBlock(maxFileBytes);
+  if (apiPort === null) {
+    return `${OVERRIDE_MARK}. It sets the largest file storage
+# accepts, which the compose file fixes at 50 MB.
+#
+# Delete it and storage goes back to 50 MB.
+services:
+${storage}`;
+  }
 
   const livekitLan = lanAddress === null ? "" : pinLivekitTo(lanAddress.trim());
 
-  return `${OVERRIDE_MARK}. It publishes what Caddy would otherwise have
-# fronted: the API gateway, and LiveKit's signalling. Media was already going
-# straight to a published UDP port and never touched Caddy, which is why that
-# part is not here.
+  return `${OVERRIDE_MARK}. It sets the largest file storage
+# accepts, and publishes what Caddy would otherwise have fronted: the API
+# gateway, and LiveKit's signalling. Media was already going straight to a
+# published UDP port and never touched Caddy, which is why that part is not
+# here.
 #
-# Delete it and both stop being reachable from outside the compose network.
+# Delete it and both stop being reachable from outside the compose network,
+# and storage goes back to 50 MB.
 services:
+${storage}
   kong:
     ports:
       - "${bind}:${apiPort}:8000"
@@ -505,6 +527,60 @@ services:
     ports:
       - "${bind}:7880:7880"
 ${livekitLan}`;
+}
+
+/**
+ * Storage's part of the override. Its own block, matched by [STORAGE_BLOCK],
+ * so [refreshFileCeiling] can change it without knowing what the rest of the
+ * file publishes.
+ */
+function storageBlock(maxFileBytes: number): string {
+  return `  # The largest file, from RIFT_MAX_FILE_MB. Set it from the dashboard.
+  storage:
+    environment:
+      FILE_SIZE_LIMIT: "${maxFileBytes}"
+`;
+}
+
+/** [storageBlock], whatever number it carries. */
+const STORAGE_BLOCK =
+  / {2}# The largest file, from RIFT_MAX_FILE_MB\.[^\n]*\n {2}storage:\n {4}environment:\n {6}FILE_SIZE_LIMIT: "\d+"\n/;
+
+/**
+ * What [refreshFileCeiling] did: wrote a new limit, found it already there,
+ * or left alone an override somebody else wrote.
+ */
+export type CeilingRefresh = "written" | "unchanged" | "foreign";
+
+/**
+ * Put [maxFileBytes] into the override, keeping whatever else it says.
+ *
+ * For a stack already running, where nothing has re-rendered the override:
+ * a server set up before the console set storage's limit, and a limit changed
+ * from the dashboard. A missing override means nothing is published, which is
+ * a stack behind Caddy. One this console did not write is the operator's, and
+ * is left as it is. Storage reads its environment only when it is created, so
+ * a caller that gets "written" has to recreate it.
+ */
+export async function refreshFileCeiling(
+  projectDir: string,
+  maxFileBytes: number,
+): Promise<CeilingRefresh> {
+  const path = join(projectDir, OVERRIDE_FILE);
+  const existing = await Deno.readTextFile(path).catch(() => null);
+  if (existing === null) {
+    await Deno.writeTextFile(path, renderOverride(behindCaddy, maxFileBytes));
+    return "written";
+  }
+  if (!existing.startsWith(OVERRIDE_MARK)) return "foreign";
+
+  const block = storageBlock(maxFileBytes);
+  const wanted = STORAGE_BLOCK.test(existing)
+    ? existing.replace(STORAGE_BLOCK, block)
+    : existing.replace(/^services:\n/m, `services:\n${block}\n`);
+  if (wanted === existing) return "unchanged";
+  await Deno.writeTextFile(path, wanted);
+  return "written";
 }
 
 /**
@@ -553,26 +629,23 @@ export function publishingFor(options: StackConfig): Publishing {
 }
 
 /**
- * Write the override for [publishing] under [projectDir], or remove ours.
+ * Write the override for [publishing] and [maxFileBytes] under [projectDir].
  *
- * Removal only ever takes a file this console wrote.
  * `docker-compose.override.yml` is the documented way for an operator to
- * change the stack without editing what they downloaded, so deleting one
- * somebody else put there would silently undo their work.
+ * change the stack without editing what they downloaded. So on a stack behind
+ * Caddy, which needs nothing published, one somebody else put there is left
+ * alone: replacing it would silently undo their work. Its storage limit is
+ * then theirs to set. A stack that must publish has always written its own.
  */
 export async function writeOverride(
   projectDir: string,
   publishing: Publishing,
+  maxFileBytes: number,
 ): Promise<boolean> {
   const path = join(projectDir, OVERRIDE_FILE);
-  const body = renderOverride(publishing);
-  if (body !== null) {
-    await Deno.writeTextFile(path, body);
-    return true;
-  }
   const existing = await Deno.readTextFile(path).catch(() => null);
-  if (existing !== null && existing.startsWith(OVERRIDE_MARK)) {
-    await Deno.remove(path).catch(() => {});
-  }
-  return false;
+  const theirs = existing !== null && !existing.startsWith(OVERRIDE_MARK);
+  if (theirs && publishing.apiPort === null) return false;
+  await Deno.writeTextFile(path, renderOverride(publishing, maxFileBytes));
+  return true;
 }

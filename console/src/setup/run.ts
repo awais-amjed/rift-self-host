@@ -25,7 +25,8 @@ import {
   type StackConfig,
   writeConfigFiles,
 } from "./config_files.ts";
-import { envHasPassword, problemsWith } from "./options.ts";
+import { envHasPassword, megabytes, problemsWith } from "./options.ts";
+import { recordFileCeiling } from "../file_ceiling.ts";
 import { functionSources, installFunctions } from "./functions.ts";
 import { type ProvisionedServer, provisionServer } from "./provision.ts";
 import { applyLimits } from "./realtime.ts";
@@ -174,6 +175,12 @@ export async function runSetup(
       throw new Error(`${failure.migration.name} failed:\n${failure.error}`);
     }
   });
+
+  // Before the server is created, whose own limit has to fit under it.
+  await step(
+    "Setting the largest file",
+    () => recordFileCeiling(database, megabytes(request.maxFileMb)),
+  );
 
   await step("Provisioning realtime", async () => {
     // By now the seed has created the tenant row on first boot. Turning the

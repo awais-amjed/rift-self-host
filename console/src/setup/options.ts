@@ -75,6 +75,16 @@ export interface SetupOptions {
   httpsPort: number;
   livekitTcpPort: number;
   livekitUdpPort: number;
+
+  /**
+   * The largest file anybody can send, in MB: storage's `FILE_SIZE_LIMIT`,
+   * set through the compose override (see [renderOverride]). Each server's
+   * own limit, set in the app, stays at or under it.
+   *
+   * MB because that is what people think in, and 1 MB is 1,048,576 bytes
+   * here, as it is in the app.
+   */
+  maxFileMb: number;
 }
 
 /** What the form shows when nothing says otherwise. */
@@ -94,6 +104,7 @@ export const defaults: SetupOptions = {
   httpsPort: 443,
   livekitTcpPort: 7881,
   livekitUdpPort: 7882,
+  maxFileMb: 500,
 };
 
 /**
@@ -214,6 +225,14 @@ export const fields: OptionField[] = [
       "LiveKit's signalling goes to 127.0.0.1:7880 beside it.",
   },
   {
+    key: "maxFileMb",
+    label: "Largest file (MB)",
+    kind: "number",
+    advanced: false,
+    hint: "The biggest attachment anyone can send. Each server sets its own " +
+      "limit under this in the app. You can change it later.",
+  },
+  {
     key: "consolePassword",
     label: "Console password",
     kind: "password",
@@ -270,6 +289,27 @@ export const fields: OptionField[] = [
   },
 ];
 
+/** Bytes in [megabytes], the unit storage and the database count in. */
+export function megabytes(megabytes: number): number {
+  return megabytes * 1024 * 1024;
+}
+
+/** Whether [value] is a file ceiling the console will set. */
+export function validFileMb(value: number): boolean {
+  return Number.isInteger(value) && value >= 1;
+}
+
+/** The file ceiling `.env` records, in MB, or the default. */
+export function maxFileMbFrom(values: Record<string, string>): number {
+  const parsed = Number(values.RIFT_MAX_FILE_MB);
+  return validFileMb(parsed) ? parsed : defaults.maxFileMb;
+}
+
+/** The file ceiling `.env` records under [directory], in bytes. */
+export function maxFileBytesFromEnv(directory?: string): number {
+  return megabytes(maxFileMbFrom(readEnvFile(directory)));
+}
+
 /** Read a port from [values], falling back to [fallback] if it is not one. */
 function port(values: Record<string, string>, name: string, fallback: number): number {
   const parsed = Number(values[name]);
@@ -302,6 +342,7 @@ export function optionsFromEnv(directory?: string): SetupOptions {
     httpsPort: port(values, "HTTPS_PORT", defaults.httpsPort),
     livekitTcpPort: port(values, "LIVEKIT_TCP_PORT", defaults.livekitTcpPort),
     livekitUdpPort: port(values, "LIVEKIT_UDP_PORT", defaults.livekitUdpPort),
+    maxFileMb: maxFileMbFrom(values),
   };
 }
 
@@ -370,6 +411,10 @@ export function problemsWith(options: SetupOptions): string[] {
     if (!Number.isInteger(value) || value < 1 || value > 65535) {
       problems.push(`${name} port must be between 1 and 65535.`);
     }
+  }
+
+  if (!validFileMb(options.maxFileMb)) {
+    problems.push("The largest file must be a whole number of MB, at least 1.");
   }
 
   // Two services on one port is a container that will not start, and the

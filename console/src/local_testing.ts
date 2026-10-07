@@ -40,6 +40,7 @@ import { clearState, readState, writeState } from "./state.ts";
 import { projectDir, recreateServices } from "./docker.ts";
 import { setting } from "./env_file.ts";
 import { behindCaddy, type Publishing, writeOverride } from "./setup/config_files.ts";
+import { maxFileBytesFromEnv } from "./setup/options.ts";
 
 /** Where the state row lives. */
 export const LOCAL_TESTING = "local_testing";
@@ -264,11 +265,11 @@ export async function turnOn(
   // a port is the one step here that can fail — something else may hold it —
   // and doing it first means a failure leaves the server exactly as it was
   // rather than pointed at an address that never came up.
-  await writeOverride(projectDir(), localPublishing(local));
+  await writeOverride(projectDir(), localPublishing(local), maxFileBytesFromEnv());
   try {
     await recreate();
   } catch (error) {
-    await writeOverride(projectDir(), restingPublishing());
+    await writeOverride(projectDir(), restingPublishing(), maxFileBytesFromEnv());
     // Best effort: if this fails too the override is already gone, so
     // "Restart the stack" puts everything back.
     await recreate().catch(() => {});
@@ -297,7 +298,7 @@ export async function turnOff(
   const local = await readLocalTesting(target);
   if (local !== null) await restoreLivekitUrls(target, local.restore, fallback);
   await clearState(target, LOCAL_TESTING);
-  await writeOverride(projectDir(), restingPublishing());
+  await writeOverride(projectDir(), restingPublishing(), maxFileBytesFromEnv());
   // Last, because everything above has already made this a normal server. If
   // the containers sulk, "Restart the stack" is the whole of the repair.
   await recreate();

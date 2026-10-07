@@ -11,6 +11,7 @@ import {
   OVERRIDE_FILE,
   placeholders,
   publishingFor,
+  refreshFileCeiling,
   refreshGateway,
   render,
   type RenderContext,
@@ -20,8 +21,10 @@ import {
   secretsFromEnv,
   signingSettings,
 } from "./config_files.ts";
-import { defaults } from "./options.ts";
+import { defaults, megabytes } from "./options.ts";
 import { generateSecrets } from "./secrets.ts";
+
+const MB_500 = megabytes(500);
 
 const context = async () => ({
   ...defaults,
@@ -219,7 +222,8 @@ Deno.test("a local stack is addressed over http, a real one over https", async (
 Deno.test("the local override publishes what Caddy would have fronted", () => {
   const yaml = renderOverride(
     publishingFor({ ...defaults, localTesting: true, localAddress: "192.168.1.6" }),
-  )!;
+    MB_500,
+  );
   assertStringIncludes(yaml, '"0.0.0.0:18000:8000"');
   assertStringIncludes(yaml, '"0.0.0.0:7880:7880"');
   // Behind a router, STUN answers with the router's address and the call
@@ -234,14 +238,73 @@ Deno.test("the local override publishes what Caddy would have fronted", () => {
 });
 
 Deno.test("a stack behind Caddy publishes nothing extra", () => {
-  assertEquals(renderOverride(behindCaddy), null);
-  assertEquals(renderOverride(publishingFor({ ...defaults, domain: "a.example" })), null);
+  for (
+    const yaml of [
+      renderOverride(behindCaddy, MB_500),
+      renderOverride(publishingFor({ ...defaults, domain: "a.example" }), MB_500),
+    ]
+  ) {
+    assertEquals(yaml.includes("ports:"), false);
+    // But it does say how big a file may be, which the compose file fixes at
+    // 50 MB on every server set up before the console could change it.
+    assertStringIncludes(yaml, 'FILE_SIZE_LIMIT: "524288000"');
+  }
+});
+
+Deno.test("every override carries storage's file limit", () => {
+  const yaml = renderOverride(
+    publishingFor({ ...defaults, domain: "a.example", ownProxy: true }),
+    megabytes(2048),
+  );
+  assertStringIncludes(
+    yaml,
+    '  storage:\n    environment:\n      FILE_SIZE_LIMIT: "2147483648"',
+  );
+  assertStringIncludes(yaml, '"127.0.0.1:8000:8000"');
+});
+
+Deno.test("the file limit is changed in place, whatever else the override says", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "rift-ceiling-" });
+  try {
+    const path = `${dir}/${OVERRIDE_FILE}`;
+    const read = () => Deno.readTextFile(path);
+
+    // No override is a stack behind Caddy: it gets the storage part alone.
+    assertEquals(await refreshFileCeiling(dir, MB_500), "written");
+    assertStringIncludes(await read(), 'FILE_SIZE_LIMIT: "524288000"');
+    assertEquals(await refreshFileCeiling(dir, MB_500), "unchanged");
+
+    // One written before the limit existed publishes and says nothing of
+    // storage. The publishing survives, and the limit is added.
+    const older = renderOverride(
+      publishingFor({ ...defaults, domain: "a.example", ownProxy: true }),
+      MB_500,
+    ).replace(/ {2}# The largest file[^]*?FILE_SIZE_LIMIT: "\d+"\n\n?/, "");
+    assertEquals(older.includes("FILE_SIZE_LIMIT"), false);
+    await Deno.writeTextFile(path, older);
+    assertEquals(await refreshFileCeiling(dir, megabytes(100)), "written");
+    assertStringIncludes(await read(), 'FILE_SIZE_LIMIT: "104857600"');
+    assertStringIncludes(await read(), '"127.0.0.1:8000:8000"');
+
+    // A second change replaces the first rather than adding another.
+    assertEquals(await refreshFileCeiling(dir, megabytes(200)), "written");
+    assertEquals((await read()).split("FILE_SIZE_LIMIT").length, 2);
+    assertStringIncludes(await read(), 'FILE_SIZE_LIMIT: "209715200"');
+
+    // An override the operator wrote is theirs.
+    await Deno.writeTextFile(path, "services:\n  kong: {}\n");
+    assertEquals(await refreshFileCeiling(dir, MB_500), "foreign");
+    assertEquals(await read(), "services:\n  kong: {}\n");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 Deno.test("an operator's own proxy gets the upstreams on the loopback", () => {
   const yaml = renderOverride(
     publishingFor({ ...defaults, domain: "a.example", ownProxy: true, proxyPort: 8000 }),
-  )!;
+    MB_500,
+  );
   // Loopback, not every interface: a signalling port on a public host is
   // LiveKit answering in the clear beside the TLS meant to front it.
   assertStringIncludes(yaml, '"127.0.0.1:8000:8000"');
@@ -310,7 +373,9 @@ Deno.test("a directory holding only .env gets every generated file back", async 
 
   const written = await restoreMissingConfig({ templateRoot, projectDir: project });
 
+  // The override too, behind Caddy: it holds storage's file limit.
   assertEquals(written.sort(), [
+    "docker-compose.override.yml",
     "volumes/api/kong.yml",
     "volumes/caddy/Caddyfile",
     "volumes/db/_supabase.sql",

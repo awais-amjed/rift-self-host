@@ -1,4 +1,7 @@
-/** The Servers tab's endpoints: the list, creating one, and invite links. */
+/**
+ * The Servers tab's endpoints: the list, creating one, invite links, and the
+ * largest file the machine accepts.
+ */
 import {
   createServer,
   inviteLinkFor,
@@ -7,11 +10,27 @@ import {
   mintInvite,
 } from "../../servers.ts";
 import { readLocalTesting } from "../../local_testing.ts";
+import { changeFileCeiling, readFileCeiling } from "../../file_ceiling.ts";
 import { targetFromEnv } from "../../postgres.ts";
 import { type ApiRoutes, failure, json } from "../responses.ts";
 
-export const serverRoutes: ApiRoutes = async (request, url) => {
+export const serverRoutes: ApiRoutes = async (request, url, paths) => {
   const path = url.pathname;
+
+  if (path === "/api/files") {
+    if (request.method === "POST") {
+      const { mb } = await request.json();
+      try {
+        await changeFileCeiling(targetFromEnv(), paths.projectDir, Number(mb));
+      } catch (error) {
+        return json(
+          { error: error instanceof Error ? error.message : String(error) },
+          400,
+        );
+      }
+    }
+    return json(await readFileCeiling(paths.projectDir));
+  }
 
   if (path === "/api/servers") {
     const target = targetFromEnv();

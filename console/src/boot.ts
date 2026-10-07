@@ -47,6 +47,8 @@ import { applyUpgrade, pendingWork } from "./upgrade.ts";
 import { backupPresent, restoreFromBackup } from "./backup/restore.ts";
 import { adminTarget } from "./setup/realtime.ts";
 import { repairAttachmentMetadata } from "./storage_repair.ts";
+import { recordFileCeiling, refreshAtBoot } from "./file_ceiling.ts";
+import { maxFileBytesFromEnv } from "./setup/options.ts";
 
 /** How long to wait for Postgres once the stack is up. Pulling images is slow. */
 const DATABASE_TIMEOUT_MS = 600_000;
@@ -89,6 +91,19 @@ export async function prepareStack(
     return false;
   });
 
+  // Storage's file limit, which every compose file before 1.0.6 fixed at
+  // 50 MB. Never fatal either: storage keeps the limit it had.
+  const ceiling = await refreshAtBoot(paths.projectDir).catch((error) => {
+    console.error("Could not set storage's file limit:", error);
+    return "unchanged" as const;
+  });
+  if (ceiling === "foreign") {
+    console.log(
+      "docker-compose.override.yml is not the console's, so storage keeps the " +
+        "file limit it sets there.",
+    );
+  }
+
   const sources = functionSources(paths);
   const missing = await missingFunctions(sources, paths.functionsTarget);
   if (missing.length > 0) {
@@ -119,6 +134,11 @@ export async function prepareStack(
       report("Updating the gateway");
       console.log("The gateway's routes changed in this release; restarting Kong.");
       await restartService("kong");
+    }
+    if (ceiling === "written") {
+      report("Updating storage");
+      console.log("Storage's file limit changed; restarting storage.");
+      await restartService("storage");
     }
   }
 
@@ -183,22 +203,28 @@ export async function prepareStack(
   }
 
   const work = await pendingWork(target, paths);
-  if (!work.needed) return;
-
-  say(
-    `Applying ${work.imageVersion} (this stack is at ` +
-      `${work.appliedVersion ?? "an unrecorded version"})`,
-  );
-  const result = await applyUpgrade(target, paths, (progress) => {
-    if (progress.done) say(`  ${progress.step}`);
-  });
-  if (!result.endpointsRestarted) {
+  if (work.needed) {
     say(
-      "  Endpoints were installed but not reloaded — compose was still busy. " +
-        "They take effect within a minute, or press Apply in the console.",
+      `Applying ${work.imageVersion} (this stack is at ` +
+        `${work.appliedVersion ?? "an unrecorded version"})`,
     );
+    const result = await applyUpgrade(target, paths, (progress) => {
+      if (progress.done) say(`  ${progress.step}`);
+    });
+    if (!result.endpointsRestarted) {
+      say(
+        "  Endpoints were installed but not reloaded — compose was still busy. " +
+          "They take effect within a minute, or press Apply in the console.",
+      );
+    }
+    say(`Now at ${result.version}.`);
   }
-  say(`Now at ${result.version}.`);
+
+  // After the schema, which is where it is kept, and on every start: it is one
+  // statement, and the dashboard is not the only thing that edits `.env`.
+  await recordFileCeiling(target, maxFileBytesFromEnv(paths.projectDir)).catch((error) =>
+    console.error("Could not record the largest file in the database:", error)
+  );
 }
 
 /**

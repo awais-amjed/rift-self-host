@@ -378,6 +378,9 @@ services:
       DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD:-}@db:5432/postgres
       STORAGE_PUBLIC_URL: ${API_EXTERNAL_URL:-}
       REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+      # The console replaces this with the largest file chosen at setup
+      # (RIFT_MAX_FILE_MB), through docker-compose.override.yml. 50 MB is
+      # only what storage gets without one.
       FILE_SIZE_LIMIT: 52428800
       STORAGE_BACKEND: file
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage

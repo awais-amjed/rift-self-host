@@ -4,6 +4,7 @@ import {
   defaults,
   envHasPassword,
   fields,
+  maxFileBytesFromEnv,
   optionsFromEnv,
   problemsWith,
   type SetupOptions,
@@ -263,4 +264,22 @@ Deno.test("local testing and your own proxy are not a combination", () => {
     ownProxy: true,
   });
   assert(problems.some((p) => p.includes("Pick one")));
+});
+
+Deno.test("the largest file is read from .env in MB, and nonsense falls back", async () => {
+  const set = await projectWith("RIFT_MAX_FILE_MB=2048\n");
+  assertEquals(optionsFromEnv(set).maxFileMb, 2048);
+  assertEquals(maxFileBytesFromEnv(set), 2147483648);
+  await Deno.remove(set, { recursive: true });
+
+  const nonsense = await projectWith("RIFT_MAX_FILE_MB=0.5\n");
+  assertEquals(optionsFromEnv(nonsense).maxFileMb, defaults.maxFileMb);
+  await Deno.remove(nonsense, { recursive: true });
+});
+
+Deno.test("the largest file must be a whole number of MB", () => {
+  assertEquals(problemsWith({ ...valid, maxFileMb: 4096 }), []);
+  for (const maxFileMb of [0, -1, 1.5, NaN]) {
+    assertEquals(problemsWith({ ...valid, maxFileMb }).length, 1, `${maxFileMb}`);
+  }
 });

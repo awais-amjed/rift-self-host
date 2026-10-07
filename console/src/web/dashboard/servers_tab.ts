@@ -24,6 +24,18 @@ const SERVERS_HELP = `
 <p>Anyone who has a link can use it, so send links privately — not in a public
   post, and not in a screenshot.</p>`;
 
+const FILES_HELP = `
+<p>The biggest attachment anyone can send to a server on this machine. Each
+  server's administrators set that server's own limit in the app, and it can
+  go up to this but not past it.</p>
+<h3>Change it</h3>
+<ol>
+  <li>Type a size in MB and press <strong>Save</strong>.</li>
+  <li>Storage restarts, which takes a few seconds. Uploads in progress
+    fail and can be sent again.</li>
+</ol>
+<p>Lowering it also lowers every server set above it.</p>`;
+
 /** The servers on this stack, their invites, and the create form. */
 export function serversTab(): Tab {
   return {
@@ -54,6 +66,20 @@ ${heading("Servers", "servers", SERVERS_HELP, "/console/#servers")}
     </div>
   </div>
   ${resultBox("serverResult")}
+</div>
+
+${heading("Largest file", "files", FILES_HELP, "/console/#servers")}
+<div class="panel">
+  <div class="field" style="margin:0">
+    <label for="maxFileMb">Largest file (MB)</label>
+    <div class="secret">
+      <input id="maxFileMb" type="number" min="1" step="1" style="flex:1">
+      <button id="saveMaxFile">Save</button>
+    </div>
+    <p class="hint" id="maxFileHint">The biggest attachment anyone can send.
+      Each server sets its own limit under this in the app.</p>
+  </div>
+  ${resultBox("filesResult")}
 </div>`,
     script: SERVERS_SCRIPT,
   };
@@ -129,6 +155,40 @@ document.getElementById("createServer").addEventListener("click", async (event) 
     showResult("serverResult", "The server was not created", errorBody(body.error ||
       "The console did not say why.", "Check the Overview tab that every container is " +
       "green, then try again."), true);
+  }
+});
+
+// Once, not on the ten-second refresh, which would overwrite a number
+// somebody is in the middle of typing.
+async function loadFileCeiling() {
+  const data = await (await fetch("/api/files")).json();
+  const input = document.getElementById("maxFileMb");
+  input.value = data.mb;
+  if (!data.managed) {
+    input.disabled = true;
+    document.getElementById("saveMaxFile").disabled = true;
+    document.getElementById("maxFileHint").textContent =
+      "Set by your own docker-compose.override.yml: FILE_SIZE_LIMIT under storage.";
+  }
+}
+loadFileCeiling();
+
+document.getElementById("saveMaxFile").addEventListener("click", async (event) => {
+  const button = event.target;
+  const mb = Number(document.getElementById("maxFileMb").value);
+  hideResult("filesResult");
+  button.disabled = true;
+  button.textContent = "Saving…";
+  const body = await postJson("/api/files", { mb });
+  button.disabled = false;
+  button.textContent = "Save";
+  if (body.error) {
+    showResult("filesResult", "Not changed", errorBody(body.error), true);
+  } else {
+    document.getElementById("maxFileMb").value = body.mb;
+    showResult("filesResult", "Saved",
+      "<p>Files up to " + body.mb + " MB can be sent now. Servers set above it " +
+      "were brought down to it.</p>");
   }
 });
 
