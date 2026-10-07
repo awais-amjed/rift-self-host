@@ -9078,5 +9078,87 @@ BEGIN
   RAISE NOTICE 'ok  a private channel''s member reads its files, and an uploader their own';
 END $$;
 
+-- ============================================================
+-- 25. A key lease is kept by doing the work (017)
+-- ============================================================
+-- Gamma's open channel from 24; g5 and g6 both after its key work.
+RESET ROLE;
+DELETE FROM app.channel_key_leases;
+
+DO $$
+DECLARE
+  c  CONSTANT UUID := 'eeee1111-0000-4000-8000-0000000000f2';
+  g5 CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000005';
+  g6 CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000006';
+  v_expires TIMESTAMPTZ;
+BEGIN
+  IF NOT app.take_key_lease(c, g5) OR app.take_key_lease(c, g6) THEN
+    RAISE EXCEPTION 'FAIL: the first to ask did not hold the work alone';
+  END IF;
+
+  -- Asking again without sealing anything keeps it, and does not extend it.
+  UPDATE app.channel_key_leases
+     SET expires_at = now() + interval '10 seconds',
+         renewed_at = now() - interval '50 seconds'
+   WHERE channel_id = c;
+  IF NOT app.take_key_lease(c, g5) THEN
+    RAISE EXCEPTION 'FAIL: a holder asking again was turned away from their own work';
+  END IF;
+  SELECT expires_at INTO v_expires FROM app.channel_key_leases WHERE channel_id = c;
+  IF v_expires <> now() + interval '10 seconds' THEN
+    RAISE EXCEPTION 'FAIL: asking without working renewed the lease';
+  END IF;
+  RAISE NOTICE 'ok  asking again without working keeps a lease but does not renew it';
+
+  -- An entry stored is work done, and renews it.
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES (c, 1, g6, g5, 'eph', 'ct', 'n');
+  PERFORM app.take_key_lease(c, g5);
+  SELECT expires_at INTO v_expires FROM app.channel_key_leases WHERE channel_id = c;
+  IF v_expires <> now() + app.key_lease_length() THEN
+    RAISE EXCEPTION 'FAIL: storing entries did not renew the lease';
+  END IF;
+  RAISE NOTICE 'ok  storing entries renews it';
+
+  -- Not past the longest hold, however much is stored.
+  UPDATE app.channel_key_leases
+     SET expires_at = now() + interval '10 seconds',
+         since = now() - interval '11 minutes',
+         renewed_at = now() - interval '50 seconds',
+         progress_at = now()
+   WHERE channel_id = c;
+  PERFORM app.take_key_lease(c, g5);
+  SELECT expires_at INTO v_expires FROM app.channel_key_leases WHERE channel_id = c;
+  IF v_expires <> now() + interval '10 seconds' THEN
+    RAISE EXCEPTION 'FAIL: a lease was renewed past the longest hold';
+  END IF;
+  RAISE NOTICE 'ok  nobody holds it past the longest hold';
+
+  -- Run out: its holder rests, and somebody else asking gets it.
+  UPDATE app.channel_key_leases SET expires_at = now() - interval '1 second'
+   WHERE channel_id = c;
+  IF app.take_key_lease(c, g5) THEN
+    RAISE EXCEPTION 'FAIL: a lapsed holder took the work straight back';
+  END IF;
+  -- Two statements: one query would read the holder from before it changed.
+  IF NOT app.take_key_lease(c, g6) THEN
+    RAISE EXCEPTION 'FAIL: another member could not take a lapsed lease';
+  END IF;
+  IF (SELECT holder FROM app.channel_key_leases WHERE channel_id = c) <> g6 THEN
+    RAISE EXCEPTION 'FAIL: a lapsed lease taken stayed with its old holder';
+  END IF;
+  RAISE NOTICE 'ok  a lapsed lease goes to somebody else asking, not back to its holder';
+
+  -- With nobody else asking, it comes back once the rest is over.
+  UPDATE app.channel_key_leases
+     SET holder = g5, expires_at = now() - app.key_lease_length() - interval '1 second'
+   WHERE channel_id = c;
+  IF NOT app.take_key_lease(c, g5) THEN
+    RAISE EXCEPTION 'FAIL: a rested holder could not take the work again';
+  END IF;
+  RAISE NOTICE 'ok  a rested holder takes it again';
+END $$;
+
 RESET ROLE;
 ROLLBACK;

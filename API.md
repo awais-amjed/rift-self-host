@@ -195,8 +195,11 @@ which answer with one JSON value:
   first, and heals the rest from the next pass, because `post_channel_keys`
   takes 500 entries and a channel bigger than that could not rotate at all;
 - **one member per channel**: whoever is handed a channel's work holds a lease
-  on it (`app.channel_key_leases`) for a minute, renewed each time they ask, and
-  everyone else is told there is nothing to do there. `get_channel_key` lists
+  on it (`app.channel_key_leases`) for a minute, and everyone else is told there
+  is nothing to do there. Asking again keeps it but renews it only when the
+  holder stored keyring entries since the last renewal, and never past ten
+  minutes from taking it (017); a lease that ran out goes to somebody else
+  asking before its last holder may take it back, a minute later. `get_channel_key` lists
   `members_missing` only to a caller who holds the current key and can take the
   lease.
 
@@ -407,6 +410,8 @@ files, each run once after it, and the list below grows with them.
    only where they can read the conversation it is named for (a channel they can see, or a
    server DM they are one end of), plus their own uploads. Before it, any member could list
    and fetch every file in the bucket.
+15. **017_key_lease_progress.sql** — a key lease is renewed only for work done (see
+   `sweep_channel_keys` above).
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. Two of those exist
