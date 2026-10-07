@@ -155,6 +155,15 @@ member into the current key rather than triggering another rotation. There is no
 flag to set and nothing to reset. Old versions stay in the ring, so scrollback
 written under them is still readable by everyone who could read it before.
 
+**Members who joined since are sealed the old versions too.** Healing used to
+cover only the current version, so a member who arrived after a rotation could
+read nothing from before it, however many members were online who could have
+opened it. The sweep now also lists, newest first, each older version the caller
+holds and an eligible member lacks. Nothing at or below `rotate_from_key_version`
+is offered (what a channel said while private stays with whoever had it), and a
+bot is eligible only from its grant. These jobs come at most 200 entries to an
+answer; `more: true` says some were held back, and the client sweeps again.
+
 `post_channel_keys` also refuses a batch that seals to a **bot** with no
 `bot_channel_keys` grant to that channel at that version — the same rule
 `refuse_ineligible_keyring` puts on the row, named here so one ineligible

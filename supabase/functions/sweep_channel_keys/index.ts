@@ -11,6 +11,12 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+/// How many old-version entries one answer asks the caller to seal. A server
+/// that has rotated often and taken on many members since owes a lot of them
+/// at once, and the caller seals them all before it posts. The rest are named
+/// by `more: true` and come out of the next pass.
+const HISTORY_SEALS = 200;
+
 /**
  * Key-distribution sweep (Phase 2, ARCHITECTURE.md §4): one call that lists
  * every channel where the caller can do healing work —
@@ -20,7 +26,9 @@ const supabase = createClient(
  * - channels with no key at all (`key_version: 0`) so the caller can
  *   bootstrap v1, and
  * - channels that owe a rotation, so the caller can mint the next version for
- *   the people still entitled to one.
+ *   the people still entitled to one, and
+ * - older versions the caller holds and an eligible member lacks, so somebody
+ *   who joined after a rotation can read what was said before it.
  * Clients run this on launch/server-select and when the key-sweep doorbell
  * rings, so a new member gets access as soon as any member is online.
  *
@@ -118,6 +126,8 @@ Deno.serve(async (req) => {
     const ring = (ringData ?? []) as Record<string, any>[];
 
     const work: Record<string, any>[] = [];
+    let historyLeft = HISTORY_SEALS;
+    let more = false;
     for (const channelId of myChannels) {
       const channelRing = ring.filter(
         (r) => r[DBSchema.channelKeyring.channelId] === channelId,
@@ -126,6 +136,55 @@ Deno.serve(async (req) => {
         (max, r) => Math.max(max, r[DBSchema.channelKeyring.keyVersion] as number),
         0,
       );
+
+      // Scrollback. Healing below seals only the current version, so before
+      // this a member who joined after a rotation (a ban, a bot grant) got the
+      // newest key and nothing older: every message from before it stayed
+      // locked for them for good, however many members were online who could
+      // have opened it. Newest first, since recent history is what gets read.
+      //
+      // Two floors keep this from undoing what a rotation was for. A granted
+      // bot is eligible only from its grant's version (`eligibleFor`), so
+      // grants stay forward-only. And nothing at or below
+      // `rotate_from_key_version` goes to anyone who lacks it: those versions
+      // are what a channel said while it was private, and opening it up is
+      // not inviting everyone into that. The mark only ever rises, so the
+      // latest one covers every earlier private stretch too.
+      const mark = rotateMarkOf(channelId);
+      for (let v = currentVersion - 1; v >= 1; v--) {
+        if (mark !== null && v <= mark) break;
+        const held = channelRing.filter(
+          (r) => r[DBSchema.channelKeyring.keyVersion] === v,
+        );
+        const myOld = held.find(
+          (r) => r[DBSchema.channelKeyring.userId] === auth.userId,
+        );
+        if (!myOld) continue;
+        const holders = new Set(
+          held.map((r) => r[DBSchema.channelKeyring.userId] as string),
+        );
+        const lacking = eligibleFor(channelId, v)
+          .filter((m) => !holders.has(m.user_id));
+        if (lacking.length === 0) continue;
+        if (historyLeft === 0) {
+          more = true;
+          break;
+        }
+        const batch = lacking.slice(0, historyLeft);
+        if (batch.length < lacking.length) more = true;
+        historyLeft -= batch.length;
+        work.push({
+          channel_id: channelId,
+          key_version: v,
+          rotate: false,
+          my_key: {
+            ephemeral_public_key: myOld[DBSchema.channelKeyring.ephemeralPublicKey],
+            ciphertext: myOld[DBSchema.channelKeyring.ciphertext],
+            nonce: myOld[DBSchema.channelKeyring.nonce],
+          },
+          members_missing: batch,
+        });
+      }
 
       if (currentVersion === 0) {
         // No key yet — offer a bootstrap (only meaningful if somebody can hold
@@ -190,7 +249,6 @@ Deno.serve(async (req) => {
       const entitlementAhead = eligibleFor(channelId, currentVersion + 1).some(
         (m) => !nowEligibleIds.has(m.user_id),
       );
-      const mark = rotateMarkOf(channelId);
       const openedUp = mark !== null && currentVersion <= mark;
 
       if (sealedButNotEntitled || entitlementAhead || openedUp) {
@@ -224,7 +282,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    return CustomResponse.success({ work });
+    return CustomResponse.success({ work, more });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }
