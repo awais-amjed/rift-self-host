@@ -8892,5 +8892,129 @@ BEGIN
   RAISE NOTICE 'ok  a change falling due rings its server once';
 END $$;
 
+
+-- ============================================================
+-- 23. Channels that are not encrypted (015)
+-- ============================================================
+-- Gamma's #general: ann made a moderator, g5 an ordinary member. Ben is still
+-- banned and still sealed into the current version from section 22.
+RESET ROLE;
+INSERT INTO member_roles (user_id, role_id)
+SELECT '77777777-eeee-4eee-8eee-000000000001', id FROM roles
+ WHERE server_id = 'eeee0000-0000-4000-8000-000000000001' AND name = 'Moderator';
+UPDATE channel_keyring SET created_at = now() - interval '2 hours'
+ WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001';
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000005","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, key_version)
+    VALUES ('eeee1111-0000-4000-8000-000000000001', 'in the clear', 0);
+    RAISE EXCEPTION 'FAIL: a member posted in the clear in an encrypted channel';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM set_channel_encrypted('eeee1111-0000-4000-8000-000000000001', false);
+    RAISE EXCEPTION 'FAIL: a member without MANAGE_CHANNELS turned encryption off';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%not_authorized%' THEN RAISE; END IF;
+  END;
+  BEGIN
+    UPDATE channels SET is_encrypted = false
+     WHERE id = 'eeee1111-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: is_encrypted was writable by hand';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  only a channel manager turns encryption off, and only through the function';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  IF set_channel_encrypted('eeee1111-0000-4000-8000-000000000001', false) ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a moderator could not turn encryption off';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM messages
+                  WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001'
+                    AND is_system AND ciphertext LIKE '%turned encryption off%') THEN
+    RAISE EXCEPTION 'FAIL: turning encryption off said nothing in the channel';
+  END IF;
+  IF (SELECT c ->> 'is_encrypted' FROM jsonb_array_elements(get_server_details() -> 'channels') c
+       WHERE c ->> 'id' = 'eeee1111-0000-4000-8000-000000000001') <> 'false' THEN
+    RAISE EXCEPTION 'FAIL: clients are not told the channel is unencrypted';
+  END IF;
+  RAISE NOTICE 'ok  a moderator turns it off, the channel is told, and so is every client';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000005","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, key_version)
+  VALUES ('eeee1111-0000-4000-8000-000000000001', 'in the clear', 0);
+  RAISE NOTICE 'ok  members post in the clear once it is off';
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE v_r JSONB;
+BEGIN
+  -- Ben is banned and sealed into a key two hours old: an encrypted channel
+  -- would change it now. This one does not.
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work('77777777-eeee-4eee-8eee-000000000001');
+  IF v_r -> 'work' @> '[{"rotate": true}]' THEN
+    RAISE EXCEPTION 'FAIL: an unencrypted channel changed its key: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  an unencrypted channel never changes its key';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  PERFORM set_channel_encrypted('eeee1111-0000-4000-8000-000000000001', true);
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE v_r JSONB;
+BEGIN
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work('77777777-eeee-4eee-8eee-000000000001');
+  IF NOT v_r -> 'work' @> '[{"rotate": true}]' THEN
+    RAISE EXCEPTION 'FAIL: turning encryption back on left a banned member''s key in place: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  turning it back on changes the key past whoever was removed meanwhile';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  PERFORM set_channel_encrypted('eeee1111-0000-4000-8000-000000000001', false);
+  PERFORM set_channel_private('eeee1111-0000-4000-8000-000000000001', true);
+  IF NOT (SELECT is_encrypted FROM channels WHERE id = 'eeee1111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a channel closed while unencrypted stayed unencrypted';
+  END IF;
+  IF set_channel_encrypted('eeee1111-0000-4000-8000-000000000001', false) ->> 'reason'
+     <> 'not_public_text' THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s encryption was turned off';
+  END IF;
+  RAISE NOTICE 'ok  private channels are always encrypted, closing one included';
+END $$;
+RESET ROLE;
+
 RESET ROLE;
 ROLLBACK;
