@@ -18,11 +18,12 @@ const MAX_ENTRIES = 500;
  * Store sealed channel-key entries (Design 2 keyring writes): bootstrap of a
  * new key version, or healing missing entries of an existing one.
  *
- * Race arbitration (locked decision): the whole batch is one INSERT with no
- * ON CONFLICT — if any (channel_id, key_version, user_id) already exists the
- * entire statement fails with 23505 and the caller gets `keyring_conflict`:
- * first writer wins, losers refetch and re-wrap the winner's key. A new
- * version may only be `current_version + 1`.
+ * Race arbitration (locked decision): minting a version (`mint: true`) is one
+ * INSERT with no ON CONFLICT — if any (channel_id, key_version, user_id)
+ * already exists the entire statement fails with 23505 and the caller gets
+ * `keyring_conflict`: first writer wins, losers refetch and re-wrap the
+ * winner's key. A new version may only be `current_version + 1`. Healing an
+ * existing version (`mint: false`) skips entries that are already there.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -30,7 +31,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { channel_id, key_version, entries } = await req.json();
+    const { channel_id, key_version, entries, mint } = await req.json();
     const token = extractBearerToken(req);
 
     const auth = await authenticateToken(supabase, token);
@@ -113,6 +114,28 @@ Deno.serve(async (req) => {
         EC.KEYRING_CONFLICT,
       );
     }
+    // A client says which it is doing (012). Minting is the race: the version
+    // must be exactly the next one, and the first batch to land wins it. A
+    // later batch of the same version, from the same minter or anybody else
+    // holding it, is healing, which only ever seals a key the sender unwrapped
+    // from its own entry. Those skip entries somebody else wrote first, so two
+    // members healing the same channel at once both get their work in, rather
+    // than one losing a whole batch to a single overlap.
+    //
+    // A client that sends neither is older than this and keeps the old
+    // all-or-nothing insert.
+    if (mint === true && key_version !== currentVersion + 1) {
+      return CustomResponse.error(
+        `key_version ${key_version} was minted already (current is ${currentVersion})`,
+        EC.KEYRING_CONFLICT,
+      );
+    }
+    if (mint === false && key_version > currentVersion) {
+      return CustomResponse.error(
+        `key_version ${key_version} does not exist yet (current is ${currentVersion})`,
+        EC.KEYRING_CONFLICT,
+      );
+    }
 
     // Every target user must be a member of this server.
     const userIds = [...new Set(entries.map((e: Record<string, any>) => e.user_id as string))];
@@ -182,9 +205,17 @@ Deno.serve(async (req) => {
       [DBSchema.channelKeyring.nonce]: entry.nonce,
     }));
 
-    const { error: insertError } = await supabase
-      .from(DBSchema.channelKeyring.tableName)
-      .insert(rows);
+    const { error: insertError } = mint === false
+      ? await supabase
+        .from(DBSchema.channelKeyring.tableName)
+        .upsert(rows, {
+          onConflict: `${DBSchema.channelKeyring.channelId},` +
+            `${DBSchema.channelKeyring.keyVersion},${DBSchema.channelKeyring.userId}`,
+          ignoreDuplicates: true,
+        })
+      : await supabase
+        .from(DBSchema.channelKeyring.tableName)
+        .insert(rows);
 
     if (insertError) {
       // 23505 = unique violation → another writer won; caller re-wraps.

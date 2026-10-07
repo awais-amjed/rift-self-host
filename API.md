@@ -161,8 +161,7 @@ read nothing from before it, however many members were online who could have
 opened it. The sweep now also lists, newest first, each older version the caller
 holds and an eligible member lacks. Nothing at or below `rotate_from_key_version`
 is offered (what a channel said while private stays with whoever had it), and a
-bot is eligible only from its grant. These jobs come at most 200 entries to an
-answer; `more: true` says some were held back, and the client sweeps again.
+bot is eligible only from its grant.
 
 `post_channel_keys` also refuses a batch that seals to a **bot** with no
 `bot_channel_keys` grant to that channel at that version — the same rule
@@ -173,11 +172,30 @@ version to everyone eligible, so a blanket refusal fails the **rotation**, and a
 channel with a grant on it could then never rotate for any reason — a banned
 member's included.
 
-**The key-distribution trio is a deliberate deferral, not a rule.** `post_channel_keys` enforces
-the `key_version ≤ current+1` race (first writer wins, losers refetch and re-wrap) and
-`sweep_channel_keys` computes healing sets across channels. Both are expressible as RPCs, but
-getting them wrong breaks decryption silently rather than loudly, so they were left on the
-service role until they can be moved with care.
+**The work is found in the database, in batches, one member at a time.**
+`sweep_channel_keys` and `get_channel_key` used to read a server's whole keyring
+and membership through PostgREST, which answers at most `PGRST_DB_MAX_ROWS`
+(1000) rows and drops the rest without an error. A server past a thousand keyring
+rows was swept from part of its table, and a member's own keys could be among the
+rows dropped, so their channel showed locked while the server held every key.
+They now call `channel_key_work` and `channel_key_state` (service role only),
+which answer with one JSON value:
+
+- **at most 500 entries to seal per answer**, `more: true` when some were held
+  back. A rotation mints the next version with the first batch, the rotator
+  first, and heals the rest from the next pass, because `post_channel_keys`
+  takes 500 entries and a channel bigger than that could not rotate at all;
+- **one member per channel**: whoever is handed a channel's work holds a lease
+  on it (`app.channel_key_leases`) for a minute, renewed each time they ask, and
+  everyone else is told there is nothing to do there. `get_channel_key` lists
+  `members_missing` only to a caller who holds the current key and can take the
+  lease.
+
+`post_channel_keys` takes `mint`: `true` is a new version, which must be exactly
+`current + 1` and is all-or-nothing, so the first writer wins it and a loser
+gets `keyring_conflict`; `false` heals a version that exists, sealing only a key
+the sender unwrapped from its own entry, and skips anybody already sealed. A
+client that sends neither gets the old all-or-nothing insert.
 
 ### Push runs on central, for everyone
 

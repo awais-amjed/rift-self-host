@@ -19,9 +19,10 @@ const supabase = createClient(
  * - `current_version`: the highest key version in this channel (0 = no key
  *   yet — the caller should bootstrap v1).
  * - `members_missing`: members with a published chat key but no entry for
- *   `current_version`, with their X25519 public keys — any member's client
- *   can heal them by wrapping and posting entries (this is the
- *   pending-key-request sweep primitive).
+ *   `current_version`, with their X25519 public keys, for the caller to heal
+ *   by wrapping and posting entries. At most 500, and empty unless the caller
+ *   holds the current key and nobody else is already healing this channel
+ *   (`channel_key_state`, 012).
  * - `bots_missing` (voice channels only): bots that may speak here and have no
  *   key for `current_version`, and whether each may also hear. A member's
  *   client seals them the same way it heals a member — a bot's media key is
@@ -104,67 +105,22 @@ Deno.serve(async (req) => {
       });
     }
 
-    // All keyring rows for this channel (id + version + user for the roster
-    // math; sealed fields only kept for the caller's own rows).
-    const { data: ringData, error: ringError } = await supabase
-      .from(DBSchema.channelKeyring.tableName)
-      .select(
-        `${DBSchema.channelKeyring.keyVersion},` +
-        ` ${DBSchema.channelKeyring.userId},` +
-        ` ${DBSchema.channelKeyring.ephemeralPublicKey},` +
-        ` ${DBSchema.channelKeyring.ciphertext},` +
-        ` ${DBSchema.channelKeyring.nonce}`,
-      )
-      .eq(DBSchema.channelKeyring.channelId, channel_id);
-
-    if (ringError) {
-      return CustomResponse.error("Error reading keyring", EC.DB_ERROR, ringError);
-    }
-
-    const ring = (ringData ?? []) as Record<string, any>[];
-    const currentVersion = ring.reduce(
-      (max, row) => Math.max(max, row[DBSchema.channelKeyring.keyVersion] as number),
-      0,
+    // The caller's keys, the current version and who lacks it, worked out in
+    // the database (012). This read the channel's whole keyring and roster
+    // through PostgREST, which stops at 1000 rows without saying so — and the
+    // caller's own keys could be among the rows it dropped, which drew their
+    // channel as locked while the server held every key they needed.
+    const { data: stateData, error: stateError } = await supabase.rpc(
+      "channel_key_state",
+      { p_channel: channel_id, p_user: auth.userId },
     );
-
-    const myKeys = ring
-      .filter((row) => row[DBSchema.channelKeyring.userId] === auth.userId)
-      .map((row) => ({
-        key_version: row[DBSchema.channelKeyring.keyVersion],
-        ephemeral_public_key: row[DBSchema.channelKeyring.ephemeralPublicKey],
-        ciphertext: row[DBSchema.channelKeyring.ciphertext],
-        nonce: row[DBSchema.channelKeyring.nonce],
-      }))
-      .sort((a, b) => a.key_version - b.key_version);
-
-    // Who may hold this channel's key, and from which version. One view rather
-    // than a members query plus a bot-grant query plus the rule that joins
-    // them: private-channel membership is a third input, and three
-    // filters spread across two edge functions is three places to forget one.
-    const { data: eligibleData, error: eligibleError } = await supabase
-      .from("channel_eligible_members")
-      .select("user_id, chat_public_key, from_key_version")
-      .eq("channel_id", channel_id);
-    if (eligibleError) {
-      return CustomResponse.error("Error reading eligibility", EC.DB_ERROR, eligibleError);
+    if (stateError) {
+      return CustomResponse.error("Error reading keyring", EC.DB_ERROR, stateError);
     }
-
-    const covered = new Set(
-      ring
-        .filter((row) => row[DBSchema.channelKeyring.keyVersion] === currentVersion)
-        .map((row) => row[DBSchema.channelKeyring.userId] as string),
-    );
-
-    // When currentVersion is 0 this is every eligible member — the bootstrap
-    // set — which is why the floor is compared against at least 1.
-    const sealingVersion = Math.max(currentVersion, 1);
-    const membersMissing = ((eligibleData ?? []) as Record<string, any>[])
-      .filter((m) => !covered.has(m.user_id as string))
-      .filter((m) => sealingVersion >= (m.from_key_version as number))
-      .map((m) => ({
-        user_id: m.user_id,
-        chat_public_key: m.chat_public_key,
-      }));
+    const keyState = (stateData ?? {}) as Record<string, any>;
+    const currentVersion = (keyState.current_version as number | undefined) ?? 0;
+    const myKeys = (keyState.my_keys as unknown[] | undefined) ?? [];
+    const membersMissing = (keyState.members_missing as unknown[] | undefined) ?? [];
 
     // Voice: who still needs a media key, and — for a bot asking — its own.
     // Text channels skip all of it; nothing publishes media into one.

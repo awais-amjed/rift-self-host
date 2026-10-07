@@ -8485,5 +8485,202 @@ BEGIN
   RAISE NOTICE 'ok  and it takes everything of its own with it, and nothing else';
 END $$;
 
+
+-- ============================================================
+-- 20. Key work found by the database (012)
+-- ============================================================
+-- Its own server, Gamma, so nothing above has to be undone first: ann, ben
+-- and cat with chat keys, dan without one, and six hundred more, because the
+-- whole point is what happens past the 500 a batch holds and the 1000 rows
+-- PostgREST used to cut the keyring at. Asked as the superuser — in production
+-- only the service role calls these.
+RESET ROLE;
+
+INSERT INTO auth.users (id)
+SELECT ('77777777-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid
+  FROM generate_series(1, 604) i;
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('eeee0000-0000-4000-8000-000000000001', 'Gamma', 'ws://lan:7880');
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('eeee1111-0000-4000-8000-000000000001', 'eeee0000-0000-4000-8000-000000000001', 'general', 'text');
+-- 1 ann, 2 ben, 3 cat, 4 dan (no chat key), 5–604 the crowd.
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+SELECT ('77777777-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
+       'eeee0000-0000-4000-8000-000000000001', 'g' || i, 'G' || i, 'pk-g' || i, 'sid-g' || i,
+       CASE WHEN i = 4 THEN NULL ELSE 'chat-g' || i END
+  FROM generate_series(1, 604) i;
+
+-- Seal version [v] of Gamma's #general to users [from]..[to] (ann wraps).
+CREATE FUNCTION pg_temp.seal(v INTEGER, from_i INTEGER, to_i INTEGER) RETURNS VOID
+  LANGUAGE sql AS $$
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  SELECT 'eeee1111-0000-4000-8000-000000000001', v,
+         ('77777777-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
+         '77777777-eeee-4eee-8eee-000000000001', 'eph', 'ct-' || v, 'n'
+    FROM generate_series(from_i, to_i) i
+   WHERE i <> 4
+$$;
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_ben CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000002';
+  v_r   JSONB;
+  v_job JSONB;
+BEGIN
+  -- No key yet: ann may mint it, herself first, in a batch of 500.
+  v_r := channel_key_work(v_ann);
+  v_job := v_r -> 'work' -> 0;
+  IF jsonb_array_length(v_r -> 'work') <> 1 OR (v_job ->> 'key_version')::int <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a channel with no key offered %', v_r;
+  END IF;
+  IF jsonb_array_length(v_job -> 'members_missing') <> 500
+     OR (v_job -> 'members_missing' -> 0 ->> 'user_id')::uuid <> v_ann
+     OR NOT (v_r -> 'more')::boolean THEN
+    RAISE EXCEPTION 'FAIL: the first key''s batch was not 500 with its minter first';
+  END IF;
+  IF v_job -> 'members_missing' @> '[{"user_id":"77777777-eeee-4eee-8eee-000000000004"}]' THEN
+    RAISE EXCEPTION 'FAIL: somebody with no chat key was offered a key';
+  END IF;
+  RAISE NOTICE 'ok  a first key comes in a batch of 500, its minter first';
+
+  -- Ann holds the lease, so ben is told there is nothing to do.
+  IF jsonb_array_length(channel_key_work(v_ben) -> 'work') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: two members were handed the same channel''s work';
+  END IF;
+  RAISE NOTICE 'ok  a channel''s work goes to one member at a time';
+END $$;
+
+-- Ann mints version 1 for the first batch, then heals the rest.
+SELECT pg_temp.seal(1, 1, 501);
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_ben CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000002';
+  v_r   JSONB;
+BEGIN
+  v_r := channel_key_work(v_ann);
+  IF jsonb_array_length(v_r -> 'work') <> 1
+     OR (v_r -> 'work' -> 0 ->> 'key_version')::int <> 1
+     OR (v_r -> 'work' -> 0 ->> 'rotate')::boolean
+     OR jsonb_array_length(v_r -> 'work' -> 0 -> 'members_missing') <> 103
+     OR v_r -> 'work' -> 0 -> 'my_key' ->> 'ciphertext' <> 'ct-1' THEN
+    RAISE EXCEPTION 'FAIL: the rest of version 1 was not offered for healing: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  the minter heals the rest from its own sealed key';
+
+  -- Opening the channel: ben's own key is there, and the healing list is not
+  -- his, because ann is on it.
+  v_r := channel_key_state('eeee1111-0000-4000-8000-000000000001', v_ben);
+  IF (v_r ->> 'current_version')::int <> 1
+     OR jsonb_array_length(v_r -> 'my_keys') <> 1
+     OR jsonb_array_length(v_r -> 'members_missing') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: opening a channel under somebody else''s lease answered %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  opening a channel does not hand out work somebody is doing';
+END $$;
+
+SELECT pg_temp.seal(1, 502, 604);
+
+-- A second version for everyone: past a thousand keyring rows, which is where
+-- the TypeScript started reading part of the table.
+SELECT pg_temp.seal(2, 1, 604);
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_cat CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000003';
+  v_r   JSONB;
+BEGIN
+  v_r := channel_key_work(v_ann);
+  IF jsonb_array_length(v_r -> 'work') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: work offered where there is none: %', v_r;
+  END IF;
+  IF EXISTS (SELECT 1 FROM app.channel_key_leases
+              WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a lease outlived its work';
+  END IF;
+  RAISE NOTICE 'ok  a channel with nothing to do lets its lease go';
+
+  v_r := channel_key_state('eeee1111-0000-4000-8000-000000000001', v_cat);
+  IF (v_r ->> 'current_version')::int <> 2
+     OR jsonb_array_length(v_r -> 'my_keys') <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a member''s keys went missing past a thousand rows: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  a member''s own keys come back whole however big the keyring';
+END $$;
+
+-- Cat is banned. The next pass rotates, sealing to everybody but her, the
+-- rotator first.
+UPDATE users SET is_banned = true WHERE id = '77777777-eeee-4eee-8eee-000000000003';
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_job JSONB;
+BEGIN
+  v_job := channel_key_work(v_ann) -> 'work' -> 0;
+  IF NOT (v_job ->> 'rotate')::boolean OR NOT (v_job ->> 'link')::boolean
+     OR (v_job ->> 'key_version')::int <> 2
+     OR (v_job -> 'members_missing' -> 0 ->> 'user_id')::uuid <> v_ann
+     OR v_job -> 'members_missing' @> '[{"user_id":"77777777-eeee-4eee-8eee-000000000003"}]' THEN
+    RAISE EXCEPTION 'FAIL: a ban did not rotate the key past the banned: %', v_job;
+  END IF;
+  RAISE NOTICE 'ok  a ban rotates, in batches, past the banned member';
+END $$;
+
+-- The rotation lands in full (cat left out), and a newcomer arrives after it.
+SELECT pg_temp.seal(3, 1, 2);
+SELECT pg_temp.seal(3, 5, 604);
+INSERT INTO auth.users (id) VALUES ('77777777-eeee-4eee-8eee-000000000999');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES ('77777777-eeee-4eee-8eee-000000000999', 'eeee0000-0000-4000-8000-000000000001',
+        'gnew', 'Gnew', 'pk-gnew', 'sid-gnew', 'chat-gnew');
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_r   JSONB;
+BEGIN
+  -- Released by the rotation's own pass? Not necessarily — ask as ann, who
+  -- holds it either way.
+  v_r := channel_key_work(v_ann);
+  IF jsonb_array_length(v_r -> 'work') <> 3
+     OR (SELECT array_agg((j ->> 'key_version')::int ORDER BY o)
+           FROM jsonb_array_elements(v_r -> 'work') WITH ORDINALITY AS t(j, o))
+        <> ARRAY[3, 2, 1] THEN
+    RAISE EXCEPTION 'FAIL: a newcomer was not offered the current key and then the old ones, newest first: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  a newcomer is offered every older version, newest first';
+END $$;
+
+-- Opened up from private at version 2: versions 1 and 2 stay with whoever had
+-- them.
+UPDATE channels SET rotate_from_key_version = 2
+ WHERE id = 'eeee1111-0000-4000-8000-000000000001';
+
+DO $$
+DECLARE v_r JSONB;
+BEGIN
+  v_r := channel_key_work('77777777-eeee-4eee-8eee-000000000001');
+  IF jsonb_array_length(v_r -> 'work') <> 1
+     OR (v_r -> 'work' -> 0 ->> 'key_version')::int <> 3 THEN
+    RAISE EXCEPTION 'FAIL: a channel''s private stretch was offered to a newcomer: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  nothing at or below the opening mark is offered';
+END $$;
+
+-- None of it is anybody's to call but the service role.
+DO $$
+BEGIN
+  IF has_function_privilege('authenticated', 'channel_key_work(uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'channel_key_state(uuid, uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: a member can ask for somebody else''s key work';
+  END IF;
+  RAISE NOTICE 'ok  key work is the service role''s to ask for';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
