@@ -155,6 +155,15 @@ member into the current key rather than triggering another rotation. There is no
 flag to set and nothing to reset. Old versions stay in the ring, so scrollback
 written under them is still readable by everyone who could read it before.
 
+**A removal rotates at most once an hour (014).** The sweep holds a rotation
+whose only reason is somebody no longer entitled (a ban, a kick, a private
+channel's member removed, a bot's grant revoked) until the current version is
+an hour old (`app.key_rotation_spacing`), so removals in that hour share one.
+A rotation for an addition — a bot's grant starting, a channel opening up —
+is never held, and carries any waiting removal with it. A held rotation is
+recorded in `app.key_rotations_due`, and `app.ring_due_rotations`, a pg_cron job
+each minute, rings the server's `sweep` doorbell when it falls due.
+
 **Members who joined since are sealed the old versions too.** Healing used to
 cover only the current version, so a member who arrived after a rotation could
 read nothing from before it, however many members were online who could have

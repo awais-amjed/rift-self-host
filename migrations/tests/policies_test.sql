@@ -8613,7 +8613,10 @@ BEGIN
 END $$;
 
 -- Cat is banned. The next pass rotates, sealing to everybody but her, the
--- rotator first.
+-- rotator first. Version 2 is made an hour old first: everything here is
+-- written in one transaction, and a younger key holds a removal back (014).
+UPDATE channel_keyring SET created_at = now() - interval '2 hours'
+ WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 2;
 UPDATE users SET is_banned = true WHERE id = '77777777-eeee-4eee-8eee-000000000003';
 
 DO $$
@@ -8799,6 +8802,94 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a member can store a link without the mint it belongs to';
   END IF;
   RAISE NOTICE 'ok  pruning touches the caller''s rows only, and links come with a mint';
+END $$;
+
+
+-- ============================================================
+-- 22. One key change an hour for removals (014)
+-- ============================================================
+-- Gamma's #general is at version 4, minted in this transaction, so it is
+-- younger than an hour. Ben is banned.
+RESET ROLE;
+UPDATE users SET is_banned = true WHERE id = '77777777-eeee-4eee-8eee-000000000002';
+INSERT INTO auth.users (id) VALUES ('77777777-eeee-4eee-8eee-0000000000b1');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES ('77777777-eeee-4eee-8eee-0000000000b1', 'eeee0000-0000-4000-8000-000000000001',
+        'gbot2', 'GBot2', 'pk-gbot2', 'sid-gbot2', 'chat-gbot2', true);
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_r   JSONB;
+  v_due TIMESTAMPTZ;
+BEGIN
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_ann);
+  IF v_r -> 'work' @> '[{"rotate": true}]' THEN
+    RAISE EXCEPTION 'FAIL: a ban changed a key younger than an hour: %', v_r;
+  END IF;
+  SELECT due_at INTO v_due FROM app.key_rotations_due
+   WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001';
+  IF v_due IS DISTINCT FROM now() + interval '1 hour' THEN
+    RAISE EXCEPTION 'FAIL: the held-back change was not recorded for an hour on, got %', v_due;
+  END IF;
+  RAISE NOTICE 'ok  a ban waits until the key is an hour old, and says when';
+
+  UPDATE channel_keyring SET created_at = now() - interval '61 minutes'
+   WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 4;
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_ann);
+  IF NOT v_r -> 'work' @> '[{"rotate": true, "link": true, "key_version": 4}]' THEN
+    RAISE EXCEPTION 'FAIL: a ban did not change a key past the hour: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  past the hour, the ban changes the key';
+
+  -- An addition does not wait: a bot granted from 5 takes the change now,
+  -- young key or not, and the removal goes with it.
+  UPDATE channel_keyring SET created_at = now()
+   WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 4;
+  INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+  SELECT 'eeee1111-0000-4000-8000-000000000001', id, v_ann, 5
+    FROM users WHERE username = 'gbot2';
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_ann);
+  IF NOT v_r -> 'work' @> '[{"rotate": true, "link": false, "key_version": 4}]' THEN
+    RAISE EXCEPTION 'FAIL: a grant waited on the removal spacing: %', v_r;
+  END IF;
+  DELETE FROM bot_channel_keys WHERE from_key_version = 5;
+  RAISE NOTICE 'ok  a grant changes the key at once, ban or no ban';
+END $$;
+
+-- When it falls due, the server is rung once and the record goes.
+DO $$
+DECLARE v_rung INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($2, $3)';
+
+  UPDATE app.key_rotations_due SET due_at = now() + interval '1 minute';
+  IF app.ring_due_rotations() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a change was rung before it was due';
+  END IF;
+  UPDATE app.key_rotations_due SET due_at = now() - interval '1 second';
+  v_rung := app.ring_due_rotations();
+  IF v_rung <> 1
+     OR (SELECT count(*) FROM pg_temp.said
+          WHERE event = 'sweep' AND topic = 'server:eeee0000-0000-4000-8000-000000000001') <> 1
+     OR EXISTS (SELECT 1 FROM app.key_rotations_due) THEN
+    RAISE EXCEPTION 'FAIL: a due change was not rung once and forgotten (rang %)', v_rung;
+  END IF;
+
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  RAISE NOTICE 'ok  a change falling due rings its server once';
 END $$;
 
 RESET ROLE;
