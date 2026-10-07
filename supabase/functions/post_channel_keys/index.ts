@@ -31,7 +31,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { channel_id, key_version, entries, mint } = await req.json();
+    const { channel_id, key_version, entries, mint, link } = await req.json();
     const token = extractBearerToken(req);
 
     const auth = await authenticateToken(supabase, token);
@@ -229,10 +229,34 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Error storing keyring entries", EC.DB_ERROR, insertError);
     }
 
+    // The previous version sealed under this one (013), stored only once the
+    // version is won: a link written before the race was settled could seal
+    // the old key under the loser's. Best-effort — a rotation with no link
+    // still works, its members just keep a row for the version before.
+    // `store_channel_key_link` refuses one across an opening or a bot grant.
+    let linkStored = false;
+    if (
+      mint === true && key_version >= 2 &&
+      typeof link?.ciphertext === "string" && typeof link?.nonce === "string"
+    ) {
+      const { data: stored, error: linkError } = await supabase.rpc(
+        "store_channel_key_link",
+        {
+          p_channel: channel_id,
+          p_version: key_version,
+          p_by: auth.userId,
+          p_ciphertext: link.ciphertext,
+          p_nonce: link.nonce,
+        },
+      );
+      linkStored = !linkError && stored === true;
+    }
+
     return CustomResponse.success({
       channel_id,
       key_version,
       entries_stored: rows.length,
+      link_stored: linkStored,
     });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);

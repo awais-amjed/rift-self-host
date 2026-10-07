@@ -191,6 +191,20 @@ which answer with one JSON value:
   `members_missing` only to a caller who holds the current key and can take the
   lease.
 
+**A rotation links the old key to the new one (013).** `post_channel_keys`
+takes an optional `link` (`{ciphertext, nonce}`) with a mint: the outgoing
+version sealed under the one just minted (format in the app's `ARCHITECTURE.md`
+§4, *The key chain*). It is stored by `store_channel_key_link` only once the
+version is won, only for the version just minted, only from somebody holding
+both keys, and never across a channel's opening or into the version a bot's
+grant starts at; the answer says `link_stored`. `get_channel_key` returns the
+channel's `links`, newest first, and the sweep seals a newcomer only the current
+version and the top of each linked stretch. `prune_channel_keys(p_channel,
+p_versions)` is a member's own RPC: it drops their rows at those versions where
+a chain of links reaches each from a newer row they keep. The client opens the
+link and compares it with the row first; the server only checks the chain is
+there.
+
 `post_channel_keys` takes `mint`: `true` is a new version, which must be exactly
 `current + 1` and is all-or-nothing, so the first writer wins it and a loser
 gets `keyring_conflict`; `false` heals a version that exists, sealing only a key

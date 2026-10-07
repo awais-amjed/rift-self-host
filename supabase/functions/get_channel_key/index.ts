@@ -14,8 +14,9 @@ const supabase = createClient(
 
 /**
  * Keyring read for one channel (ARCHITECTURE.md §4, Design 2). Returns:
- * - `my_keys`: every keyring entry sealed to the caller (all versions —
- *   full-scrollback decision), opaque to the server.
+ * - `my_keys`: every keyring entry sealed to the caller, opaque to the server.
+ * - `links`: each version sealed under the next (013), newest first, which
+ *   open the versions between the caller's entries.
  * - `current_version`: the highest key version in this channel (0 = no key
  *   yet — the caller should bootstrap v1).
  * - `members_missing`: members with a published chat key but no entry for
@@ -121,6 +122,7 @@ Deno.serve(async (req) => {
     const currentVersion = (keyState.current_version as number | undefined) ?? 0;
     const myKeys = (keyState.my_keys as unknown[] | undefined) ?? [];
     const membersMissing = (keyState.members_missing as unknown[] | undefined) ?? [];
+    const links = (keyState.links as unknown[] | undefined) ?? [];
 
     // Voice: who still needs a media key, and — for a bot asking — its own.
     // Text channels skip all of it; nothing publishes media into one.
@@ -178,6 +180,7 @@ Deno.serve(async (req) => {
     return CustomResponse.success({
       current_version: currentVersion,
       my_keys: myKeys,
+      links,
       members_missing: membersMissing,
       bots_missing: botsMissing,
       my_voice_key: myVoiceKey,

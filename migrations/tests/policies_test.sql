@@ -8682,5 +8682,124 @@ BEGIN
   RAISE NOTICE 'ok  key work is the service role''s to ask for';
 END $$;
 
+
+-- ============================================================
+-- 21. Each channel key opens the one before it (013)
+-- ============================================================
+-- Gamma as section 20 left it: versions 1 and 2 sealed to everyone, 3 to all
+-- but cat (banned), and an opening mark at 2.
+RESET ROLE;
+
+DO $$
+DECLARE v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+BEGIN
+  IF store_channel_key_link('eeee1111-0000-4000-8000-000000000001', 3, v_ann, 'ct', 'n') THEN
+    RAISE EXCEPTION 'FAIL: a link was stored across a channel''s opening';
+  END IF;
+  RAISE NOTICE 'ok  no link across the end of a private stretch';
+
+  UPDATE channels SET rotate_from_key_version = NULL
+   WHERE id = 'eeee1111-0000-4000-8000-000000000001';
+  IF NOT store_channel_key_link('eeee1111-0000-4000-8000-000000000001', 3, v_ann, 'ct', 'n') THEN
+    RAISE EXCEPTION 'FAIL: the link for the version just minted was refused';
+  END IF;
+  IF store_channel_key_link('eeee1111-0000-4000-8000-000000000001', 3, v_ann, 'ct2', 'n') THEN
+    RAISE EXCEPTION 'FAIL: a version took a second link';
+  END IF;
+  IF store_channel_key_link('eeee1111-0000-4000-8000-000000000001', 2, v_ann, 'ct', 'n') THEN
+    RAISE EXCEPTION 'FAIL: a link was added to an older version afterwards';
+  END IF;
+  -- Cat holds 2 but not 3, so she cannot have sealed one under the other.
+  IF store_channel_key_link('eeee1111-0000-4000-8000-000000000001', 3,
+       '77777777-eeee-4eee-8eee-000000000003', 'ct', 'n') THEN
+    RAISE EXCEPTION 'FAIL: a link was taken from somebody without both keys';
+  END IF;
+  RAISE NOTICE 'ok  one link, for the version just minted, from somebody holding both';
+END $$;
+
+-- A bot granted from version 4: the rotation into it must stay unlinked.
+INSERT INTO auth.users (id) VALUES ('77777777-eeee-4eee-8eee-0000000000b0');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES ('77777777-eeee-4eee-8eee-0000000000b0', 'eeee0000-0000-4000-8000-000000000001',
+        'gbot', 'GBot', 'pk-gbot', 'sid-gbot', 'chat-gbot', true);
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+VALUES ('eeee1111-0000-4000-8000-000000000001', '77777777-eeee-4eee-8eee-0000000000b0',
+        '77777777-eeee-4eee-8eee-000000000001', 4);
+SELECT pg_temp.seal(4, 1, 2);
+SELECT pg_temp.seal(4, 5, 604);
+INSERT INTO channel_keyring
+  (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+SELECT 'eeee1111-0000-4000-8000-000000000001', 4, u, '77777777-eeee-4eee-8eee-000000000001',
+       'eph', 'ct-4', 'n'
+  FROM unnest(ARRAY['77777777-eeee-4eee-8eee-0000000000b0',
+                    '77777777-eeee-4eee-8eee-000000000999']::UUID[]) u;
+-- And somebody who joins after all of it.
+INSERT INTO auth.users (id) VALUES ('77777777-eeee-4eee-8eee-000000000998');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES ('77777777-eeee-4eee-8eee-000000000998', 'eeee0000-0000-4000-8000-000000000001',
+        'gnew2', 'Gnew2', 'pk-gnew2', 'sid-gnew2', 'chat-gnew2');
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '77777777-eeee-4eee-8eee-000000000001';
+  v_r   JSONB;
+BEGIN
+  IF store_channel_key_link('eeee1111-0000-4000-8000-000000000001', 4, v_ann, 'ct', 'n') THEN
+    RAISE EXCEPTION 'FAIL: a link was stored into the version a bot''s grant starts at';
+  END IF;
+  RAISE NOTICE 'ok  no link into a bot''s first version';
+
+  -- The newcomer is owed 4, then the top of each linked stretch: 3, and 1.
+  -- Not 2, which 3's link opens.
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_ann);
+  IF (SELECT array_agg((j ->> 'key_version')::int ORDER BY o)
+        FROM jsonb_array_elements(v_r -> 'work') WITH ORDINALITY AS t(j, o))
+     <> ARRAY[4, 3, 1] THEN
+    RAISE EXCEPTION 'FAIL: a newcomer was offered a version a link already opens: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  a newcomer is sealed the top of each linked stretch, and nothing below';
+
+  v_r := channel_key_state('eeee1111-0000-4000-8000-000000000001', v_ann);
+  IF v_r -> 'links' <> '[{"key_version": 3, "ciphertext": "ct", "nonce": "n"}]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: opening a channel did not hand over its links: %', v_r -> 'links';
+  END IF;
+  RAISE NOTICE 'ok  opening a channel hands over its links';
+END $$;
+
+-- Ben drops what the chain covers, and only that.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000002","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+DO $$
+BEGIN
+  IF prune_channel_keys('eeee1111-0000-4000-8000-000000000001', ARRAY[1, 3]) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a row was dropped that no link reaches';
+  END IF;
+  IF prune_channel_keys('eeee1111-0000-4000-8000-000000000001', ARRAY[2, 3]) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a row was dropped along with the only row that opens it';
+  END IF;
+  IF prune_channel_keys('eeee1111-0000-4000-8000-000000000001', ARRAY[2]) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a row the chain covers was kept';
+  END IF;
+  RAISE NOTICE 'ok  a member drops a row only when a link reaches it from one they keep';
+END $$;
+
+RESET ROLE;
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM channel_keyring
+       WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 2) <> 602 THEN
+    RAISE EXCEPTION 'FAIL: pruning reached past the caller''s own row';
+  END IF;
+  IF has_function_privilege('authenticated',
+       'store_channel_key_link(uuid, integer, uuid, text, text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: a member can store a link without the mint it belongs to';
+  END IF;
+  RAISE NOTICE 'ok  pruning touches the caller''s rows only, and links come with a mint';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
