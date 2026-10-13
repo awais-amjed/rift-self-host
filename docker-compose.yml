@@ -112,7 +112,7 @@ services:
 
   kong:
     container_name: rift-kong
-    image: kong/kong:3.9.3
+    image: kong/kong:3.9.4
     profiles: [full]
     restart: unless-stopped
     networks:
@@ -223,7 +223,7 @@ services:
 
   rest:
     container_name: rift-rest
-    image: postgrest/postgrest:v16.3
+    image: postgrest/postgrest:v16.4
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -273,7 +273,7 @@ services:
   realtime:
     # The name is parsed for the tenant id, so the subdomain part matters.
     container_name: realtime-dev.rift-realtime
-    image: supabase/realtime:v2.137.3
+    image: supabase/realtime:v2.143.3
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -353,7 +353,7 @@ services:
 
   storage:
     container_name: rift-storage
-    image: supabase/storage-api:v1.79.4
+    image: supabase/storage-api:v1.81.3
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -402,7 +402,7 @@ services:
 
   functions:
     container_name: rift-functions
-    image: supabase/edge-runtime:v1.76.2
+    image: supabase/edge-runtime:v1.77.4
     profiles: [full]
     restart: unless-stopped
     depends_on:
@@ -446,7 +446,7 @@ services:
 
   db:
     container_name: rift-db
-    image: supabase/postgres:17.6.1.173
+    image: supabase/postgres:17.11.0.004
     profiles: [full]
     restart: unless-stopped
     volumes:
@@ -519,7 +519,7 @@ services:
   # loopback-bound like the console.
   studio:
     container_name: rift-studio
-    image: supabase/studio:2026.09.14-sha-4dd8a95
+    image: supabase/studio:2026.10.12-sha-3699278
     profiles: [studio]
     restart: unless-stopped
     ports:
@@ -544,7 +544,7 @@ services:
 
   meta:
     container_name: rift-meta
-    image: supabase/postgres-meta:v0.99.0
+    image: supabase/postgres-meta:v0.100.0
     profiles: [studio]
     restart: unless-stopped
     depends_on:
