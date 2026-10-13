@@ -54,9 +54,6 @@ function rpcErrorResponse(message: string): Response {
   if (message.includes("cannot_kick_peer")) {
     return CustomResponse.error("Somebody who can kick or ban cannot be kicked", EC.PERMISSION_DENIED);
   }
-  if (message.includes("cannot_kick_bot")) {
-    return CustomResponse.error("A bot is removed from Bots, not kicked", EC.PERMISSION_DENIED);
-  }
   if (message.includes("user_banned")) {
     return CustomResponse.error("They are already banned", EC.USER_BANNED);
   }

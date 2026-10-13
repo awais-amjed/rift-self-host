@@ -6880,6 +6880,110 @@ BEGIN
   RAISE NOTICE 'ok  a ban on a kicked member is a ban, and no invite lifts it';
 END $$;
 
+-- ---------- a bot is kicked like anybody, and a bot invite brings it back ----------
+-- kickbot holds a role, a server-wide grant with a channel key from it, a
+-- sealed key, and a voice channel it may hear and was summoned to. A kick takes
+-- all of it, so a bot let back in starts from nothing.
+
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+INSERT INTO auth.users (id) VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b9');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b9', 'aaaa0000-0000-4000-8000-000000000001',
+        'kickbot', 'KickBot', 'pk-kickbot', 'sid-kickbot', 'chat-kickbot', true);
+INSERT INTO member_roles (user_id, role_id)
+VALUES ('11111111-aaaa-4aaa-8aaa-0000000000b9', 'aaaa2222-0000-4000-8000-0000000000c1');
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000ea', 'aaaa0000-0000-4000-8000-000000000001',
+   'bot-read', 'text'),
+  ('aaaa1111-0000-4000-8000-0000000000eb', 'aaaa0000-0000-4000-8000-000000000001',
+   'bot-call', 'voice');
+INSERT INTO bot_server_grants (server_id, bot_id, granted_by)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', '11111111-aaaa-4aaa-8aaa-0000000000b9',
+        '11111111-aaaa-4aaa-8aaa-000000000001');
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+VALUES ('aaaa1111-0000-4000-8000-0000000000ea', '11111111-aaaa-4aaa-8aaa-0000000000b9',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 1);
+INSERT INTO channel_keyring (channel_id, key_version, user_id, wrapped_by,
+                             ephemeral_public_key, ciphertext, nonce)
+VALUES ('aaaa1111-0000-4000-8000-0000000000ea', 1, '11111111-aaaa-4aaa-8aaa-0000000000b9',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'epk', 'ct', 'nonce');
+INSERT INTO bot_voice_grants (channel_id, bot_id)
+VALUES ('aaaa1111-0000-4000-8000-0000000000eb', '11111111-aaaa-4aaa-8aaa-0000000000b9');
+INSERT INTO bot_voice_summons (channel_id, bot_id)
+VALUES ('aaaa1111-0000-4000-8000-0000000000eb', '11111111-aaaa-4aaa-8aaa-0000000000b9');
+INSERT INTO invites (server_id, code, is_bot) VALUES
+  ('aaaa0000-0000-4000-8000-000000000001', 'botback-person', false),
+  ('aaaa0000-0000-4000-8000-000000000001', 'botback', true);
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000300');
+DO $$
+BEGIN
+  PERFORM kick_member('11111111-aaaa-4aaa-8aaa-0000000000b9');
+  RAISE NOTICE 'ok  a moderator kicks a bot';
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE v_reason TEXT;
+BEGIN
+  IF NOT (SELECT is_banned AND kicked_at IS NOT NULL FROM users
+           WHERE id = '11111111-aaaa-4aaa-8aaa-0000000000b9') THEN
+    RAISE EXCEPTION 'FAIL: a kick did not lock the bot out';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles      WHERE user_id = '11111111-aaaa-4aaa-8aaa-0000000000b9')
+     OR EXISTS (SELECT 1 FROM bot_server_grants WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b9')
+     OR EXISTS (SELECT 1 FROM bot_channel_keys  WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b9')
+     OR EXISTS (SELECT 1 FROM channel_keyring   WHERE user_id = '11111111-aaaa-4aaa-8aaa-0000000000b9')
+     OR EXISTS (SELECT 1 FROM bot_voice_grants  WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b9')
+     OR EXISTS (SELECT 1 FROM bot_voice_summons WHERE bot_id = '11111111-aaaa-4aaa-8aaa-0000000000b9') THEN
+    RAISE EXCEPTION 'FAIL: a kicked bot kept a role, a grant, a key or a call';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM messages
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000000ea' AND is_system
+                    AND ciphertext LIKE '% removed KickBot from the server.%') THEN
+    RAISE EXCEPTION 'FAIL: a channel the bot could read was not told it went';
+  END IF;
+  RAISE NOTICE 'ok  a kicked bot loses its roles, keys and calls, and its channels are told';
+
+  -- A person's invite is not a way back for a bot.
+  v_reason := register_user('botback-person', '11111111-aaaa-4aaa-8aaa-0000000000b9',
+                            'pk-kickbot', 'sid-kickbot', 'kickbot', 'KickBot') ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'already_registered'
+     OR NOT (SELECT is_banned FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-0000000000b9') THEN
+    RAISE EXCEPTION 'FAIL: a person''s invite let a kicked bot back: %', v_reason;
+  END IF;
+  v_reason := register_user('botback', '11111111-aaaa-4aaa-8aaa-0000000000b9',
+                            'pk-kickbot', 'sid-kickbot', 'kickbot', 'KickBot') ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'readmitted'
+     OR (SELECT is_banned OR kicked_at IS NOT NULL FROM users
+          WHERE id = '11111111-aaaa-4aaa-8aaa-0000000000b9') THEN
+    RAISE EXCEPTION 'FAIL: a bot invite did not bring a kicked bot back: %', v_reason;
+  END IF;
+  RAISE NOTICE 'ok  a bot invite brings a kicked bot back, and a person''s does not';
+END $$;
+
+-- And the other way: a kicked person cannot come back through a bot invite.
+INSERT INTO invites (server_id, code, is_bot)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', 'personback-bot', true);
+UPDATE users SET is_banned = true, kicked_at = now()
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309';
+DO $$
+DECLARE v_reason TEXT;
+BEGIN
+  v_reason := register_user('personback-bot', '11111111-aaaa-4aaa-8aaa-000000000309',
+                            'pk-r_kim', 'sid-r_kim', 'r_kim', 'Kim') ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'already_registered'
+     OR NOT (SELECT is_banned FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309') THEN
+    RAISE EXCEPTION 'FAIL: a bot invite let a kicked person back: %', v_reason;
+  END IF;
+  RAISE NOTICE 'ok  a bot invite does not bring a kicked person back';
+END $$;
+UPDATE users SET is_banned = true, kicked_at = NULL
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000309';
+
 DELETE FROM member_roles
  WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000305';
 SELECT app.sync_permission_cache('11111111-aaaa-4aaa-8aaa-000000000305');
