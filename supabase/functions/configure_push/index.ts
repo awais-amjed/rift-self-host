@@ -56,9 +56,10 @@ Deno.serve(async (req) => {
       }
       // The relay id, but never the secret. An admin needs the id to revoke
       // the credential on central; the secret they only ever had in transit.
+      const row = data as Record<string, any> | null;
       return CustomResponse.success({
-        enabled: data !== null,
-        relay_id: data?.[DBSchema.pushConfig.relayId] ?? null,
+        enabled: row !== null,
+        relay_id: row?.[DBSchema.pushConfig.relayId] ?? null,
       });
     }
 
@@ -76,9 +77,10 @@ Deno.serve(async (req) => {
       // too. Dropping the row already makes it unusable — nothing else holds
       // the secret — but a revoked row is one that stops counting against the
       // handful of credentials an account may mint.
+      const row = data as Record<string, any> | null;
       return CustomResponse.success({
         enabled: false,
-        relay_id: data?.[DBSchema.pushConfig.relayId] ?? null,
+        relay_id: row?.[DBSchema.pushConfig.relayId] ?? null,
       });
     }
 
@@ -101,7 +103,7 @@ Deno.serve(async (req) => {
         [DBSchema.pushConfig.relayId]: relayId,
         [DBSchema.pushConfig.secret]: secret,
         [DBSchema.pushConfig.updatedAt]: new Date().toISOString(),
-      }, { onConflict: DBSchema.pushConfig.serverId });
+      } as Record<string, unknown>, { onConflict: DBSchema.pushConfig.serverId });
     if (error) {
       return CustomResponse.error("Error enabling push", EC.DB_ERROR, error);
     }
