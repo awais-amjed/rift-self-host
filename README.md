@@ -110,7 +110,7 @@ go into the image. Details, and the gotchas, are in
 | [`rift`](https://github.com/awais-amjed/rift) | the app — Flutter client for desktop, mobile and web |
 | **`rift-self-host`** | this: a server anyone can run |
 | [`rift-central`](https://github.com/awais-amjed/rift-central) | the optional shared service: accounts, the public directory, push relay |
-| [`rift-bot-sdk`](https://github.com/awais-amjed/rift-bot-sdk) | the TypeScript SDK for building bots |
+| [`rift-bot-sdk-node`](https://github.com/awais-amjed/rift-bot-sdk-node) | the TypeScript SDK for building bots |
 | [`rift-bot-sdk-rust`](https://github.com/awais-amjed/rift-bot-sdk-rust) | the Rust SDK for building bots, whose bots play in stereo |
 
 ## License
