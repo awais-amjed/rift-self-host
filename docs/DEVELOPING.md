@@ -78,17 +78,10 @@ deno task check    # type check, lint, fmt --check
 ```
 
 Both type check against whatever Deno is installed locally, and the image pins
-`denoland/deno:alpine-2.1.4`. A newer local Deno reports three `Uint8Array is
-not assignable to BufferSource` errors in `backup/seal.ts` and fails both
-tasks: TypeScript 5.7 made `Uint8Array` generic over its buffer, and
-WebCrypto's `BufferSource` wants the non-shared one. Annotating them
-`Uint8Array<ArrayBuffer>` would fix the local check and break the pinned one,
-where the type takes no argument — so the fix is to bump the image, not the
-source. Until then, append `--no-check` to run the cases themselves:
-
-```bash
-deno test --allow-env --allow-read --allow-write --allow-run=psql --no-check
-```
+`denoland/deno:alpine-2.9.7`; use that version or newer. An older Deno (before
+TypeScript 5.7, where `Uint8Array` became generic over its buffer) rejects the
+`Uint8Array<ArrayBuffer>` annotations in `backup/seal.ts`, which WebCrypto's
+`BufferSource` needs.
 
 **Nothing in `style.ts` or any other page module may contain a backtick.** Each
 is a single template literal from its first line to its last, so a backtick

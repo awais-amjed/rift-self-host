@@ -41,7 +41,7 @@ export interface SealOptions {
 
 async function deriveKey(
   passphrase: string,
-  salt: Uint8Array,
+  salt: Uint8Array<ArrayBuffer>,
   iterations: number,
 ): Promise<CryptoKey> {
   const material = await crypto.subtle.importKey(
@@ -60,7 +60,7 @@ async function deriveKey(
   );
 }
 
-function nonceFor(prefix: Uint8Array, index: number): Uint8Array {
+function nonceFor(prefix: Uint8Array, index: number): Uint8Array<ArrayBuffer> {
   const nonce = new Uint8Array(12);
   nonce.set(prefix, 0);
   new DataView(nonce.buffer).setUint32(8, index);
@@ -76,8 +76,8 @@ function startsLikeMagic(bytes: Uint8Array): boolean {
   return true;
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  if (a.length === 0) return b;
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (a.length === 0) return b.slice();
   const out = new Uint8Array(a.length + b.length);
   out.set(a, 0);
   out.set(b, a.length);
@@ -94,10 +94,13 @@ export function sealStream(
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const prefix = crypto.getRandomValues(new Uint8Array(PREFIX_BYTES));
   let key: CryptoKey;
-  let pending: Uint8Array = new Uint8Array(0);
+  let pending: Uint8Array<ArrayBuffer> = new Uint8Array(0);
   let index = 0;
 
-  const frame = async (plain: Uint8Array, final: boolean): Promise<Uint8Array> => {
+  const frame = async (
+    plain: Uint8Array<ArrayBuffer>,
+    final: boolean,
+  ): Promise<Uint8Array> => {
     if (index > 0xffffffff) throw new SealError("This backup is too large to seal.");
     const cipher = new Uint8Array(
       await crypto.subtle.encrypt(
@@ -147,16 +150,16 @@ export function sealStream(
 export function unsealStream(
   passphrase: string,
 ): TransformStream<Uint8Array, Uint8Array> {
-  let buffer: Uint8Array = new Uint8Array(0);
+  let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(0);
   let key: CryptoKey | null = null;
   let prefix = new Uint8Array(0);
   let chunkBytes = 0;
   let index = 0;
   // The last complete frame, held back until the next one arrives or the
   // stream ends — only then is it known whether it should be the final one.
-  let held: Uint8Array | null = null;
+  let held: Uint8Array<ArrayBuffer> | null = null;
 
-  const open = async (cipher: Uint8Array, at: number, final: boolean) =>
+  const open = async (cipher: Uint8Array<ArrayBuffer>, at: number, final: boolean) =>
     new Uint8Array(
       await crypto.subtle.decrypt(
         {
@@ -169,7 +172,7 @@ export function unsealStream(
       ),
     );
 
-  const openMiddle = async (cipher: Uint8Array): Promise<Uint8Array> => {
+  const openMiddle = async (cipher: Uint8Array<ArrayBuffer>): Promise<Uint8Array> => {
     const at = index++;
     try {
       return await open(cipher, at, false);

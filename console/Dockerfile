@@ -4,7 +4,7 @@
 # functions are vendored beside it and both go into the image:
 #
 #   docker build -f console/Dockerfile -t ghcr.io/awais-amjed/rift-console:latest .
-FROM denoland/deno:alpine-2.1.4
+FROM denoland/deno:alpine-2.9.7
 
 # psql parses the migrations (see src/postgres.ts for why not a driver).
 RUN apk add --no-cache postgresql-client
