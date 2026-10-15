@@ -1,5 +1,6 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
+import { TrackSource } from "livekit-server-sdk";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
@@ -22,6 +23,10 @@ import {
  *
  * Readable by any member — being in a call is not a secret from the people who
  * can see the channel list.
+ *
+ * Also `sharing`: who in those calls has a screen up, so the sidebar can offer
+ * to watch it from outside the call. Members say so in their own broadcasts
+ * after this; this is where an app that opens mid-stream learns it.
  */
 
 const supabase = createClient(
@@ -115,7 +120,7 @@ Deno.serve(async (req) => {
       (c) => c.channel_id as string,
     );
     if (channelIds.length === 0) {
-      return CustomResponse.success({ roster: {} });
+      return CustomResponse.success({ roster: {}, sharing: [] });
     }
 
     // One unfiltered `listRooms` per node, which is both halves of this
@@ -177,6 +182,7 @@ Deno.serve(async (req) => {
     );
 
     const roster: Record<string, string> = {};
+    const sharing = new Set<string>();
     // Visible, occupied calls only, like the roster: a private channel's
     // start time would say when a call nobody here can join began.
     const started: Record<string, number> = {};
@@ -187,8 +193,23 @@ Deno.serve(async (req) => {
           busy.add(room);
           if (startedAt > 0) started[room] = startedAt;
         }
-        for (const participant of participants as { identity: string }[]) {
-          const userId = voiceUserId(participant.identity);
+        for (
+          const participant of participants as {
+            identity: string;
+            tracks?: { source?: TrackSource }[];
+          }[]
+        ) {
+          // A desktop's screen is a connection of its own; a phone's rides
+          // the one its owner talks on.
+          const identity = participant.identity;
+          if (
+            identity.endsWith("_screenshare") ||
+            (participant.tracks ?? []).some((t) => t.source === TrackSource.SCREEN_SHARE)
+          ) {
+            const owner = identity.split("~")[0];
+            if (owner.length > 0) sharing.add(owner);
+          }
+          const userId = voiceUserId(identity);
           // Someone joined from two devices in different channels lands here
           // twice; the last room wins, and their own client is the only one that
           // could say which is "theirs". Rare enough to leave alone.
@@ -213,6 +234,7 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success({
       roster,
+      sharing: [...sharing],
       started,
       regions: perNode.map(({ load }) => load),
     });
