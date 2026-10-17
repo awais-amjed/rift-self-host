@@ -9022,6 +9022,14 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
   BEGIN
+    INSERT INTO messages (channel_id, ciphertext, key_version, poll)
+    VALUES ('eeee1111-0000-4000-8000-000000000001', 'in the clear', 0,
+            jsonb_build_object('options', 2, 'multiple', false,
+                               'closes_at', (now() + interval '1 day')::TEXT));
+    RAISE EXCEPTION 'FAIL: a member posted a poll in the clear in an encrypted channel';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
     PERFORM set_channel_encrypted('eeee1111-0000-4000-8000-000000000001', false);
     RAISE EXCEPTION 'FAIL: a member without MANAGE_CHANNELS turned encryption off';
   EXCEPTION WHEN raise_exception THEN
@@ -9063,7 +9071,13 @@ DO $$
 BEGIN
   INSERT INTO messages (channel_id, ciphertext, key_version)
   VALUES ('eeee1111-0000-4000-8000-000000000001', 'in the clear', 0);
-  RAISE NOTICE 'ok  members post in the clear once it is off';
+  -- 019: a poll too, which the channel's other messages being clear made
+  -- impossible to post sealed.
+  INSERT INTO messages (channel_id, ciphertext, key_version, poll)
+  VALUES ('eeee1111-0000-4000-8000-000000000001', 'in the clear', 0,
+          jsonb_build_object('options', 2, 'multiple', false,
+                             'closes_at', (now() + interval '1 day')::TEXT));
+  RAISE NOTICE 'ok  members post in the clear once it is off, polls included';
 END $$;
 
 RESET ROLE;
