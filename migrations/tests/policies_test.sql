@@ -6880,6 +6880,153 @@ BEGIN
   RAISE NOTICE 'ok  a ban on a kicked member is a ban, and no invite lifts it';
 END $$;
 
+-- ---------- leaving (020) is a kick by your own hand ----------
+-- r_lea holds a role and a private seat, so leaving has something to take.
+
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+INSERT INTO auth.users (id) VALUES
+  ('11111111-aaaa-4aaa-8aaa-000000000331'),
+  ('11111111-aaaa-4aaa-8aaa-0000000000ba');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000331', 'aaaa0000-0000-4000-8000-000000000001',
+        'r_lea', 'Lea', 'pk-r_lea', 'sid-r_lea', 'chat-r_lea', false),
+       ('11111111-aaaa-4aaa-8aaa-0000000000ba', 'aaaa0000-0000-4000-8000-000000000001',
+        'leavebot', 'LeaveBot', 'pk-leavebot', 'sid-leavebot', 'chat-leavebot', true);
+INSERT INTO roles (id, server_id, name, position, permissions)
+VALUES ('aaaa2222-0000-4000-8000-0000000000e1', 'aaaa0000-0000-4000-8000-000000000001',
+        'Leaver', 40, app.perm('ATTACH_FILES'));
+INSERT INTO member_roles (user_id, role_id)
+VALUES ('11111111-aaaa-4aaa-8aaa-000000000331', 'aaaa2222-0000-4000-8000-0000000000e1');
+INSERT INTO channels (id, server_id, name, channel_type, is_private)
+VALUES ('aaaa1111-0000-4000-8000-0000000000fa', 'aaaa0000-0000-4000-8000-000000000001',
+        'lea-room', 'text', true);
+INSERT INTO channel_members (channel_id, user_id, can_manage)
+VALUES ('aaaa1111-0000-4000-8000-0000000000fa', '11111111-aaaa-4aaa-8aaa-000000000331', false);
+INSERT INTO invites (server_id, code, max_uses)
+VALUES ('aaaa0000-0000-4000-8000-000000000001', 'leaveback', 1);
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000331');
+
+DO $$
+BEGIN
+  IF (leave_server() ->> 'reason') IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a member could not leave';
+  END IF;
+  IF (leave_server() ->> 'reason') IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: leaving twice was refused';
+  END IF;
+  IF NOT COALESCE((get_server_details() -> 'user' ->> 'has_left')::BOOLEAN, false) THEN
+    RAISE EXCEPTION 'FAIL: your own details do not say you left';
+  END IF;
+  RAISE NOTICE 'ok  a member leaves, and their own details say so';
+END $$;
+
+RESET ROLE;
+DO $$
+BEGIN
+  IF NOT (SELECT is_banned AND kicked_at IS NOT NULL AND left_at IS NOT NULL FROM users
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: leaving did not lock the member out the way a kick does';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles
+              WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000331')
+     OR EXISTS (SELECT 1 FROM channel_members
+                 WHERE user_id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: a member who left kept a role or a private seat';
+  END IF;
+  IF NOT (SELECT is_kicked AND has_left FROM member_directory
+           WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: the member list cannot tell a leave from a kick';
+  END IF;
+  RAISE NOTICE 'ok  leaving takes roles and private seats, like a kick';
+END $$;
+
+-- The owner sees them nowhere but in a search.
+SELECT pg_temp.as_member((SELECT id::TEXT FROM users
+                           WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                             AND is_owner));
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM list_members(NULL, NULL, true, NULL, NULL, 200)
+              WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: the banned list showed somebody who left';
+  END IF;
+  IF EXISTS (SELECT 1 FROM list_members(NULL, NULL, false, NULL, NULL, 200)
+              WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: the member list still showed somebody who left';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM search_members('r_lea', NULL, NULL, NULL, 25)
+                  WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331' AND has_left) THEN
+    RAISE EXCEPTION 'FAIL: a search did not find somebody who left';
+  END IF;
+  RAISE NOTICE 'ok  who left is off the member and banned lists, and a search finds them';
+
+  BEGIN
+    PERFORM leave_server();
+    RAISE EXCEPTION 'FAIL: the owner left';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'owner_cannot_leave' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  the owner cannot leave';
+END $$;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-0000000000ba');
+DO $$
+BEGIN
+  BEGIN
+    PERFORM leave_server();
+    RAISE EXCEPTION 'FAIL: a bot left';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'bot_cannot_leave' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a bot is kicked, never left';
+END $$;
+
+-- The way back is an invite, as after a kick.
+RESET ROLE;
+SELECT set_config('request.jwt.claims', '', true);
+DO $$
+DECLARE v_reason TEXT;
+BEGIN
+  v_reason := register_user('leaveback', '11111111-aaaa-4aaa-8aaa-000000000331',
+                            'pk-r_lea', 'sid-r_lea', 'ignored', 'Ignored') ->> 'reason';
+  IF v_reason IS DISTINCT FROM 'readmitted' THEN
+    RAISE EXCEPTION 'FAIL: an invite did not bring back somebody who left: %', v_reason;
+  END IF;
+  IF (SELECT is_banned OR kicked_at IS NOT NULL OR left_at IS NOT NULL
+             OR username <> 'r_lea'
+        FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: coming back left them marked as gone, or renamed them';
+  END IF;
+  RAISE NOTICE 'ok  a new invite brings back somebody who left, as themselves';
+END $$;
+
+-- A ban outranks a leave, both ways round.
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000331');
+SELECT leave_server();
+RESET ROLE;
+SELECT pg_temp.as_member((SELECT id::TEXT FROM users
+                           WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                             AND is_owner));
+SET LOCAL ROLE authenticated;
+SELECT moderate_user('11111111-aaaa-4aaa-8aaa-000000000331', NULL, NULL, true);
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000331');
+SELECT leave_server();
+RESET ROLE;
+DO $$
+BEGIN
+  IF (SELECT NOT is_banned OR kicked_at IS NOT NULL OR left_at IS NOT NULL FROM users
+       WHERE id = '11111111-aaaa-4aaa-8aaa-000000000331') THEN
+    RAISE EXCEPTION 'FAIL: a ban on somebody who left did not stick as a ban';
+  END IF;
+  RAISE NOTICE 'ok  banning somebody who left is a ban, and leaving does not soften one';
+END $$;
+
 -- ---------- a bot is kicked like anybody, and a bot invite brings it back ----------
 -- kickbot holds a role, a server-wide grant with a channel key from it, a
 -- sealed key, and a voice channel it may hear and was summoned to. A kick takes
