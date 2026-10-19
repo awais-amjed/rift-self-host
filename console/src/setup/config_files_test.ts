@@ -7,6 +7,7 @@ import {
 import { parseEnv } from "../env_file.ts";
 import {
   behindCaddy,
+  LIVEKIT_AUDIO_FLAGS,
   livekitSettings,
   OVERRIDE_FILE,
   placeholders,
@@ -235,6 +236,28 @@ Deno.test("the local override publishes what Caddy would have fronted", () => {
   assertStringIncludes(yaml, "use_external_ip:\\).*/\\1 false/");
   assertStringIncludes(yaml, "--config /tmp/livekit.yaml");
   assertEquals(yaml.includes("LIVEKIT_RTC_"), false);
+});
+
+Deno.test("LiveKit tunes its speakers the same with the local override as without", async () => {
+  // The override's entrypoint replaces the compose file's command, flags and
+  // all, so a local stack's speaking ring would quietly go back to LiveKit's
+  // late and deaf defaults if the two lists drifted apart.
+  const compose = await Deno.readTextFile(
+    new URL("../../../docker-compose.yml", import.meta.url),
+  );
+  const service = compose.split("\n  livekit:\n")[1].split(/\n {2}[a-z][a-z0-9-]*:\n/)[0];
+  const command = service.match(/^ {4}command: \[([^\]]*)\]/m)?.[1] ?? "";
+  const words = [...command.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  assertEquals(words, ["--config", "/etc/livekit.yaml", ...LIVEKIT_AUDIO_FLAGS]);
+
+  const yaml = renderOverride(
+    publishingFor({ ...defaults, localTesting: true, localAddress: "192.168.1.6" }),
+    MB_500,
+  );
+  assertStringIncludes(
+    yaml,
+    `--node-ip 192.168.1.6\n        ${LIVEKIT_AUDIO_FLAGS.join(" ")}\n`,
+  );
 });
 
 Deno.test("a stack behind Caddy publishes nothing extra", () => {

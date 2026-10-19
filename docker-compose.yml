@@ -496,7 +496,20 @@ services:
     image: livekit/livekit-server:v1.13
     profiles: [full]
     restart: unless-stopped
-    command: ["--config", "/etc/livekit.yaml"]
+    # The audio flags tune who LiveKit reports as speaking, which is what
+    # lights the ring round someone talking in a call. LiveKit's own defaults
+    # light it about half a second late, keep it on half a second after, and
+    # miss a quiet voice altogether; these light it in about 300 ms, drop it
+    # in about 100 and catch most of a voice 20 dB quieter than usual
+    # (measured Oct 19 2026). They light it for a fan or typing that gets past
+    # someone's noise filter too, on purpose: that is how a channel finds
+    # whose mic the noise is coming from. Flags beat livekit.yaml, so they
+    # reach a server that already has one, on its next update.
+    command: [
+      "--config", "/etc/livekit.yaml",
+      "--audio.active_level", "45", "--audio.min_percentile", "25",
+      "--audio.update_interval", "200", "--audio.smooth_intervals", "1",
+    ]
     # The network has IPv6 (below) and LiveKit is kept off it: it offers
     # callers every address it can see, and a private IPv6 one inside Docker
     # is one none of them can reach. Calls behave exactly as before.

@@ -604,8 +604,25 @@ function pinLivekitTo(address: string): string {
         sed 's/^\\([[:space:]]*use_external_ip:\\).*/\\1 false/'
         /etc/livekit.yaml > /tmp/livekit.yaml &&
         exec /livekit-server --config /tmp/livekit.yaml --node-ip ${address}
+        ${LIVEKIT_AUDIO_FLAGS.join(" ")}
 `;
 }
+
+/**
+ * The flags on LiveKit's command in the compose file that tune who it reports
+ * as speaking. The entrypoint above replaces that command, so it carries
+ * them too, and a test keeps the two the same.
+ */
+export const LIVEKIT_AUDIO_FLAGS = [
+  "--audio.active_level",
+  "45",
+  "--audio.min_percentile",
+  "25",
+  "--audio.update_interval",
+  "200",
+  "--audio.smooth_intervals",
+  "1",
+];
 
 /** The first line of every override this console writes. */
 export const OVERRIDE_MARK = "# Written by the Rift console";

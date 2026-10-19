@@ -53,6 +53,11 @@ room:
   # Anything that would need to read the media (recording, transcription,
   # server-side mixing) cannot work here and is not enabled.
 
+# Who counts as speaking — the `audio:` settings — is not set here. It is
+# flags on LiveKit's command in docker-compose.yml, which beat this file, so
+# an `audio:` block added here changes nothing. To tune it, give LiveKit a
+# `command:` of your own in docker-compose.override.yml.
+
 logging:
   level: info
   json: false
