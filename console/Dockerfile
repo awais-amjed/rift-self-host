@@ -33,6 +33,8 @@ COPY VERSION ./VERSION
 COPY console/deno.jsonc ./deno.jsonc
 COPY console/src ./src
 COPY console/templates ./templates
+# The website's typefaces, which the console serves itself (src/web/fonts.ts).
+COPY console/fonts ./fonts
 COPY migrations ./migrations
 # From `supabase/functions`, which is the layout the Supabase CLI deploys from,
 # to a flat `/app/functions` inside the image, which is what the console reads.

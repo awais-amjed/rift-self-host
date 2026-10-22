@@ -25,6 +25,7 @@ import {
   setupPage,
   setupRunningPage,
 } from "./page.ts";
+import { fontResponse } from "./fonts.ts";
 import { setupRunning } from "./api/setup.ts";
 import { type ApiRoutes, html, json, redirect } from "./responses.ts";
 import { isConfigured, setupUnfinished, setupWasLocal } from "./stack_state.ts";
@@ -65,6 +66,10 @@ export async function handle(request: Request): Promise<Response> {
   // Liveness, for the container healthcheck. Deliberately before the session
   // check: Docker holds no cookie.
   if (path === "/healthz") return new Response("ok");
+
+  if (path.startsWith("/fonts/")) {
+    return await fontResponse(path) ?? new Response("Not found", { status: 404 });
+  }
 
   if (path === "/login" && request.method === "POST") {
     const expected = await storedPasswordHash();

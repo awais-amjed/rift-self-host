@@ -121,3 +121,5 @@ go into the image. Details, and the gotchas, are in
 
 [AGPL-3.0](LICENSE). The upstream files under `console/templates/` keep their
 Apache-2.0 licence (see [`console/templates/LICENSE-APACHE-2.0`](console/templates/LICENSE-APACHE-2.0)).
+The typefaces in `console/fonts/` are under the SIL Open Font License, whose
+text sits beside them.

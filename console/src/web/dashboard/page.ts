@@ -35,11 +35,10 @@ export function dashboardPage(domain: string, localTesting = false): string {
     "Rift console",
     // Escaped like every other operator-supplied value on this page. The
     // domain comes out of `.env`, which somebody may have written by hand.
-    `<div class="top"><h1>${
-      escapeAttribute(domain)
-    }</h1><a href="/logout">Sign out</a></div>
-<p class="sub" style="margin-bottom:20px">Rift server console. Press
-  <strong>i</strong> beside any heading for step-by-step help.</p>
+    `<p class="eyebrow">Server console</p>
+<h1>${escapeAttribute(domain)}</h1>
+<p class="sub" style="margin-bottom:24px">Press <strong>i</strong> beside any
+  heading for step-by-step help.</p>
 ${banner}
 <nav class="tabs" role="tablist">${nav}</nav>
 ${panels}`,
@@ -66,5 +65,7 @@ load();
 loadUpdate();
 setInterval(load, 10000);
 `,
+    "",
+    '<a href="/logout">Sign out</a>',
   );
 }
