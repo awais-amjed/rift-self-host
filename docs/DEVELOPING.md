@@ -155,10 +155,14 @@ dashboard: a hand-edited file was left alone, the new one written beside it
 with the difference shown; keeping the edited file was refused while it named
 the old console; an untouched older file was replaced, the stand-in recreated
 with its new setting, and the console replaced by the new image, after which
-the page reloaded to the sign-in. Not proved there: downloading from GitHub's
-registry and reading the releases from GitHub (that machine had no DNS), and
-migrations after the handover — the new console runs the same start-up as
-any other.
+the page reloaded to the sign-in. That machine had no DNS, so the rest was
+proved with real releases the same day: a stack installed from scratch at
+1.0.14, from that release's own compose file, was taken to 1.0.15 with the
+dashboard's Update button. It read the releases and their notes from GitHub,
+pulled the console from GitHub's registry, replaced the compose file, and
+reloaded to the sign-in; the new console applied 1.0.15 at start-up, every
+service came back healthy, and a two-person call carried audio before and
+after.
 
 Not yet proved, and worth doing before anyone else runs one:
 
