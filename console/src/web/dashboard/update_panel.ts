@@ -30,6 +30,16 @@ const COMPOSE_STATES = {
   missing: "Not found in the project folder.",
 };
 
+/// A diff's lines coloured by their mark, as git colours them: what the new
+/// file adds green, what it takes away red, each stretch's line number blue.
+function diffHtml(diff) {
+  return diff.split("\\n").map((line) => {
+    const kind = line.startsWith("@@") ? "hunk"
+      : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "same";
+    return '<span class="' + kind + '">' + (escapeHtml(line) || " ") + "</span>";
+  }).join("");
+}
+
 /// The release the Update button names, and the one it installs.
 let updateTarget = null;
 
@@ -128,7 +138,7 @@ async function startUpdate(keepCompose) {
       "<p>Nothing was changed. Release " + escapeHtml(outcome.version) +
       "'s file is at <code>" + escapeHtml(outcome.newFile) + "</code>. What " +
       "differs, from yours (-) to the new one (+):</p>" +
-      '<pre class="block">' + escapeHtml(outcome.diff) + "</pre>" +
+      '<pre class="block diff">' + diffHtml(outcome.diff) + "</pre>" +
       "<p>Either replace yours with it (<code>mv docker-compose.yml.new " +
       "docker-compose.yml</code>) and press Update again, or bring its changes " +
       "into yours and then:</p>" +

@@ -129,6 +129,12 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
   border-radius: 8px; padding: 12px 14px; margin: 0; color: var(--dim);
   white-space: pre; overflow-x: auto; max-height: 320px; overflow-y: auto;
 }
+/* Each line its own block, as wide as the longest, so a coloured line's
+   background runs on when the box scrolls sideways. */
+.diff span { display: block; width: max-content; min-width: 100%; }
+.diff .add { color: var(--ok); background: rgba(52,211,153,0.09); }
+.diff .del { color: var(--fail); background: rgba(248,113,113,0.09); }
+.diff .hunk { color: var(--accent-bright); }
 .secret button { padding: 8px 12px; font-size: 13px; font-weight: 500; }
 details { margin: 4px 0 20px; }
 summary { cursor: pointer; color: var(--dim); font-size: 14px; padding: 6px 0; }
