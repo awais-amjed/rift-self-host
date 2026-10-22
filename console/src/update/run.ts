@@ -14,7 +14,9 @@
  *   1. downloads the new release's console image, and reads the compose file
  *      and the list of published versions out of it;
  *   2. replaces `docker-compose.yml` with the new one — unless the operator
- *      has edited theirs, when it stops and writes the new one beside it;
+ *      has edited theirs, when it stops, writes the new one beside it and
+ *      says whether their changes merge into it. Asked again, it uses the
+ *      new file, the merge, or theirs as it is, keeping a copy of theirs;
  *   3. downloads every image the new file names, and puts the old file back
  *      if that fails, since nothing has changed yet;
  *   4. brings each service onto the new file, recreating only what changed;
@@ -48,11 +50,14 @@ import {
   IMAGE_COMPOSE,
   IMAGE_KNOWN,
   knownHashes,
-  lineDiff,
+  mergeCompose,
   NEW_COMPOSE_FILE,
+  publishedVersions,
   readCompose,
   replaceCompose,
+  setAside,
 } from "./compose_file.ts";
+import { lineDiff } from "./line_merge.ts";
 import {
   compareVersions,
   CONSOLE_IMAGE,
@@ -81,16 +86,51 @@ export interface UpdateStatus {
   foreignImage: string | null;
   /** What pressing Update would move to, or null when there is nothing to do. */
   target: string | null;
+  /** An update is running now, started from this page or another. */
+  running: boolean;
 }
 
 /** How an update ended, short of throwing. */
 export type UpdateOutcome =
   /** Handed over: the console is being recreated on [version]. */
   | { kind: "restarting"; version: string; warning: string | null }
-  /** Stopped before changing anything: the compose file has the operator's edits. */
-  | { kind: "edited"; version: string; diff: string; newFile: string }
+  /**
+   * Stopped before changing anything: the compose file has the operator's
+   * edits. [diff] is from theirs to the release's, and [merge] says whether
+   * their edits carry over into it.
+   */
+  | {
+    kind: "edited";
+    version: string;
+    diff: string;
+    newFile: string;
+    merge: EditedMerge;
+  }
   /** Nothing to do. */
   | { kind: "current"; version: string };
+
+/** Whether an edited file merges, as the dashboard and the terminal show it. */
+export type EditedMerge =
+  /** It does; [diff] is what the merge changes in their file. */
+  | { kind: "clean"; diff: string }
+  /** Their changes and the release's meet at these lines of their file. */
+  | { kind: "conflict"; lines: number[] }
+  /** It is too far from every published version to know where it began. */
+  | { kind: "unknown" };
+
+/**
+ * What to do with a compose file of the operator's own, asked once they have
+ * seen what differs:
+ *
+ * - `replace`: use the release's file.
+ * - `merge`: the release's file with their changes carried over; refused
+ *   unless that merges cleanly.
+ * - `keep`: theirs as it is, which they have brought up to the release by
+ *   hand. Refused unless it names the new console.
+ *
+ * The first two keep theirs as `docker-compose.yml.before-<version>`.
+ */
+export type ComposeChoice = "replace" | "merge" | "keep";
 
 /** One line of progress. */
 export interface UpdateProgress {
@@ -102,11 +142,8 @@ export interface UpdateProgress {
 export interface UpdateRequest {
   /** A version to move to. The newest release when absent. */
   version?: string;
-  /**
-   * Use the compose file as it is, which the operator has brought up to the
-   * new release by hand. Only accepted when it names the new console.
-   */
-  keepCompose?: boolean;
+  /** What to do with a compose file the operator has edited. */
+  compose?: ComposeChoice;
 }
 
 /** True while an update is running in this process. */
@@ -176,6 +213,7 @@ export async function updateStatus(fresh = false): Promise<UpdateStatus> {
     compose,
     foreignImage: foreign,
     target: foreign === null ? updateTarget(current, releases, compose) : null,
+    running: updateRunning(),
   };
 }
 
@@ -258,33 +296,46 @@ async function update(
   if (state === "missing") {
     throw new Error(`There is no ${COMPOSE_FILE} in ${dir}.`);
   }
-  if (state === "edited" && !request.keepCompose) {
-    await Deno.writeTextFile(join(dir, NEW_COMPOSE_FILE), compose);
-    return {
-      kind: "edited",
-      version,
-      diff: lineDiff(previous!, compose),
-      newFile: join(dir, NEW_COMPOSE_FILE),
-    };
-  }
   if (state === "current" && version === current) {
     return { kind: "current", version };
   }
 
+  // The file to write, when one is written: the release's, or the merge.
+  let next: string | null = state === "release" ? compose : null;
   if (state === "edited") {
-    // Their own file, which they say is up to date: it has to name the new
-    // console, or the handover would bring back the old one.
-    const named = await composedConsoleImage();
-    if (named !== image) {
-      throw new Error(
-        `${COMPOSE_FILE} names the console ${named ?? "(unreadable)"}, not ${image}. ` +
-          `Bring the changes from ${NEW_COMPOSE_FILE} into it first.`,
-      );
+    const merge = async () => mergeCompose(previous!, compose, await publishedVersions());
+    if (request.compose === undefined) {
+      const merged = await merge();
+      await Deno.writeTextFile(join(dir, NEW_COMPOSE_FILE), compose);
+      return {
+        kind: "edited",
+        version,
+        diff: lineDiff(previous!, compose),
+        newFile: join(dir, NEW_COMPOSE_FILE),
+        merge: merged.kind === "clean"
+          ? { kind: "clean", diff: merged.diff }
+          : merged.kind === "conflict"
+          ? { kind: "conflict", lines: merged.lines }
+          : { kind: "unknown" },
+      };
     }
-  } else if (state === "release") {
+    if (request.compose === "replace") next = compose;
+    if (request.compose === "merge") {
+      const merged = await merge();
+      if (merged.kind !== "clean") {
+        throw new Error(
+          `Your changes to ${COMPOSE_FILE} do not merge into release ${version}'s. ` +
+            "Use the new file, or bring its changes into yours by hand.",
+        );
+      }
+      next = merged.text;
+    }
+  }
+
+  if (next !== null) {
     await step("Writing the new compose file", async () => {
       const staged = join(dir, `.${COMPOSE_FILE}.check`);
-      await Deno.writeTextFile(staged, compose);
+      await Deno.writeTextFile(staged, next);
       try {
         const checked = await checkComposeFile(staged);
         if (!checked.ok) {
@@ -295,8 +346,26 @@ async function update(
       } finally {
         await Deno.remove(staged).catch(() => {});
       }
-      await replaceCompose(dir, compose);
+      if (state === "edited") await setAside(dir, version);
+      await replaceCompose(dir, next);
+      await Deno.remove(join(dir, NEW_COMPOSE_FILE)).catch(() => {});
     });
+  }
+
+  if (state === "edited") {
+    // Their own file, or the merge: either has to name the new console, or
+    // the handover would bring back the old one.
+    const named = await composedConsoleImage();
+    if (named !== image) {
+      if (next !== null) {
+        await replaceCompose(dir, previous!);
+        await Deno.writeTextFile(join(dir, NEW_COMPOSE_FILE), compose);
+      }
+      throw new Error(
+        `${COMPOSE_FILE} names the console ${named ?? "(unreadable)"}, not ${image}. ` +
+          `Bring the changes from ${NEW_COMPOSE_FILE} into it first.`,
+      );
+    }
   }
 
   const services = await stackServices();
@@ -304,7 +373,7 @@ async function update(
     const pulled = await pullServices(services);
     if (!pulled.ok) {
       // Nothing is running on the new file yet, so going back is clean.
-      if (state === "release") await replaceCompose(dir, previous!);
+      if (next !== null) await replaceCompose(dir, previous!);
       throw new Error(
         `Could not download the new images, so nothing was changed: ` +
           composeProblem(pulled.stderr),

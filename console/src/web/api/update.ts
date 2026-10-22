@@ -16,12 +16,12 @@ export const updateRoutes: ApiRoutes = async (request, url) => {
     }
     // The version the page showed, so what is installed is the release whose
     // notes were read, not one published since the page loaded.
-    const { version, keepCompose } = await request.json().catch(() => ({}));
+    const { version, compose } = await request.json().catch(() => ({}));
     return progressStream(async (send) => {
       const outcome = await runUpdate(
         {
           version: typeof version === "string" ? version : undefined,
-          keepCompose: keepCompose === true,
+          compose: ["replace", "merge", "keep"].includes(compose) ? compose : undefined,
         },
         (progress) => {
           if (!progress.done) console.log(`[update] ${progress.step}`);

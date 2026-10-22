@@ -15,15 +15,18 @@
   // renderer substitutes, so it survives into the output — and LiveKit then
   // starts happily with an API key literally named "{ { LIVEKIT_API_KEY } }",
   // refusing every token the app presents. It has already happened once.
+  //
+  // known-compose/ is every compose file as it was published, named by its
+  // hash: formatting one makes it a version nobody downloaded.
   "fmt": {
-    "exclude": ["templates/"],
+    "exclude": ["templates/", "known-compose/"],
     "lineWidth": 90,
     "indentWidth": 2,
     "semiColons": true,
     "singleQuote": false
   },
   "lint": {
-    "exclude": ["templates/"],
+    "exclude": ["templates/", "known-compose/"],
     "rules": {
       "tags": ["recommended"]
     }

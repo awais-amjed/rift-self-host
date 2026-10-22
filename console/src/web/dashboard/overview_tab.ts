@@ -25,11 +25,16 @@ const RELEASE_HELP = `
   <code>docker compose exec console update</code>. Members may be disconnected
   for a minute while services restart. Their apps reconnect on their own.</p>
 <h3>Compose file changed by hand</h3>
-<p>If you edited <code>docker-compose.yml</code>, Update changes nothing. It
-  writes the new release's file beside yours as
-  <code>docker-compose.yml.new</code> and shows what differs. Either replace
-  yours with it, or bring its changes into yours and press
-  <strong>Update, keeping my file</strong>.</p>
+<p>If you edited <code>docker-compose.yml</code>, Update first changes
+  nothing. It writes the new release's file beside yours as
+  <code>docker-compose.yml.new</code> and checks whether your changes carry
+  over into it. If they do, it shows what updating would change in your file:
+  press <strong>Update, keeping my changes</strong>, or
+  <strong>Use the new file instead</strong>. If your changes and the
+  release's touch the same lines, it shows what differs: use the new file, or
+  bring its changes into yours and press
+  <strong>Update, keeping my file</strong>. Using the new file or the merge
+  keeps yours as <code>docker-compose.yml.before-&lt;version&gt;</code>.</p>
 <h3>Applying …</h3>
 <p>Each time the console starts, after an update or any restart, it brings
   the database and endpoints up to its release by itself. Meanwhile this panel

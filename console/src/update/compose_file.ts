@@ -15,6 +15,7 @@
  */
 import { encodeHex } from "jsr:@std/encoding@1/hex";
 import { join } from "jsr:@std/path@1";
+import { changedLines, lineDiff, merge3, splitLines } from "./line_merge.ts";
 
 /** The file compose finds without being told, and the one an update replaces. */
 export const COMPOSE_FILE = "docker-compose.yml";
@@ -78,64 +79,77 @@ export async function replaceCompose(projectDir: string, text: string): Promise<
 }
 
 /**
- * The lines that differ between [before] and [after], with [context] lines
- * around each change: `-` for a line only in [before], `+` for one only in
- * [after], and `@@` with the line number in [after] where a stretch begins.
- *
- * Its own small function because the image has no `diff` the console may run,
- * and a compose file is a few hundred lines: a table of common subsequences is
- * instant at that size.
+ * Every published version of the compose file, which this image carries so
+ * that an edited file can be merged: named by hash, written by
+ * `scripts/known_compose.sh`.
  */
-export function lineDiff(before: string, after: string, context = 3): string {
-  // Split into lines, without the empty one after a file's last newline.
-  const lines = (text: string) => text.replace(/\n$/, "").split("\n");
-  const a = lines(before);
-  const b = lines(after);
-  const n = a.length;
-  const m = b.length;
+export const IMAGE_PUBLISHED = "/app/known-compose";
 
-  // common[i][j]: the longest common subsequence of a[i..] and b[j..].
-  const common = new Uint32Array((n + 1) * (m + 1));
-  const at = (i: number, j: number) => i * (m + 1) + j;
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      common[at(i, j)] = a[i] === b[j]
-        ? common[at(i + 1, j + 1)] + 1
-        : Math.max(common[at(i + 1, j)], common[at(i, j + 1)]);
+/** The published versions in [directory], or none when there is no folder. */
+export async function publishedVersions(directory = IMAGE_PUBLISHED): Promise<string[]> {
+  const versions: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(directory)) {
+      if (entry.isFile && entry.name.endsWith(".yml")) {
+        versions.push(await Deno.readTextFile(join(directory, entry.name)));
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) throw error;
+  }
+  return versions;
+}
+
+/**
+ * What an update can do with a file of the operator's own:
+ *
+ * - `clean`: their changes and the release's merge, into [text]; [diff] is
+ *   what that changes in their file.
+ * - `conflict`: both changed the same lines, at [lines] in their file.
+ * - `unknown`: no published version is near enough to be where theirs began.
+ */
+export type ComposeMerge =
+  | { kind: "clean"; text: string; diff: string }
+  | { kind: "conflict"; lines: number[] }
+  | { kind: "unknown" };
+
+/**
+ * Merge [onDisk] with a release's [wanted] file, starting from the published
+ * version [onDisk] is closest to — the one it was downloaded as, unless it
+ * was edited past recognition, when more than a third of it differs from
+ * every version and nothing is guessed.
+ */
+export function mergeCompose(
+  onDisk: string,
+  wanted: string,
+  published: string[],
+): ComposeMerge {
+  let base: string | null = null;
+  let fewest = Infinity;
+  for (const version of published) {
+    const changed = changedLines(version, onDisk);
+    if (changed < fewest) {
+      base = version;
+      fewest = changed;
     }
   }
+  if (base === null || fewest > splitLines(onDisk).length / 3) return { kind: "unknown" };
+  const merged = merge3(base, onDisk, wanted);
+  return merged.clean
+    ? { kind: "clean", text: merged.text, diff: lineDiff(onDisk, merged.text) }
+    : { kind: "conflict", lines: merged.conflicts };
+}
 
-  const steps: { mark: " " | "-" | "+"; text: string; after: number }[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n || j < m) {
-    if (i < n && j < m && a[i] === b[j]) {
-      steps.push({ mark: " ", text: a[i], after: j });
-      i++;
-      j++;
-    } else if (i < n && (j === m || common[at(i + 1, j)] >= common[at(i, j + 1)])) {
-      // What went comes before what replaced it, as in any diff.
-      steps.push({ mark: "-", text: a[i], after: j });
-      i++;
-    } else {
-      steps.push({ mark: "+", text: b[j], after: j });
-      j++;
-    }
+/**
+ * Keep the operator's file as `docker-compose.yml.before-<version>` before an
+ * update writes over it: theirs, so it is never simply lost. Returns the name.
+ */
+export async function setAside(projectDir: string, version: string): Promise<string> {
+  for (let n = 1;; n++) {
+    const name = `${COMPOSE_FILE}.before-${version}${n === 1 ? "" : `-${n}`}`;
+    // Another try at the same update: the copy from the first is kept too.
+    if (await Deno.lstat(join(projectDir, name)).then(() => true, () => false)) continue;
+    await Deno.copyFile(join(projectDir, COMPOSE_FILE), join(projectDir, name));
+    return name;
   }
-
-  const shown = new Set<number>();
-  steps.forEach((line, index) => {
-    if (line.mark === " ") return;
-    for (let k = index - context; k <= index + context; k++) shown.add(k);
-  });
-
-  const out: string[] = [];
-  let previous = -2;
-  steps.forEach((line, index) => {
-    if (!shown.has(index)) return;
-    if (index !== previous + 1) out.push(`@@ line ${line.after + 1}`);
-    out.push(`${line.mark} ${line.text}`);
-    previous = index;
-  });
-  return out.join("\n");
 }

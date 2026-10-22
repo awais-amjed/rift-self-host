@@ -40,11 +40,54 @@ function diffHtml(diff) {
   }).join("");
 }
 
+/// What an edited compose file can become: merged with the release's when
+/// their changes carry over, and otherwise the release's or theirs as it is.
+function composeChoices(outcome) {
+  const version = escapeHtml(outcome.version);
+  const kept = '<p class="hint">Your file is kept as <code>docker-compose.yml.before-' +
+    version + "</code>.</p>";
+  const buttons = (first, second) =>
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">' + first + second +
+    "</div>";
+  const merge = outcome.merge || { kind: "unknown" };
+  if (merge.kind === "clean") {
+    return "<p>Nothing was changed yet. Your changes carry over into release " + version +
+      "'s file; this is what updating would change in yours:</p>" +
+      '<pre class="block diff">' + diffHtml(merge.diff) + "</pre>" +
+      buttons('<button data-compose="merge">Update, keeping my changes</button>',
+        '<button class="quiet" data-compose="replace">Use the new file instead</button>') +
+      kept;
+  }
+  const why = merge.kind === "conflict"
+    ? "Your changes and the release's change the same lines (line " +
+      merge.lines.join(", ") + " of yours), so they cannot be merged for you."
+    : "Your file is too far from every published version to merge for you.";
+  return "<p>Nothing was changed. " + why + " What differs, from yours (-) to release " +
+    version + "'s (+):</p>" +
+    '<pre class="block diff">' + diffHtml(outcome.diff) + "</pre>" +
+    buttons('<button data-compose="replace">Use the new file</button>',
+      '<button class="quiet" data-compose="keep">Update, keeping my file</button>') +
+    '<p class="hint">Use the new file and put back what you need from yours, ' +
+    "which is kept as <code>docker-compose.yml.before-" + version + "</code>. Or bring " +
+    "the new file's changes into yours (it is at <code>" + escapeHtml(outcome.newFile) +
+    "</code>) and keep your file.</p>";
+}
+
 /// The release the Update button names, and the one it installs.
 let updateTarget = null;
 
 /// When the console last asked GitHub, on this browser's clock.
 let checkedAt = null;
+
+/// While an update runs — from this page or any other — nothing offers to
+/// start another or to check again: the steps are the panel then.
+let updating = false;
+let ownImage = false;
+
+function showControls() {
+  document.getElementById("updateBox").hidden = updating || !updateTarget;
+  document.getElementById("checkedRow").hidden = updating || ownImage;
+}
 
 /// Asked once per page load, not every ten seconds: the console asks GitHub,
 /// which allows sixty requests an hour, and remembers the answer for one.
@@ -54,9 +97,14 @@ async function loadUpdate(fresh) {
   if (!res || !res.ok) return;
   const u = await res.json();
   checkedAt = Date.now() - u.checkedSecondsAgo * 1000;
-  document.getElementById("checkedRow").hidden = !!u.foreignImage;
+  ownImage = !!u.foreignImage;
   showChecked();
   const rows = [];
+  if (u.running && !updating) {
+    // Started elsewhere: look again until it has handed over or stopped.
+    rows.push(["Update", "Running now. This page shows the result once it is done."]);
+    setTimeout(() => loadUpdate(), 5000);
+  }
   if (u.foreignImage) {
     rows.push(["Updates", "This stack runs a console image of its own (" +
       escapeHtml(u.foreignImage) + "), so whoever builds it updates it."]);
@@ -79,9 +127,9 @@ async function loadUpdate(fresh) {
       '" target="_blank" rel="noopener">On GitHub ↗</a></p>' : "") +
     "</details>"
   ).join("");
-  updateTarget = u.target;
+  updateTarget = u.running ? null : u.target;
   document.getElementById("update").textContent = "Update to " + (u.target || "");
-  document.getElementById("updateBox").hidden = !u.target;
+  showControls();
 }
 
 function showChecked() {
@@ -100,12 +148,14 @@ async function checkNow() {
   button.textContent = "Check now";
 }
 
-async function startUpdate(keepCompose) {
+/// [compose] is what to do with a compose file of the operator's own, once
+/// they have seen what differs: replace, merge or keep.
+async function startUpdate(compose) {
   if (!confirm("Update now? Make a backup first if you have not. The server will " +
     "not answer for a minute or two, and calls in progress will drop and rejoin.")) return;
   hideResult("updateResult");
-  const button = document.getElementById("update");
-  button.disabled = true;
+  updating = true;
+  showControls();
   steps.innerHTML = "";
   seen.clear();
   steps.hidden = false;
@@ -113,7 +163,7 @@ async function startUpdate(keepCompose) {
   const res = await fetch("/api/update", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ version: updateTarget, keepCompose }),
+    body: JSON.stringify({ version: updateTarget, compose }),
   }).catch(() => null);
   if (res && res.status === 401) return location.reload();
 
@@ -128,23 +178,19 @@ async function startUpdate(keepCompose) {
       if (event.error) error = event.error;
     }).catch(() => { error = error || "The console stopped answering mid-update."; });
   }
-  button.disabled = false;
+  // Back unless the console is restarting, when this page reloads instead.
+  updating = !error && !!outcome && outcome.kind === "restarting";
+  showControls();
 
   if (error) {
     showResult("updateResult", "Nothing was updated", errorBody(error,
       "The full reason is in <code>docker compose logs console</code>."), true);
   } else if (outcome && outcome.kind === "edited") {
     showResult("updateResult", "Your compose file has changes of your own",
-      "<p>Nothing was changed. Release " + escapeHtml(outcome.version) +
-      "'s file is at <code>" + escapeHtml(outcome.newFile) + "</code>. What " +
-      "differs, from yours (-) to the new one (+):</p>" +
-      '<pre class="block diff">' + diffHtml(outcome.diff) + "</pre>" +
-      "<p>Either replace yours with it (<code>mv docker-compose.yml.new " +
-      "docker-compose.yml</code>) and press Update again, or bring its changes " +
-      "into yours and then:</p>" +
-      '<button id="keepCompose">Update, keeping my file</button>', true);
-    document.getElementById("keepCompose").addEventListener("click", () =>
-      startUpdate(true));
+      composeChoices(outcome), true);
+    for (const choice of document.querySelectorAll("#updateResult [data-compose]")) {
+      choice.addEventListener("click", () => startUpdate(choice.dataset.compose));
+    }
   } else if (outcome && outcome.kind === "current") {
     showResult("updateResult", "Already up to date", "<p>Nothing to do.</p>");
     loadUpdate();
@@ -175,7 +221,7 @@ async function waitForConsole(version) {
     "why.</p>", true);
 }
 
-document.getElementById("update").addEventListener("click", () => startUpdate(false));
+document.getElementById("update").addEventListener("click", () => startUpdate());
 document.getElementById("checkNow").addEventListener("click", checkNow);
 setInterval(showChecked, 30000);
 `;

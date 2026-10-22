@@ -132,17 +132,24 @@ the edge runtime's `MALLOC_ARENA_MAX`. So the file names the console by
 version, which makes a bare pull change nothing, and each image carries its
 release's file.
 
-**An operator's edits are never overwritten.** Each image also carries the hash
-of every version of the compose file ever published (`known-compose.sha256`).
-A file on disk that matches one was downloaded and never touched, so replacing
-it loses nothing. One that does not has changes of the operator's: the update
-stops before changing anything, writes the new file beside it as
-`docker-compose.yml.new`, and shows the difference. They either take the new
-file, or bring its changes into theirs and update with it as it is
-(`--keep-compose`, or **Update, keeping my file**), which is accepted only once
-their file names the new console. A list rather than a hash recorded when the
-console last wrote the file, because most files were never written by a
-console: they were fetched with curl from whichever release was current.
+**An operator's edits are never lost.** Each image also carries every version
+of the compose file ever published, by hash (`known-compose.sha256` and
+`known-compose/`). A file on disk that matches one was downloaded and never
+touched, so replacing it loses nothing. One that does not has changes of the
+operator's: the update stops before changing anything, writes the new file
+beside it as `docker-compose.yml.new`, and says whether their changes merge.
+The merge is three-way, as git's, from the published version theirs is closest
+to — the one they downloaded — and is not tried when more than a third of
+their file differs from every version. Asked again, the update uses the merge
+(`--merge-compose`, **Update, keeping my changes**) when it is clean, the new
+file (`--replace-compose`, **Use the new file**), or theirs as it is
+(`--keep-compose`, **Update, keeping my file**), which is accepted only once it
+names the new console. The first two keep theirs as
+`docker-compose.yml.before-<version>`. A list rather than a hash recorded when
+the console last wrote the file, because most files were never written by a
+console: they were fetched with curl from whichever release was current. The
+versions themselves are in the image, not fetched, because a release build
+checks out one commit and an update should not need GitHub for this.
 
 **The console cannot replace itself.** `docker compose` running inside it dies
 with the old container before the new one exists, so a short-lived container of

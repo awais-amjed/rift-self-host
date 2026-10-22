@@ -38,12 +38,14 @@ COPY migrations ./migrations
 # to a flat `/app/functions` inside the image, which is what the console reads.
 COPY supabase/functions ./functions
 
-# The compose file this release runs on, and the hash of every version of it
-# ever published. An update writes the first in place of the operator's, but
-# only over a file whose hash is on the list — one they never edited. See
+# The compose file this release runs on, and every version of it ever
+# published, by hash. An update writes the first in place of the operator's
+# only over a file whose hash is on the list — one they never edited — and
+# otherwise merges their edits from the version theirs began as. See
 # src/update/compose_file.ts.
 COPY docker-compose.yml ./docker-compose.yml
 COPY console/known-compose.sha256 ./known-compose.sha256
+COPY console/known-compose ./known-compose
 
 # Resolve and compile the dependency graph now, so a container that starts on a
 # machine with no outbound network still runs. Without this the first request

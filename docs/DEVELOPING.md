@@ -62,10 +62,11 @@ git push origin HEAD v1.0.0       # the tag starts the build
 
 The release commit also names the version as the console's image in
 `docker-compose.yml` — the image carries that file, and a test fails if the two
-disagree — and rewrites `console/known-compose.sha256` with
-`scripts/known_compose.sh`: the hash of every version of the compose file this
-repository has held, which is how an update tells a downloaded file from an
-edited one. The workflow attaches the compose file to the GitHub release
+disagree — and rewrites `console/known-compose.sha256` and
+`console/known-compose/` with `scripts/known_compose.sh`: every version of the
+compose file this repository has held, by hash, which is how an update tells a
+downloaded file from an edited one and finds where an edited one began, to
+merge it. A test fails if the list and the folder disagree. The workflow attaches the compose file to the GitHub release
 once the image is published, and `joinrift.app/self-host/docker-compose.yml`
 redirects to the newest full release's copy
 (`releases/latest/download/docker-compose.yml`), so new servers get it with
@@ -175,6 +176,18 @@ restored onto fresh machines. The encrypted one refused a wrong passphrase
 without writing anything, and both put back every attachment with the same
 SHA-256 it had. The rig also caught a scheduled backup starting halfway
 through a slow restore, which no longer happens.
+
+**An edited compose file merged** (Oct 22 2026). On a stack installed in a
+throwaway Docker-in-Docker machine from release 1.0.15's compose file, with
+one line changed by hand (caddy's `restart`), and a console built from this
+repository standing in for the release before 1.1.0: the dashboard's Update
+said the change carried over and showed the two lines updating would change
+in the file (the console's image and the storage volume). Updating with the
+change kept took the stack to the published 1.1.0: the merged file named the
+new console, kept the edited line, and the original was kept as
+`docker-compose.yml.before-1.1.0`. Update and Check now stayed hidden for the
+whole update. Using the new file instead, and the merge refusing a file whose
+changes meet the release's, are covered by the tests but were not driven live.
 
 Not yet proved, and worth doing before anyone else runs one:
 

@@ -6,8 +6,11 @@
  *   update 1.0.14           that release, without asking GitHub
  *   update --check          what is available, changing nothing
  *   update --yes            no question before starting
- *   update --keep-compose   use docker-compose.yml as it is, once you have
- *                           brought your own edits up to the new release
+ *   update --replace-compose   when docker-compose.yml has edits of your own:
+ *                              use the release's file, keeping yours beside it
+ *   update --merge-compose     the release's file with your edits carried over
+ *   update --keep-compose      yours as it is, once you have brought it up to
+ *                              the new release by hand
  *
  * Runs in its own process beside the console, which it replaces at the end —
  * so the terminal's last line is the handover, and the new console's log
@@ -15,7 +18,6 @@
  */
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { isConfigured } from "../web/stack_state.ts";
-import { NEW_COMPOSE_FILE } from "./compose_file.ts";
 import { runUpdate, updateStatus } from "./run.ts";
 
 const COMMAND = "docker compose exec console update";
@@ -29,11 +31,14 @@ function notesOf(status: Awaited<ReturnType<typeof updateStatus>>): string {
 
 async function main(): Promise<number> {
   const args = parseArgs(Deno.args, {
-    boolean: ["check", "yes", "keep-compose", "help"],
+    boolean: ["check", "yes", "replace-compose", "merge-compose", "keep-compose", "help"],
     alias: { y: "yes", h: "help" },
   });
   if (args.help) {
-    console.log(`Usage: ${COMMAND} [version] [--check] [--yes] [--keep-compose]`);
+    console.log(
+      `Usage: ${COMMAND} [version] [--check] [--yes] ` +
+        "[--replace-compose | --merge-compose | --keep-compose]",
+    );
     return 0;
   }
   if (!isConfigured()) {
@@ -41,6 +46,13 @@ async function main(): Promise<number> {
     return 1;
   }
   const version = args._.length > 0 ? String(args._[0]) : undefined;
+  const choices = (["replace", "merge", "keep"] as const).filter((choice) =>
+    args[`${choice}-compose`]
+  );
+  if (choices.length > 1) {
+    console.error("Choose one of --replace-compose, --merge-compose and --keep-compose.");
+    return 1;
+  }
 
   if (version === undefined) {
     const status = await updateStatus();
@@ -87,7 +99,7 @@ async function main(): Promise<number> {
   }
 
   const outcome = await runUpdate(
-    { version, keepCompose: args["keep-compose"] },
+    { version, compose: choices[0] },
     (progress) => {
       if (!progress.done) console.log(`→ ${progress.step}`);
     },
@@ -97,23 +109,47 @@ async function main(): Promise<number> {
     case "current":
       console.log(`Already on ${outcome.version}.`);
       return 0;
-    case "edited":
+    case "edited": {
+      const again = `${COMMAND} ${outcome.version}`;
+      const merge = outcome.merge;
       console.log(`
 docker-compose.yml has changes of your own, so it was left as it is and nothing
 was updated. Release ${outcome.version}'s file is ${outcome.newFile}.
+`);
+      if (merge.kind === "clean") {
+        console.log(
+          `Your changes carry over into it. What the update would change in your file:
+
+${merge.diff}
+
+To update with your changes kept:
+
+  ${again} --merge-compose
+`,
+        );
+      } else {
+        const why = merge.kind === "conflict"
+          ? `Your changes and the release's meet at line ${merge.lines.join(", ")} ` +
+            "of yours, so they cannot be merged for you."
+          : "Your file is too far from every published version to merge for you.";
+        console.log(`${why}
 What differs, from yours (-) to the new one (+):
 
 ${outcome.diff}
 
-Either use the new file, putting back what you need from yours afterwards:
+Bring the new release's changes into your file, then:
 
-  mv ${NEW_COMPOSE_FILE} docker-compose.yml && ${COMMAND} ${outcome.version}
-
-or bring the new release's changes into your file, then:
-
-  ${COMMAND} ${outcome.version} --keep-compose
+  ${again} --keep-compose
 `);
+      }
+      console.log(
+        `Or use the new file as it is, keeping yours as docker-compose.yml.before-${outcome.version}:
+
+  ${again} --replace-compose
+`,
+      );
       return 2;
+    }
     case "restarting":
       if (outcome.warning) {
         console.log(`Not every service started cleanly: ${outcome.warning}`);

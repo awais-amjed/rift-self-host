@@ -1,5 +1,13 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { composeState, knownHashes, lineDiff, sha256 } from "./compose_file.ts";
+import { join } from "jsr:@std/path@1";
+import {
+  composeState,
+  knownHashes,
+  mergeCompose,
+  publishedVersions,
+  setAside,
+  sha256,
+} from "./compose_file.ts";
 
 const root = new URL("../../../", import.meta.url);
 
@@ -32,17 +40,66 @@ Deno.test("the list of published versions skips its comment", () => {
   );
 });
 
-Deno.test("a diff shows what changed, with the lines around it", () => {
-  const before = ["a", "b", "c", "d", "e", "f", "g", "h", "i"].join("\n");
-  const after = ["a", "b", "c", "d", "E", "f", "g", "h", "i", "j"].join("\n");
-  assertEquals(
-    lineDiff(before, after, 1),
-    ["@@ line 4", "  d", "- e", "+ E", "  f", "@@ line 9", "  i", "+ j"].join("\n"),
+Deno.test("the image carries every published version, not only their hashes", async () => {
+  // A merge needs the version an operator's file began as, and the list
+  // and the folder are written together: one without the other is a release
+  // made without scripts/known_compose.sh.
+  const listed = knownHashes(
+    await Deno.readTextFile(new URL("console/known-compose.sha256", root)),
   );
-  assertEquals(lineDiff(before, before), "");
-  assert(lineDiff("", "x").includes("+ x"));
+  const folder = new URL("console/known-compose/", root).pathname;
+  const versions = await publishedVersions(folder);
+  assertEquals(new Set(await Promise.all(versions.map(sha256))), listed);
 });
 
-Deno.test("a file's last newline is not a line of its own", () => {
-  assertEquals(lineDiff("a\nb\n", "a\nc\n", 0), ["@@ line 2", "- b", "+ c"].join("\n"));
+/** A compose-shaped file: [lines] numbered lines, some changed. */
+function file(changes: Record<number, string> = {}, extra: string[] = []): string {
+  const lines = Array.from({ length: 30 }, (_, i) => changes[i] ?? `  line ${i}`);
+  return [...lines, ...extra].join("\n") + "\n";
+}
+
+Deno.test("an edited file merges into a release, from the version it began as", () => {
+  const older = file({ 3: "  image: console:1.0.14" });
+  const began = file({ 3: "  image: console:1.0.15" });
+  const release = file({ 3: "  image: console:1.1.0" }, ["  volume: storage"]);
+  const mine = file({ 3: "  image: console:1.0.15", 20: "  restart: always" });
+
+  const merged = mergeCompose(mine, release, [older, began]);
+  assertEquals(merged.kind, "clean");
+  if (merged.kind !== "clean") return;
+  assertEquals(
+    merged.text,
+    file({ 3: "  image: console:1.1.0", 20: "  restart: always" }, ["  volume: storage"]),
+  );
+  assert(merged.diff.includes("+   image: console:1.1.0"));
+  assert(!merged.diff.includes("restart"), "their own change is not shown as a change");
+});
+
+Deno.test("an edit to a line the release changed does not merge", () => {
+  const began = file({ 3: "  image: console:1.0.15" });
+  const release = file({ 3: "  image: console:1.1.0" });
+  const mine = file({ 3: "  image: my-console:dev" });
+  assertEquals(mergeCompose(mine, release, [began]), { kind: "conflict", lines: [4] });
+});
+
+Deno.test("a file unlike every published version is not merged", () => {
+  const mine = Array.from({ length: 30 }, (_, i) => `mine ${i}`).join("\n");
+  assertEquals(mergeCompose(mine, file(), [file()]).kind, "unknown");
+  assertEquals(mergeCompose(file(), file(), []).kind, "unknown");
+});
+
+Deno.test("setting a file aside never writes over an earlier copy", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(join(dir, "docker-compose.yml"), "first");
+    assertEquals(await setAside(dir, "1.1.1"), "docker-compose.yml.before-1.1.1");
+    await Deno.writeTextFile(join(dir, "docker-compose.yml"), "second");
+    assertEquals(await setAside(dir, "1.1.1"), "docker-compose.yml.before-1.1.1-2");
+    assertEquals(
+      await Deno.readTextFile(join(dir, "docker-compose.yml.before-1.1.1")),
+      "first",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
