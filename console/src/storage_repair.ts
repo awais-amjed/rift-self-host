@@ -49,37 +49,18 @@ export function storedObjects(rows: string[]): StoredObject[] {
 }
 
 /**
- * Runs in storage's own Node, from its working directory where `fs-xattr` is
- * installed. Reads the objects as JSON on stdin; only adds an attribute that is
- * missing, so a healthy volume is left exactly as it was.
+ * The two spellings of storage's xattr library: `fs-xattr` 0.4 renamed its
+ * functions (`listSync` became `listAttributesSync`). The repair was written
+ * against storage v1.60.4's old names; from v1.79.4 every call failed, and
+ * every attachment was reported missing with none repaired. Both are accepted,
+ * so the repair holds whichever storage the compose file pins.
  */
-const REPAIR_SCRIPT = `
-const fs = require("fs");
-const xattr = require("fs-xattr");
-const objects = JSON.parse(fs.readFileSync(0, "utf8"));
-let repaired = 0;
-let absent = 0;
-for (const object of objects) {
-  let names;
-  try {
-    names = xattr.listSync(object.path);
-  } catch {
-    absent++;
-    continue;
-  }
-  let touched = false;
-  if (!names.includes("user.supabase.content-type")) {
-    xattr.setSync(object.path, "user.supabase.content-type", object.contentType);
-    touched = true;
-  }
-  if (!names.includes("user.supabase.cache-control")) {
-    xattr.setSync(object.path, "user.supabase.cache-control", object.cacheControl);
-    touched = true;
-  }
-  if (touched) repaired++;
+export interface XattrLibrary {
+  listAttributesSync?: (path: string) => string[];
+  setAttributeSync?: (path: string, name: string, value: string) => void;
+  listSync?: (path: string) => string[];
+  setSync?: (path: string, name: string, value: string) => void;
 }
-console.log(JSON.stringify({ checked: objects.length, repaired, absent }));
-`;
 
 /** What a repair found. */
 export interface RepairReport {
@@ -88,6 +69,68 @@ export interface RepairReport {
   /** In the database and not on disk — an attachments backup that was not restored. */
   absent: number;
 }
+
+/**
+ * Adds the attributes an object lacks, and leaves the rest exactly as they
+ * were. Runs in storage's own Node, where `fs-xattr` is installed: the console
+ * sends this function's source, so it may use nothing outside itself.
+ *
+ * Only a file that is not there counts as absent. Anything else stops the
+ * repair with its own message, so a library storage changed again reads as
+ * that and not as lost attachments.
+ */
+export function repairObjects(
+  objects: StoredObject[],
+  xattr: XattrLibrary,
+): RepairReport {
+  const list = xattr.listAttributesSync ?? xattr.listSync;
+  const set = xattr.setAttributeSync ?? xattr.setSync;
+  if (!list || !set) {
+    throw new Error("storage's fs-xattr has no function this repair knows");
+  }
+  let repaired = 0;
+  let absent = 0;
+  for (const object of objects) {
+    let names: string[];
+    try {
+      names = list(object.path);
+    } catch (error) {
+      if ((error as { code?: string })?.code === "ENOENT") {
+        absent++;
+        continue;
+      }
+      throw error;
+    }
+    let touched = false;
+    if (!names.includes("user.supabase.content-type")) {
+      set(object.path, "user.supabase.content-type", object.contentType);
+      touched = true;
+    }
+    if (!names.includes("user.supabase.cache-control")) {
+      set(object.path, "user.supabase.cache-control", object.cacheControl);
+      touched = true;
+    }
+    if (touched) repaired++;
+  }
+  return { checked: objects.length, repaired, absent };
+}
+
+/**
+ * [repairObjects] as storage's Node runs it, from its working directory where
+ * `fs-xattr` is installed: the objects as JSON on stdin, the report as the
+ * last line out, and a failure as the last line of stderr.
+ */
+export const REPAIR_SCRIPT = `
+const fs = require("fs");
+try {
+  const objects = JSON.parse(fs.readFileSync(0, "utf8"));
+  const report = (${repairObjects.toString()})(objects, require("fs-xattr"));
+  console.log(JSON.stringify(report));
+} catch (error) {
+  console.error((error && error.message) || String(error));
+  process.exit(1);
+}
+`;
 
 /** Write back any missing attachment metadata. Quiet when there is none to write. */
 export async function repairAttachmentMetadata(
