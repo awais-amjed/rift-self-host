@@ -260,6 +260,29 @@ Deno.test("LiveKit tunes its speakers the same with the local override as withou
   );
 });
 
+Deno.test("moved voice ports reach LiveKit, not only Docker's mapping", async () => {
+  // LiveKit tells callers the port it listens on. Moved only in the compose
+  // mapping, as it once was, a call never connected: callers were sent to
+  // 7882 while Docker listened on the new port (verified Oct 22 2026).
+  const ctx = { ...await context(), livekitUdpPort: 7984, livekitTcpPort: 7983 };
+  const source = await Deno.readTextFile(
+    new URL("../../templates/livekit/livekit.yaml", import.meta.url),
+  );
+  const yaml = render(source, placeholders(ctx));
+  assertStringIncludes(yaml, "\n  udp_port: 7984\n");
+  assertStringIncludes(yaml, "\n  tcp_port: 7983\n");
+
+  const compose = await Deno.readTextFile(
+    new URL("../../../docker-compose.yml", import.meta.url),
+  );
+  const service = compose.split("\n  livekit:\n")[1].split(/\n {2}[a-z][a-z0-9-]*:\n/)[0];
+  assertStringIncludes(
+    service,
+    '"${LIVEKIT_UDP_PORT:-7882}:${LIVEKIT_UDP_PORT:-7882}/udp"',
+  );
+  assertStringIncludes(service, '"${LIVEKIT_TCP_PORT:-7881}:${LIVEKIT_TCP_PORT:-7881}"');
+});
+
 Deno.test("a stack behind Caddy publishes nothing extra", () => {
   for (
     const yaml of [

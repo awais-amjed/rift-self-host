@@ -66,6 +66,8 @@ export function placeholders(context: RenderContext): Record<string, string> {
     SERVICE_ROLE_KEY_ASYMMETRIC: secrets.serviceRoleKeyAsymmetric,
     LIVEKIT_API_KEY: secrets.livekitApiKey,
     LIVEKIT_API_SECRET: secrets.livekitApiSecret,
+    LIVEKIT_UDP_PORT: String(context.livekitUdpPort),
+    LIVEKIT_TCP_PORT: String(context.livekitTcpPort),
   };
 }
 

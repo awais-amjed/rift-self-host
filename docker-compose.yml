@@ -535,8 +535,10 @@ services:
       # One multiplexed UDP port rather than a range: a range means 100+
       # published ports, which is slow to start and awkward to forward on a
       # home router. TCP 7881 is the fallback for networks that block UDP.
-      - "${LIVEKIT_UDP_PORT:-7882}:7882/udp"
-      - "${LIVEKIT_TCP_PORT:-7881}:7881"
+      # The same number on both sides: LiveKit tells callers the port it listens
+      # on, which setup writes into livekit.yaml from these same settings.
+      - "${LIVEKIT_UDP_PORT:-7882}:${LIVEKIT_UDP_PORT:-7882}/udp"
+      - "${LIVEKIT_TCP_PORT:-7881}:${LIVEKIT_TCP_PORT:-7881}"
     volumes:
       - ./volumes/livekit/livekit.yaml:/etc/livekit.yaml:ro
 

@@ -26,8 +26,13 @@ rtc:
   # {"Start":7882,"End":7889}; the compose file has to publish the same range.
   # Documented for operators at docs.joinrift.app/reference/#media.
   #
+  # The port is the one chosen at setup (LIVEKIT_UDP_PORT), and the compose
+  # file publishes it under the same number. LiveKit tells every caller the port
+  # it listens on, not the one Docker publishes, so a port moved only in the
+  # compose mapping sends callers to one nothing answers on.
+  #
   # https://docs.livekit.io/transport/self-hosting/ports-firewall/
-  udp_port: 7882
+  udp_port: {{LIVEKIT_UDP_PORT}}
 
   # ICE/TCP, for clients on networks that block UDP outright. Slower, but
   # connected — and the only fallback there is by default, because no TURN
@@ -35,7 +40,8 @@ rtc:
   # 443, which Caddy holds. For networks that allow nothing but 443, operators
   # add a coturn relay on a second machine and list it here as `turn_servers`
   # (LiveKit hands the list to every client) — docs.joinrift.app/turn/.
-  tcp_port: 7881
+  # LIVEKIT_TCP_PORT, published under the same number, as above.
+  tcp_port: {{LIVEKIT_TCP_PORT}}
 
   # The server has to advertise the address clients can actually reach, which
   # behind Docker's NAT is never the one it sees on its own interface.
