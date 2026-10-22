@@ -7,7 +7,7 @@ import { targetFromEnv } from "../../postgres.ts";
 import { optionsFromEnv } from "../../setup/options.ts";
 import { runSetup, type SetupProgress } from "../../setup/run.ts";
 import { openSealedBackup, sealedBackupPresent } from "../../backup/restore.ts";
-import { prepareStack } from "../../boot.ts";
+import { prepareStack, tracked } from "../../boot.ts";
 import { type ApiRoutes, json, progressStream } from "../responses.ts";
 import { isConfigured } from "../stack_state.ts";
 import { moveConsoleIfChanged } from "../../docker.ts";
@@ -105,7 +105,9 @@ export const setupRoutes: ApiRoutes = async (request, url, paths) => {
     // simply ask again.
     return progressStream(async (send) => {
       send({ step: "Opening the backup", done: false });
-      await openSealedBackup(paths.projectDir, String(passphrase ?? ""));
+      // Tracked like the start-up that follows, so a scheduled backup cannot
+      // begin once `.env` is out and the database is not yet in.
+      await tracked(() => openSealedBackup(paths.projectDir, String(passphrase ?? "")));
       send({ step: "Opening the backup", done: true });
       await prepareStack(paths, (step) => send({ step, done: false }));
       send({ restored: true });

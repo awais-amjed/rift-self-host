@@ -10,7 +10,7 @@ import { startScheduler } from "./backup/scheduler.ts";
 import { startTopicRuleWatch } from "./setup/topic_rules.ts";
 import { isDockerReachable } from "./docker.ts";
 import { storedPasswordHash } from "./console_password.ts";
-import { prepareStack } from "./boot.ts";
+import { prepareStack, preparingState } from "./boot.ts";
 import { defaultPaths } from "./setup/run.ts";
 import { handle } from "./web/routes.ts";
 import { isConfigured } from "./web/stack_state.ts";
@@ -47,8 +47,13 @@ async function main(): Promise<void> {
     );
   }
 
-  // Started either way: each check asks whether setup has finished since.
-  startScheduler(defaultPaths().projectDir, isConfigured);
+  // Started either way: each check asks whether setup has finished since. Never
+  // while the stack is being prepared: a restore on a slow disk outlasted the
+  // first check's five minutes, and a backup was made of a half-loaded database.
+  startScheduler(
+    defaultPaths().projectDir,
+    () => isConfigured() && !preparingState().running,
+  );
   startTopicRuleWatch(isConfigured);
 
   Deno.serve({
