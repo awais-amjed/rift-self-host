@@ -82,6 +82,18 @@ button {
 button:disabled { opacity: 0.5; cursor: default; }
 button.quiet, a.button { background: var(--inset); color: var(--dim); border: 1px solid var(--line); }
 .choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
+.panel h3.step { font-size: 14px; margin: 22px 0 8px; color: var(--text); }
+.panel > h3.step:first-child { margin-top: 0; }
+/* One answer to a question, with what tells it apart under its name. */
+.places { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px; }
+button.place { background: var(--inset); color: var(--dim); border: 1px solid var(--line);
+  text-align: left; font-weight: 400; font-size: 13px; padding: 12px 14px; }
+button.place strong { display: block; color: var(--text); font-size: 14px;
+  font-weight: 600; margin-bottom: 4px; }
+button.place:hover { border-color: var(--accent); }
+button.place[aria-pressed="true"] { border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent); }
 a.button { display: inline-block; border-radius: 8px; padding: 8px 14px; font-size: 14px;
   font-weight: 500; text-decoration: none; flex-shrink: 0; }
 a.button:hover { color: var(--text); border-color: var(--accent); }

@@ -21,25 +21,41 @@ export const SIGNALLING_PORT = 7880;
  * Where the operator's proxy runs, which decides how it reaches this stack.
  *
  * The stack publishes its API and LiveKit's signalling on this machine's
- * loopback only. A proxy on the machine reaches that; one in a container does
- * not, because a container's 127.0.0.1 is its own. Docker Desktop (Mac,
- * Windows) forwards `host.docker.internal` to the machine's loopback, so that
- * name works there. Docker on Linux does not — `host.docker.internal` is the
- * bridge's address, and nothing on the loopback answers it — so a proxy there
- * joins this stack's network and names the containers. Found on a Mac mini
- * whose Caddy ran in Docker: the snippet as it was gave 502 on every path.
+ * loopback only. A proxy installed on the machine reaches that; one in a
+ * container does not, because a container's 127.0.0.1 is its own. Found on a
+ * Mac mini whose Caddy ran in Docker: the loopback snippet gave 502 on every
+ * path.
+ *
+ * A container joins this stack's network and names the containers instead,
+ * which works on every Docker. There used to be a third choice, Docker Desktop
+ * with `host.docker.internal`, beside "Docker on Linux": a Mac running Colima
+ * is a Mac without Docker Desktop, and its owner had to know which of the two
+ * they were. And the first choice, "On this machine", was the one people
+ * copied without reading on — a Caddy in Docker on this machine is also on
+ * this machine. So the two choices now say what tells them apart: installed,
+ * or in a container.
  */
-export type ProxyPlace = "host" | "dockerDesktop" | "dockerLinux";
+export type ProxyPlace = "host" | "container";
 
 /** One way of reaching the stack, with its Caddyfile and anything else to do. */
 export interface ProxyVariant {
   place: ProxyPlace;
   label: string;
+  /** How to tell this is yours. */
+  detail: string;
   apiUpstream: string;
   signallingUpstream: string;
   caddyfile: string;
-  /** What has to change besides the Caddyfile, if anything. */
-  steps: string[];
+  /** Whether the proxy has to join [STACK_NETWORK] to reach these. */
+  joinsNetwork: boolean;
+}
+
+/** A running container that looks like a reverse proxy. */
+export interface FoundProxy {
+  name: string;
+  image: string;
+  /** Whether it is already on [STACK_NETWORK]. */
+  onStackNetwork: boolean;
 }
 
 /** Everything the dashboard shows about an operator-supplied proxy. */
@@ -66,6 +82,10 @@ export interface ProxyRoutes {
   caddyfile: string;
   /** The same, for each place the proxy may run. The first is [caddyfile]. */
   variants: ProxyVariant[];
+  /** Proxy containers running beside the stack, which say where yours is. */
+  found: FoundProxy[];
+  /** The network a proxy in a container joins: [STACK_NETWORK]. */
+  network: string;
 }
 
 /** The network compose makes for this stack (`name: rift` in the file). */
@@ -100,8 +120,8 @@ function pathsIn(caddyfile: string): string[] {
  *
  * Loopback upstreams, because that is where the override publishes them: a
  * proxy on this machine can reach them and nothing else can. A proxy that runs
- * in a container joins this stack's network and uses `kong:8000` and
- * `livekit:7880` instead — the dashboard says so beside this.
+ * in a container joins this stack's network and uses `rift-kong:8000` and
+ * `rift-livekit:7880` instead: the second of [ProxyRoutes.variants].
  */
 export async function proxyRoutes(
   templateRoot: string,
@@ -116,46 +136,37 @@ export async function proxyRoutes(
   const variant = (
     place: ProxyPlace,
     label: string,
+    detail: string,
     api: string,
     signalling: string,
-    steps: string[] = [],
   ): ProxyVariant => ({
     place,
     label,
+    detail,
     apiUpstream: api,
     signallingUpstream: signalling,
     caddyfile: base
       .replace("reverse_proxy livekit:7880", `reverse_proxy ${signalling}`)
       .replace("reverse_proxy kong:8000", `reverse_proxy ${api}`),
-    steps,
+    joinsNetwork: place === "container",
   });
 
   const variants = [
     variant(
       "host",
-      "On this machine",
+      "Installed on this machine",
+      "From a package or a download, running as a program here, not in a container.",
       `127.0.0.1:${apiPort}`,
       `127.0.0.1:${SIGNALLING_PORT}`,
     ),
-    variant(
-      "dockerDesktop",
-      "In Docker Desktop (Mac, Windows)",
-      `host.docker.internal:${apiPort}`,
-      `host.docker.internal:${SIGNALLING_PORT}`,
-      [
-        "Nothing else to change: Docker Desktop forwards host.docker.internal " +
-        "to this machine's own ports.",
-      ],
-    ),
     // The containers' own ports, which do not move with RIFT_PROXY_PORT.
-    variant("dockerLinux", "In Docker on Linux", "rift-kong:8000", "rift-livekit:7880", [
-      `Put your proxy's container on this stack's network, ${STACK_NETWORK}. ` +
-      `In its compose file: networks: { rift: { external: true, name: ${STACK_NETWORK} } }, ` +
-      "and list rift under the proxy's own networks. Or, until it is next " +
-      `recreated: docker network connect ${STACK_NETWORK} <your proxy container>.`,
-      "host.docker.internal does not work here: on Linux it reaches the " +
-      "Docker bridge, and the stack publishes these ports on the loopback only.",
-    ]),
+    variant(
+      "container",
+      "In a Docker container on this machine",
+      "Started with docker run or docker compose, like this stack.",
+      "rift-kong:8000",
+      "rift-livekit:7880",
+    ),
   ];
   const [host] = variants;
 
@@ -168,5 +179,31 @@ export async function proxyRoutes(
     mediaTcpPort: media.tcp,
     caddyfile: host.caddyfile,
     variants,
+    found: [],
+    network: STACK_NETWORK,
   };
+}
+
+/** The last part of an image's name, which says what it runs. */
+const PROXY_IMAGE = /caddy|nginx|traefik|haproxy|envoy|swag/;
+
+/**
+ * The proxies among `docker ps` lines — name, image, compose project and
+ * networks, tab-separated — leaving out this stack's own containers.
+ *
+ * Read by image, which is a guess: a proxy built under a name of its own is
+ * not found, and the page then asks rather than assumes.
+ */
+export function proxyContainersIn(lines: string[], project: string): FoundProxy[] {
+  return lines.flatMap((line) => {
+    const [name, image, owner, networks] = line.split("\t");
+    if (!name || !image || owner === project) return [];
+    const repository = image.split("@")[0].replace(/:[^/]*$/, "");
+    if (!PROXY_IMAGE.test(repository.split("/").pop() ?? "")) return [];
+    return [{
+      name,
+      image,
+      onStackNetwork: (networks ?? "").split(",").includes(STACK_NETWORK),
+    }];
+  });
 }

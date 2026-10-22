@@ -14,13 +14,15 @@ import {
   turnOff,
   turnOn,
 } from "../../local_testing.ts";
-import { proxyRoutes, SIGNALLING_PORT } from "../../proxy.ts";
+import { proxyContainersIn, proxyRoutes, SIGNALLING_PORT } from "../../proxy.ts";
 import { lastRotated } from "../../rotation.ts";
 import {
   restartService,
   restartStack,
+  runningContainers,
   servicesIn,
   serviceStatuses,
+  stackProject,
 } from "../../docker.ts";
 import { targetFromEnv } from "../../postgres.ts";
 import { type ApiRoutes, failure, json } from "../responses.ts";
@@ -136,17 +138,21 @@ export const statusRoutes: ApiRoutes = async (request, url, paths) => {
  * The routing to hand an operator who brought their own reverse proxy, or null
  * on a stack running its own Caddy.
  */
-function ownProxyRoutes(templateRoot: string) {
-  if (setting("RIFT_OWN_PROXY") !== "true") return Promise.resolve(null);
-  return proxyRoutes(
-    templateRoot,
-    setting("RIFT_DOMAIN") ?? "",
-    portSetting("RIFT_PROXY_PORT", 8000),
-    {
-      udp: portSetting("LIVEKIT_UDP_PORT", 7882),
-      tcp: portSetting("LIVEKIT_TCP_PORT", 7881),
-    },
-  );
+async function ownProxyRoutes(templateRoot: string) {
+  if (setting("RIFT_OWN_PROXY") !== "true") return null;
+  const [routes, containers] = await Promise.all([
+    proxyRoutes(
+      templateRoot,
+      setting("RIFT_DOMAIN") ?? "",
+      portSetting("RIFT_PROXY_PORT", 8000),
+      {
+        udp: portSetting("LIVEKIT_UDP_PORT", 7882),
+        tcp: portSetting("LIVEKIT_TCP_PORT", 7881),
+      },
+    ),
+    runningContainers(),
+  ]);
+  return { ...routes, found: proxyContainersIn(containers, stackProject()) };
 }
 
 /**

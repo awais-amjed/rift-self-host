@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-import { proxyRoutes } from "./proxy.ts";
+import { proxyContainersIn, proxyRoutes } from "./proxy.ts";
 
 const templateRoot = new URL("../templates/", import.meta.url).pathname;
 
@@ -77,21 +77,45 @@ Deno.test("a proxy in a container gets a Caddyfile that can reach the stack", as
   const routes = await proxyRoutes(templateRoot, "chat.example.com", 9000);
   const by = (place: string) => routes.variants.find((v) => v.place === place)!;
 
-  // The default is still the machine itself, and is what `caddyfile` holds.
-  assertEquals(routes.variants[0].place, "host");
+  // An installed proxy is what `caddyfile` holds.
+  assertEquals(routes.variants.map((v) => v.place), ["host", "container"]);
   assertEquals(routes.caddyfile, by("host").caddyfile);
 
   // A container's 127.0.0.1 is its own: on a Mac mini whose Caddy ran in
-  // Docker, the host snippet gave 502 on every path.
-  const desktop = by("dockerDesktop").caddyfile;
-  assertStringIncludes(desktop, "reverse_proxy host.docker.internal:9000");
-  assertStringIncludes(desktop, "reverse_proxy host.docker.internal:7880");
-  assert(!desktop.includes("127.0.0.1"));
+  // Docker, the loopback snippet gave 502 on every path. It joins the stack's
+  // network and names the containers, on their own ports, on any Docker.
+  const container = by("container");
+  assertStringIncludes(container.caddyfile, "reverse_proxy rift-kong:8000");
+  assertStringIncludes(container.caddyfile, "reverse_proxy rift-livekit:7880");
+  assert(!container.caddyfile.includes("127.0.0.1"));
+  assert(container.joinsNetwork);
+  assert(!by("host").joinsNetwork);
+  assertEquals(routes.network, "rift_default");
+});
 
-  // On Linux the loopback is out of reach from a container, so it joins the
-  // stack's network and names the containers, on their own ports.
-  const linux = by("dockerLinux");
-  assertStringIncludes(linux.caddyfile, "reverse_proxy rift-kong:8000");
-  assertStringIncludes(linux.caddyfile, "reverse_proxy rift-livekit:7880");
-  assert(linux.steps.some((step) => step.includes("rift_default")));
+Deno.test("the containers named are the ones the compose file names", async () => {
+  const compose = await Deno.readTextFile(
+    new URL("../../docker-compose.yml", import.meta.url),
+  );
+  assertStringIncludes(compose, "container_name: rift-kong");
+  assertStringIncludes(compose, "container_name: rift-livekit");
+});
+
+Deno.test("a proxy container running beside the stack is found", () => {
+  const lines = [
+    "caddy\tcaddy:2-alpine\tweb\tweb_default,rift_default",
+    "npm\tjc21/nginx-proxy-manager:latest\t\tbridge",
+    "tr\ttraefik@sha256:abc\t\tbridge",
+    // This stack's own containers are not somebody's proxy.
+    "rift-kong\tkong:3.9\trift\trift_default",
+    "rift-caddy\tcaddy:2\trift\trift_default",
+    // A registry port is not a proxy's name.
+    "app\tregistry.local:5000/myapp:1\t\tbridge",
+    "db\tpostgres:17\tother\tother_default",
+  ];
+  assertEquals(proxyContainersIn(lines, "rift"), [
+    { name: "caddy", image: "caddy:2-alpine", onStackNetwork: true },
+    { name: "npm", image: "jc21/nginx-proxy-manager:latest", onStackNetwork: false },
+    { name: "tr", image: "traefik@sha256:abc", onStackNetwork: false },
+  ]);
 });

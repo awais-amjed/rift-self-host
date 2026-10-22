@@ -272,7 +272,7 @@ export async function recreateConsoleSoon(image: string, name: string): Promise<
     "-e",
     `PWD=${dir}`,
     "-e",
-    `COMPOSE_PROJECT_NAME=${Deno.env.get("COMPOSE_PROJECT_NAME") ?? "rift"}`,
+    `COMPOSE_PROJECT_NAME=${stackProject()}`,
     "--entrypoint",
     "sh",
     image,
@@ -603,6 +603,24 @@ export async function serviceLogs(service: string, lines = 200): Promise<string>
     30_000,
   );
   return result.ok ? result.stdout : result.stderr;
+}
+
+/**
+ * Every running container as `name, image, compose project, networks`,
+ * tab-separated, for [proxyContainersIn]. Empty when Docker cannot be asked.
+ */
+export async function runningContainers(): Promise<string[]> {
+  const result = await run("docker", [
+    "ps",
+    "--format",
+    '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Networks}}',
+  ], { timeoutMs: 15_000 }).catch(() => null);
+  return result?.code === 0 ? result.stdout.split("\n").filter(Boolean) : [];
+}
+
+/** The compose project this stack is, as its containers are labelled. */
+export function stackProject(): string {
+  return Deno.env.get("COMPOSE_PROJECT_NAME") ?? "rift";
 }
 
 /** True if the Docker socket is reachable at all. */

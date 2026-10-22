@@ -47,7 +47,19 @@ const PROXY_HELP = `
     call with someone.</li>
 </ol>
 <p>If your proxy is Caddy, copy the Caddyfile below — it already does all of
-  this.</p>`;
+  this.</p>
+<h3>Where it runs</h3>
+<ul>
+  <li><strong>Installed on this machine</strong>: you installed it with
+    <code>apt</code>, <code>brew</code>, a download or similar, and it runs as a
+    program here. It reaches the stack at <code>127.0.0.1</code>.</li>
+  <li><strong>In a Docker container on this machine</strong>: it shows up in
+    <code>docker ps</code>. Inside a container <code>127.0.0.1</code> is the
+    container itself, so it joins this stack's network and uses the
+    containers' names instead.</li>
+</ul>
+<p>A proxy on another machine cannot reach this stack: its addresses answer
+  only on this machine.</p>`;
 
 const LOCAL_HELP = `
 <p>Moves calls onto your own network while you test — for example two phones on
@@ -89,19 +101,27 @@ ${heading("Ports to open", "ports", PORTS_HELP, "/console/#network")}
 <div id="proxySection" hidden>
 ${heading("Your reverse proxy", "proxy", PROXY_HELP, "/console/#proxy")}
 <div class="panel">
-  <p>Point your proxy at both addresses below. Sending everything to the API
-    is the mistake to avoid: messages work and calls fail.</p>
-  <div id="proxyUpstreams"></div>
-  <p class="hint">Those addresses are for a proxy running directly on this
-    machine. One in a container reaches the stack differently: choose where
-    yours runs below.</p>
-  <h2 style="margin-top:24px">If your proxy is Caddy</h2>
-  <p>This is the stack's own Caddyfile, pointed at the stack. Where does your
-    Caddy run?</p>
-  <div class="choices" id="proxyPlaces"></div>
-  <ul class="hint" id="proxySteps"></ul>
-  <pre class="block" id="proxyCaddyfile"></pre>
-  <button class="quiet" id="copyCaddyfile" style="margin-top:10px">Copy</button>
+  <h3 class="step">1. Where does your proxy run?</h3>
+  <p class="hint" style="margin:0 0 10px">The addresses below depend on it. A proxy
+    given the wrong ones answers 502 on every request.</p>
+  <div class="places" id="proxyPlaces"></div>
+  <p class="hint" id="proxyFound"></p>
+  <div id="proxyChosen" hidden>
+    <h3 class="step">2. Point it at both of these</h3>
+    <div id="proxyUpstreams"></div>
+    <p class="warn"><span>Sending everything to the API is the mistake to avoid:
+      messages work and calls fail.</span></p>
+    <div id="proxyJoin">
+      <h3 class="step">3. Put it on this stack's network</h3>
+      <div id="proxyJoinBody"></div>
+    </div>
+    <h3 class="step" id="proxyCaddyHeading">3. Using Caddy? Copy this</h3>
+    <p class="hint" style="margin:0 0 10px">It does all of the above. For nginx,
+      Traefik or another, press <strong>i</strong> beside the heading for what to
+      set.</p>
+    <pre class="block" id="proxyCaddyfile"></pre>
+    <button class="quiet" id="copyCaddyfile" style="margin-top:10px">Copy</button>
+  </div>
 </div>
 </div>
 
@@ -160,13 +180,51 @@ function renderPorts(ports) {
 /// Shown only where this stack has no Caddy of its own. Without the routing an
 /// operator gets messages working and calls silently failing, because
 /// signalling is four paths on the same host and nothing says so anywhere else.
+///
+/// Nothing to copy until the operator says where their proxy runs: with a
+/// choice made for them, people copied it without reading on, and a proxy in
+/// Docker given the loopback answers 502 on every path. A proxy container
+/// running beside the stack answers the question for them, and says so.
+let lastProxy = null;
+
 function renderProxy(proxy) {
+  lastProxy = proxy;
   document.getElementById("proxySection").hidden = !proxy;
   if (!proxy) return;
 
+  const found = proxy.found || [];
+  const place = proxyPlace || (found.length ? "container" : null);
+  const chosen = proxy.variants.find((v) => v.place === place) || null;
+
+  const places = document.getElementById("proxyPlaces");
+  places.innerHTML = proxy.variants.map((v) =>
+    '<button type="button" class="place" data-place="' + v.place + '" aria-pressed="' +
+    (v === chosen) + '"><strong>' + escapeHtml(v.label) + "</strong><span>" +
+    escapeHtml(v.detail) + "</span></button>"
+  ).join("");
+
+  const names = found.map((f) => "<code>" + escapeHtml(f.name) + "</code> (" +
+    escapeHtml(f.image) + ")").join(", ");
+  const foundLine = document.getElementById("proxyFound");
+  // A loud line for the one choice that is probably wrong.
+  foundLine.className = found.length && place === "host" ? "warn" : "hint";
+  // In a span: a warning lays its children out side by side.
+  foundLine.innerHTML = "<span>" + (!found.length
+    ? "No proxy container is running here, so yours is probably installed."
+    : place === "host"
+    ? "But " + names + " is running here in a container. If that is your proxy, " +
+      "choose In a Docker container: from inside it, 127.0.0.1 is the container itself."
+    : proxyPlace
+    ? "Running here in a container: " + names + "."
+    : "Chosen because " + names + " is running here in a container. If your proxy " +
+      "is something else, choose again.") + "</span>";
+
+  document.getElementById("proxyChosen").hidden = !chosen;
+  if (!chosen) return;
+
   const rows = [
-    ["Signalling", proxy.signallingUpstream, proxy.signallingPaths.join("  ")],
-    ["Everything else", proxy.apiUpstream, "all other paths"],
+    ["Signalling", chosen.signallingUpstream, proxy.signallingPaths.join("  ")],
+    ["Everything else", chosen.apiUpstream, "all other paths"],
     ["Voice media", "UDP " + proxy.mediaUdpPort + "  ·  TCP " + proxy.mediaTcpPort,
       "straight to this machine, not through your proxy — open these on the firewall"],
   ];
@@ -176,37 +234,51 @@ function renderProxy(proxy) {
       escapeHtml(upstream) + '</span><div class="hint">' + escapeHtml(paths) +
       "</div></td></tr>"
     ).join("") + "</table>";
-  drawProxyVariant(proxy);
-}
 
-/// The Caddyfile for wherever the operator's Caddy runs. Kept across the
-/// status refresh, which redraws this every few seconds.
-let proxyPlace = "host";
-
-function drawProxyVariant(proxy) {
-  const variants = proxy.variants || [];
-  const chosen = variants.find((v) => v.place === proxyPlace) || variants[0];
-  if (!chosen) {
-    document.getElementById("proxyCaddyfile").textContent = proxy.caddyfile;
-    return;
-  }
-  const places = document.getElementById("proxyPlaces");
-  places.innerHTML = "";
-  for (const v of variants) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = v.place === chosen.place ? "" : "quiet";
-    button.textContent = v.label;
-    button.addEventListener("click", () => {
-      proxyPlace = v.place;
-      drawProxyVariant(proxy);
-    });
-    places.appendChild(button);
-  }
-  document.getElementById("proxySteps").innerHTML =
-    chosen.steps.map((step) => "<li>" + escapeHtml(step) + "</li>").join("");
+  document.getElementById("proxyJoin").hidden = !chosen.joinsNetwork;
+  document.getElementById("proxyJoinBody").innerHTML = joinNetwork(proxy.network, found);
+  document.getElementById("proxyCaddyHeading").textContent =
+    (chosen.joinsNetwork ? "4" : "3") + ". Using Caddy? Copy this";
   document.getElementById("proxyCaddyfile").textContent = chosen.caddyfile;
 }
+
+/// How a proxy container joins the stack's network: already done, or the lines
+/// for its compose file, with the container's own name where one was found.
+function joinNetwork(network, found) {
+  const joined = found.filter((f) => f.onStackNetwork);
+  if (joined.length) {
+    return '<p class="hint" style="margin:0"><span class="dot ok"></span>' +
+      joined.map((f) => "<code>" + escapeHtml(f.name) + "</code>").join(", ") +
+      " is already on " + escapeHtml(network) + ". Nothing to change.</p>";
+  }
+  const name = found.length === 1 ? found[0].name : "your-proxy";
+  const compose = "services:\\n  " + name + ":\\n    networks: [default, rift]\\n\\n" +
+    "networks:\\n  rift:\\n    external: true\\n    name: " + network;
+  return '<p class="hint" style="margin:0 0 10px">Without it, your proxy cannot find ' +
+    "<code>rift-kong</code> or <code>rift-livekit</code> and every request answers 502. " +
+    "Add this to your proxy's compose file, keeping any networks it already lists, " +
+    "then run <code>docker compose up -d</code> there:</p>" +
+    '<pre class="block">' + escapeHtml(compose) + "</pre>" +
+    '<p class="hint">Or for now, until it is next recreated: <code>docker network ' +
+    "connect " + escapeHtml(network) + " " + escapeHtml(name) + "</code></p>";
+}
+
+/// Where the operator said their proxy runs. Remembered in this browser, since
+/// the panel is redrawn on every refresh and the answer does not change.
+let proxyPlace = null;
+try {
+  proxyPlace = localStorage.getItem("rift.proxyPlace");
+} catch {}
+
+document.getElementById("proxyPlaces").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-place]");
+  if (!button) return;
+  proxyPlace = button.dataset.place;
+  try {
+    localStorage.setItem("rift.proxyPlace", proxyPlace);
+  } catch {}
+  renderProxy(lastProxy);
+});
 
 document.getElementById("copyCaddyfile").addEventListener("click", (event) =>
   copyText(event.target, document.getElementById("proxyCaddyfile").textContent)
