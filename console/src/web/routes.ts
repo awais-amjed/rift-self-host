@@ -33,9 +33,11 @@ import { securityRoutes } from "./api/security.ts";
 import { serverRoutes } from "./api/servers.ts";
 import { setupRoutes } from "./api/setup.ts";
 import { statusRoutes } from "./api/status.ts";
+import { updateRoutes } from "./api/update.ts";
 
 const API: ApiRoutes[] = [
   statusRoutes,
+  updateRoutes,
   serverRoutes,
   securityRoutes,
   backupRoutes,

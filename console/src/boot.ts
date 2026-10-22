@@ -142,10 +142,10 @@ export async function prepareStack(
     }
   }
 
-  // A `docker compose pull` delivers new images, and the documented
-  // `docker compose up -d` after it only replaces the console. Everything else
-  // is brought onto its new image here, one service at a time, and nothing is
-  // recreated that has not actually changed.
+  // An update recreates what changed itself (update/run.ts), but a hand-run
+  // `docker compose pull && docker compose up -d` only replaces the console.
+  // Everything else is brought onto its new image here, one service at a
+  // time, and nothing is recreated that has not actually changed.
   const updated = await recreateOutdated();
   if (updated.length > 0) {
     report("Updating services");

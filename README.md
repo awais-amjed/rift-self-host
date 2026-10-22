@@ -42,19 +42,22 @@ a stranger. Move the machine, never the name.
 
 ## Updating
 
+Press **Update** on the console's Overview tab, or from a terminal in that
+folder:
+
 ```bash
-curl -fsSL https://joinrift.app/self-host/docker-compose.yml -o docker-compose.yml
-docker compose pull
-docker compose up -d
+docker compose exec console update
 ```
 
-Fetch the compose file first: it pins every upstream image. The console applies
-new migrations, endpoints and gateway routes by itself on start — see
+It shows the new release's notes, replaces `docker-compose.yml` with the
+release's own (unless you have edited yours — then it shows what differs and
+changes nothing), moves every service onto it, and restarts the console, which
+applies the new migrations and endpoints by itself. See
 [updating](https://docs.joinrift.app/updating/).
 
 The console image is [`ghcr.io/awais-amjed/rift-console`](https://github.com/awais-amjed/rift-self-host/pkgs/container/rift-console),
-for amd64 and arm64. Each release is tagged with its version, and `latest`
-follows the newest.
+for amd64 and arm64, tagged with each release's version. The compose file names
+the console by version, so a bare `docker compose pull` changes nothing.
 
 ## Documentation
 

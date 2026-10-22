@@ -38,16 +38,30 @@ COPY migrations ./migrations
 # to a flat `/app/functions` inside the image, which is what the console reads.
 COPY supabase/functions ./functions
 
+# The compose file this release runs on, and the hash of every version of it
+# ever published. An update writes the first in place of the operator's, but
+# only over a file whose hash is on the list — one they never edited. See
+# src/update/compose_file.ts.
+COPY docker-compose.yml ./docker-compose.yml
+COPY console/known-compose.sha256 ./known-compose.sha256
+
 # Resolve and compile the dependency graph now, so a container that starts on a
 # machine with no outbound network still runs. Without this the first request
 # would try to fetch jose from npm.
-RUN deno cache /app/src/main.ts /app/src/migrations/cli.ts /app/src/reset_password.ts
+RUN deno cache /app/src/main.ts /app/src/migrations/cli.ts /app/src/reset_password.ts \
+  /app/src/update/cli.ts
 
 # `docker compose exec console reset-password`, for a lost console password.
 # Its own process, with no network and no docker: it writes one line of .env.
 RUN printf '#!/bin/sh\nexec deno run --allow-env --allow-read --allow-write /app/src/reset_password.ts "$@"\n' \
     > /usr/local/bin/reset-password \
   && chmod +x /usr/local/bin/reset-password
+
+# `docker compose exec console update`: the dashboard's Update, in a terminal.
+# The network is GitHub, for the list of releases.
+RUN printf '#!/bin/sh\nexec deno run --allow-net --allow-env --allow-read --allow-write --allow-run=docker /app/src/update/cli.ts "$@"\n' \
+    > /usr/local/bin/update \
+  && chmod +x /usr/local/bin/update
 
 # Reads and writes the project directory and the functions volume, runs psql
 # and docker, listens, and calls create_server through Kong. Enumerated rather

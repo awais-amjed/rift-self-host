@@ -1,24 +1,32 @@
 import { heading, resultBox, type Tab } from "./help.ts";
+import { UPDATE_SCRIPT, updatePanel } from "./update_panel.ts";
 
 const RELEASE_HELP = `
-<p>Two version numbers. <strong>This image</strong> is the console you last
-  pulled. <strong>This stack</strong> is the release the database and endpoints
+<p>Two version numbers. <strong>This image</strong> is the console running
+  now. <strong>This stack</strong> is the release the database and endpoints
   have been brought up to. On a healthy server they match.</p>
 <h3>Update to a new release</h3>
 <ol>
   <li>Make a backup from the <a href="#backups">Backups</a> tab and wait for it
     to finish.</li>
-  <li>On the server, open a terminal in the folder that holds
-    <code>docker-compose.yml</code>.</li>
-  <li>Run <code>docker compose pull</code> to download the new images.</li>
-  <li>Run <code>docker compose up -d</code>. That replaces the console, which
-    then updates everything else by itself: new service versions, database
+  <li>Read the release's notes below the version table, then press
+    <strong>Update</strong>.</li>
+  <li>The console downloads the new release, replaces
+    <code>docker-compose.yml</code> with the release's own, moves every service
+    onto it and restarts itself. The new console then applies the database
     changes and endpoints.</li>
-  <li>After a minute, reload this page. Both numbers should match and Health
-    should be green.</li>
+  <li>The page reloads when the console is back. Sign in again: both numbers
+    should match and Health should be green.</li>
 </ol>
-<p>Members may be disconnected for a few seconds while services restart. Their
-  apps reconnect on their own.</p>
+<p>From a terminal, the same thing is
+  <code>docker compose exec console update</code>. Members may be disconnected
+  for a minute while services restart. Their apps reconnect on their own.</p>
+<h3>Compose file changed by hand</h3>
+<p>If you edited <code>docker-compose.yml</code>, Update changes nothing. It
+  writes the new release's file beside yours as
+  <code>docker-compose.yml.new</code> and shows what differs. Either replace
+  yours with it, or bring its changes into yours and press
+  <strong>Update, keeping my file</strong>.</p>
 <h3>Apply this release</h3>
 <p>This button appears only when something is still waiting, usually because an
   update was interrupted. Press it and wait. If it shows an error, run
@@ -106,6 +114,7 @@ export function overviewTab(): Tab {
 ${heading("Release", "release", RELEASE_HELP, "/updating/")}
 <div class="panel">
   <table id="version"><tr><td class="name">Loading…</td></tr></table>
+  ${updatePanel()}
   <div id="upgradeBox" hidden style="margin-top:14px">
     <button id="applyUpgrade">Apply this release</button>
     <p class="hint">This happens by itself when the console starts. Press it if
@@ -128,7 +137,7 @@ ${heading("Restart the stack", "restart", RESTART_HELP, "/console/#restart")}
     answer for up to a minute.</p>
   ${resultBox("restartResult")}
 </div>`,
-    script: OVERVIEW_SCRIPT,
+    script: OVERVIEW_SCRIPT + UPDATE_SCRIPT,
   };
 }
 

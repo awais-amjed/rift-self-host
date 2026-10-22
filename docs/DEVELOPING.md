@@ -55,9 +55,20 @@ endpoints sit beside it and go into the image.
 ## Releasing it
 
 ```bash
-scripts/release.sh 1.0.0          # sets VERSION, commits, tags; opens an editor for the notes
+scripts/release.sh 1.0.0          # sets VERSION, names it in the compose file, commits, tags;
+                                  # opens an editor for the notes
 git push origin HEAD v1.0.0       # the tag starts the build
 ```
+
+The release commit also names the version as the console's image in
+`docker-compose.yml` — the image carries that file, and a test fails if the two
+disagree — and rewrites `console/known-compose.sha256` with
+`scripts/known_compose.sh`: the hash of every version of the compose file this
+repository has held, which is how an update tells a downloaded file from an
+edited one. Once the image is published, copy the compose file to the website
+(`scripts/sync-self-host.sh` in rift-website), which hands it to new servers.
+Not before: the file names an image that does not exist until the build
+finishes.
 
 The tag reaches the GitHub mirror, where `.github/workflows/release.yml`
 builds the image for amd64 and arm64 and pushes it to GitHub's registry as
@@ -135,6 +146,18 @@ actually tried to authenticate:
   edge-function call failed.
 - `GOTRUE_SITE_URL` named the server's domain, so the fixed `localhost` URI
   every client signs was refused.
+
+**An update, end to end** (Oct 22 2026). Two console images built locally as
+releases 9.9.8 and 9.9.9, in a throwaway project with a stand-in service whose
+setting differed between their compose files. From the terminal and from the
+dashboard: a hand-edited file was left alone, the new one written beside it
+with the difference shown; keeping the edited file was refused while it named
+the old console; an untouched older file was replaced, the stand-in recreated
+with its new setting, and the console replaced by the new image, after which
+the page reloaded to the sign-in. Not proved there: downloading from GitHub's
+registry and reading the releases from GitHub (that machine had no DNS), and
+migrations after the handover — the new console runs the same start-up as
+any other.
 
 Not yet proved, and worth doing before anyone else runs one:
 

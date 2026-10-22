@@ -112,6 +112,41 @@ export function execFromFile(
 }
 
 /**
+ * Every service in the `full` profile this stack runs: not the console, and
+ * not one it is configured to leave out.
+ */
+export async function stackServices(): Promise<string[]> {
+  const skip = new Set([SELF, ...disabledServices()]);
+  return (await servicesIn(["full"])).filter((service) => !skip.has(service));
+}
+
+/** Whether compose can read [file], with this project's `.env`. */
+export function checkComposeFile(file: string): Promise<CommandResult> {
+  return compose(["-f", file, "--profile", "full", "config", "--quiet"], 30_000);
+}
+
+/** Download the image each of [services] names. */
+export function pullServices(services: string[]): Promise<CommandResult> {
+  return compose(["--profile", "full", "pull", "--quiet", ...services], 1_800_000);
+}
+
+/**
+ * Bring [services] onto the compose file as it now reads, recreating each one
+ * whose image *or* configuration changed.
+ *
+ * For an update, and only there. Elsewhere the console passes `--no-recreate`
+ * ([upArgs]) because compose's judgement of "changed" differs between compose
+ * versions. Here the compose file has just been replaced, a new environment
+ * variable or flag is exactly the change that has to land, and the image
+ * comparison [recreateOutdated] makes would miss it. A service recreated that
+ * did not need it is a restart, inside a window in which the server is
+ * already expected to drop for a minute.
+ */
+export function updateServices(services: string[]): Promise<CommandResult> {
+  return compose(["--profile", "full", "up", "-d", "--wait", ...services], 900_000);
+}
+
+/**
  * Restart every service this stack runs, except the console doing the asking.
  *
  * `restart` rather than `up`: nothing about the configuration changed, and
@@ -119,8 +154,7 @@ export function execFromFile(
  * somebody else's proxy.
  */
 export async function restartStackServices(): Promise<CommandResult> {
-  const skip = new Set([SELF, ...disabledServices()]);
-  const services = (await servicesIn(["full"])).filter((service) => !skip.has(service));
+  const services = await stackServices();
   return compose(["--profile", "full", "restart", ...services], 300_000);
 }
 
@@ -199,10 +233,7 @@ async function publishedConsole(): Promise<(ConsoleAddress & { image: string }) 
  * already there. Returns where it is going, or null when it stays.
  *
  * Setup writes both settings, but the console was published by the
- * operator's own `docker compose up -d`, before they existed. It cannot
- * recreate itself — `docker compose` running inside it is killed with the old
- * container before the new one exists — so a short-lived container of the
- * same image does it, after a pause that lets the page hear the answer first.
+ * operator's own `docker compose up -d`, before they existed.
  */
 export async function moveConsoleIfChanged(): Promise<ConsoleAddress | null> {
   const published = await publishedConsole();
@@ -211,14 +242,26 @@ export async function moveConsoleIfChanged(): Promise<ConsoleAddress | null> {
     port: setting("CONSOLE_PORT") ?? "8080",
   };
   if (published === null || !consoleMoveNeeded(published, wanted)) return null;
+  return await recreateConsoleSoon(published.image, "rift-console-move") ? wanted : null;
+}
 
+/**
+ * Have a short-lived container of [image] recreate the console from the
+ * compose file, a few seconds from now. False when it could not be started.
+ *
+ * The console cannot recreate itself: `docker compose` running inside it is
+ * killed with the old container before the new one exists. So another
+ * container does it, after a pause that lets the page hear the answer first.
+ * [name] keeps two of these from running at once.
+ */
+export async function recreateConsoleSoon(image: string, name: string): Promise<boolean> {
   const dir = projectDir();
   const started = await run("docker", [
     "run",
     "-d",
     "--rm",
     "--name",
-    "rift-console-move",
+    name,
     "-v",
     "/var/run/docker.sock:/var/run/docker.sock",
     "-v",
@@ -229,18 +272,65 @@ export async function moveConsoleIfChanged(): Promise<ConsoleAddress | null> {
     "-e",
     `PWD=${dir}`,
     "-e",
-    "COMPOSE_PROJECT_NAME=rift",
+    `COMPOSE_PROJECT_NAME=${Deno.env.get("COMPOSE_PROJECT_NAME") ?? "rift"}`,
     "--entrypoint",
     "sh",
-    published.image,
+    image,
     "-c",
     "sleep 5; docker compose up -d --no-deps --force-recreate console",
   ], { timeoutMs: 60_000 });
   if (started.code !== 0) {
-    console.error("Could not move the console:", started.stderr);
-    return null;
+    console.error("Could not recreate the console:", started.stderr);
+    return false;
   }
-  return wanted;
+  return true;
+}
+
+/**
+ * Download [image], unless it is already here. A release's tag is never moved,
+ * so a copy from an earlier try — one stopped by an edited compose file — is
+ * the same image.
+ */
+export async function pullImage(image: string): Promise<CommandResult> {
+  const present = await run(
+    "docker",
+    ["image", "inspect", "--format", "{{.Id}}", image],
+    {
+      timeoutMs: 15_000,
+    },
+  );
+  if (present.code === 0) return { ok: true, stdout: "", stderr: "" };
+  const result = await run("docker", ["pull", "--quiet", image], {
+    timeoutMs: 900_000,
+  });
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+}
+
+/**
+ * The text of [path] inside [image], or null when it has none.
+ *
+ * Read by running `cat` in a throwaway container with no network, which is how
+ * an older console learns what a newer release carries before running any of
+ * it. Through a file rather than [run], which trims what it captures: a compose
+ * file is compared by its hash, so its last newline matters.
+ */
+export async function fileInImage(image: string, path: string): Promise<string | null> {
+  const copy = await Deno.makeTempFile();
+  try {
+    const result = await runToFile("docker", [
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--entrypoint",
+      "cat",
+      image,
+      path,
+    ], { path: copy });
+    return result.code === 0 ? await Deno.readTextFile(copy) : null;
+  } finally {
+    await Deno.remove(copy).catch(() => {});
+  }
 }
 
 /**
@@ -337,7 +427,8 @@ export function upArgs(profiles: string[], services: string[]): string[] {
  * Compared by the image *name*, `kong/kong:3.9.1`, which reads the same to
  * every compose version — unlike the digest compose records, which is what made
  * its own recreate decision unreliable across versions. The console's own
- * container is left out: replacing it is the operator's `docker compose up -d`.
+ * container is left out: replacing it is an update's last step
+ * ([recreateConsoleSoon]), or the operator's `docker compose up -d`.
  */
 export function outdatedServices(
   wanted: Record<string, string>,
@@ -351,6 +442,15 @@ export function outdatedServices(
     )
     .map((container) => container.name)
     .sort();
+}
+
+/**
+ * The image the compose file names for the console, with `.env` applied —
+ * so a `RIFT_CONSOLE_IMAGE` there shows. Null when compose cannot read it.
+ */
+export async function composedConsoleImage(): Promise<string | null> {
+  const images = await serviceImages([]);
+  return images[SELF] || null;
 }
 
 /** The image each service in [profiles] names, as the compose file says now. */
@@ -371,10 +471,11 @@ async function serviceImages(profiles: string[]): Promise<Record<string, string>
  * Bring every service running an out-of-date image onto the one the compose
  * file names, one service at a time. Returns the services it recreated.
  *
- * This is how a `docker compose pull` takes effect. The documented update is
- * `pull` and then `up -d`, and `up -d` without a profile only replaces the
- * console — so without this, a release that moved Postgres or Kong to a new
- * version pulled the image and never ran it.
+ * This is how a hand-run `docker compose pull` takes effect: the `up -d` after
+ * it, without a profile, only replaces the console — so without this, a
+ * release that moved Postgres or Kong to a new version pulled the image and
+ * never ran it. An update through the console recreates services itself
+ * ([updateServices]), settings included.
  */
 export async function recreateOutdated(): Promise<string[]> {
   const [wanted, running] = await Promise.all([

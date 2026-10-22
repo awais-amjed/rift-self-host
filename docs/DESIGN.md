@@ -112,26 +112,54 @@ Two consequences worth stating plainly:
 
 ## Why updating works the way it does
 
-An update is a new compose file and `docker compose pull && docker compose up -d`.
-The console applies the rest itself on start: it installs the endpoints the new
-image carries, runs any migrations the database has not seen, reloads the edge
+An update is the console's **Update** button, or
+`docker compose exec console update` from a terminal. It downloads the new
+release's console image, replaces `docker-compose.yml` with the one that image
+carries, downloads the images the new file names, recreates every service whose
+image or settings changed, and hands over to the new console. That console then
+does what any console does when it starts: it installs the endpoints it
+carries, runs any migrations the database has not seen, reloads the edge
 runtime, and records the release it brought everything to. Watch it with
 `docker compose logs console`.
 
-That is worth stating because the obvious assumption is wrong. A pull delivers
-new console code, new migrations *and* new endpoints in one image — but only
-the first of those runs by itself. Without the console applying them you get a
-new console sitting on an old schema serving old endpoints, which looks like it
-worked.
+**The compose file and the console are one release.** The compose file pins
+every upstream image and carries their settings, and the console's migrations
+are written against those. They used to travel separately — the console as
+`latest`, the file fetched by hand — and the fetch was the step that got
+skipped: a bare `docker compose pull` brought a new console onto an old file,
+which ran new migrations beside old upstream images and missed settings like
+the edge runtime's `MALLOC_ARENA_MAX`. So the file names the console by
+version, which makes a bare pull change nothing, and each image carries its
+release's file.
 
-**Fetch the compose file first.** It pins every upstream image tag, so a
-release that moves GoTrue or Kong cannot reach you through the console image at
-all. This is the step that gets skipped.
+**An operator's edits are never overwritten.** Each image also carries the hash
+of every version of the compose file ever published (`known-compose.sha256`).
+A file on disk that matches one was downloaded and never touched, so replacing
+it loses nothing. One that does not has changes of the operator's: the update
+stops before changing anything, writes the new file beside it as
+`docker-compose.yml.new`, and shows the difference. They either take the new
+file, or bring its changes into theirs and update with it as it is
+(`--keep-compose`, or **Update, keeping my file**), which is accepted only once
+their file names the new console. A list rather than a hash recorded when the
+console last wrote the file, because most files were never written by a
+console: they were fetched with curl from whichever release was current.
 
-There is no switch for this. Somebody who does not want a release does not pull
-it; having pulled one, the only states worth being in are applied or failed
-loudly. The Release panel still has an Apply button, for the case where a
-boot-time apply was interrupted or left the reload undone.
+**The console cannot replace itself.** `docker compose` running inside it dies
+with the old container before the new one exists, so a short-lived container of
+the new image does the last step, a few seconds after the page or terminal has
+heard that it is coming. The same is how setup moves the console to another
+port.
+
+**Nothing updates by itself**, and there is no Watchtower-style option.
+Somebody who does not want a release does not press Update; having pressed it,
+the only states worth being in are applied or failed loudly. A failure before
+the new file is in use puts the old one back. The Release panel still has an
+Apply button, for the case where a boot-time apply was interrupted or left the
+reload undone.
+
+Consoles from before 1.0.13 have no Update. Those stacks move once by hand —
+fetch the compose file, `docker compose pull`, `docker compose up -d` — and use
+the button from then on.
 
 ### When a migration has changed under you
 

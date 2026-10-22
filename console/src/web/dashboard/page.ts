@@ -1,4 +1,4 @@
-import { escapeAttribute, shell } from "../shell.ts";
+import { escapeAttribute, shell, STREAM_SCRIPT } from "../shell.ts";
 import { backupsTab } from "./backups_tab.ts";
 import { COMMON_SCRIPT } from "./common_script.ts";
 import { networkTab } from "./network_tab.ts";
@@ -44,6 +44,7 @@ ${banner}
 <nav class="tabs" role="tablist">${nav}</nav>
 ${panels}`,
     `${COMMON_SCRIPT}
+${STREAM_SCRIPT}
 ${tabs.map((tab) => tab.script).join("\n")}
 
 async function load() {
@@ -62,6 +63,7 @@ async function load() {
 }
 
 load();
+loadUpdate();
 setInterval(load, 10000);
 `,
   );
