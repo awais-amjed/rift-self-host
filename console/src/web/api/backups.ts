@@ -1,6 +1,6 @@
 /** The Backups tab's endpoints: making, listing, scheduling and fetching backups. */
 import { backupStatus, startBackup } from "../../backup/create.ts";
-import { deleteBackup, listBackups, openBackup } from "../../backup/files.ts";
+import { deleteBackup, diskUsage, listBackups, openBackup } from "../../backup/files.ts";
 import { saveSchedule, scheduleStatus } from "../../backup/scheduler.ts";
 import { type ApiRoutes, failure, json } from "../responses.ts";
 import { isConfigured } from "../stack_state.ts";
@@ -11,6 +11,7 @@ export const backupRoutes: ApiRoutes = async (request, url, paths) => {
   if (path === "/api/backups") {
     return json({
       files: await listBackups(paths.projectDir),
+      diskBytes: await diskUsage(paths.projectDir),
       schedule: await scheduleStatus(paths.projectDir),
       ...backupStatus(),
     });
@@ -39,13 +40,15 @@ export const backupRoutes: ApiRoutes = async (request, url, paths) => {
     const name = url.searchParams.get("name") ?? "";
     const opened = await openBackup(paths.projectDir, name);
     if (!opened) return json({ error: "There is no backup by that name." }, 404);
-    // Streamed from disk: a backup with many attachments is larger than the
-    // console should ever hold in memory.
-    return new Response(opened.file.readable, {
+    // Streamed from disk, a folder written as a tar on the way: a backup with
+    // many attachments is larger than the console should ever hold in memory.
+    return new Response(opened.stream, {
       headers: {
-        "Content-Type": "application/gzip",
+        "Content-Type": opened.fileName.endsWith(".gz")
+          ? "application/gzip"
+          : "application/x-tar",
         "Content-Length": String(opened.bytes),
-        "Content-Disposition": `attachment; filename="${name}"`,
+        "Content-Disposition": `attachment; filename="${opened.fileName}"`,
         "Cache-Control": "no-store",
       },
     });

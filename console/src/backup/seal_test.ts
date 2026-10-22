@@ -1,5 +1,5 @@
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
-import { SealError, sealStream, unsealStream } from "./seal.ts";
+import { assertEquals, assertNotEquals, assertRejects } from "jsr:@std/assert@1";
+import { deriveSealKey, SealError, sealStream, unsealStream } from "./seal.ts";
 
 /** Quick enough for a test, and small enough chunks to exercise several frames. */
 const FAST = { iterations: 1000, chunkBytes: 64 };
@@ -64,4 +64,20 @@ Deno.test("something that is not a sealed backup is refused by name", async () =
     SealError,
     "not an encrypted Rift backup",
   );
+});
+
+Deno.test("files sealed with one derived key each open with the passphrase", async () => {
+  const key = await deriveSealKey("correct horse", FAST);
+  const sealOne = async (bytes: Uint8Array) =>
+    new Uint8Array(
+      await new Response(ReadableStream.from([bytes]).pipeThrough(sealStream(key)))
+        .arrayBuffer(),
+    );
+  const a = await sealOne(sample(200));
+  const b = await sealOne(sample(200));
+  // Same key, same plaintext, never the same bytes: each draws its own nonces.
+  assertNotEquals(a, b);
+  assertEquals(await unseal(a), sample(200));
+  assertEquals(await unseal(b), sample(200));
+  await assertRejects(() => unseal(a, "wrong"), SealError);
 });

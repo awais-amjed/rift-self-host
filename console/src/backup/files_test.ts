@@ -3,6 +3,7 @@ import { join } from "jsr:@std/path@1";
 import {
   BACKUPS_DIR,
   deleteBackup,
+  diskUsage,
   listBackups,
   openBackup,
   pruneBackups,
@@ -33,7 +34,8 @@ Deno.test("a download serves only files the backup list shows", async () => {
     const opened = await openBackup(projectDir, name);
     assert(opened, "a listed backup was refused");
     assertEquals(opened.bytes, 6);
-    assertEquals(await new Response(opened.file.readable).text(), "backup");
+    assertEquals(opened.fileName, name);
+    assertEquals(await new Response(opened.stream).text(), "backup");
 
     for (const refused of [...REFUSED, `../${BACKUPS_DIR}/${name}`]) {
       assertEquals(await openBackup(projectDir, refused), null, `served ${refused}`);
@@ -81,12 +83,50 @@ Deno.test("pruning keeps the newest by the time in the name", async () => {
       "rift-backup-2026-09-10-0300.tar.gz",
       "rift-backup-2026-01-01-0000.tar.gz",
     ]);
+    // The minute's second backup is the newer, whatever its name sorts as.
     assertEquals((await listBackups(projectDir)).map((file) => file.name), [
-      "rift-backup-2026-09-12-0300-encrypted.tar.gz",
       "rift-backup-2026-09-12-0300-2.tar.gz",
+      "rift-backup-2026-09-12-0300-encrypted.tar.gz",
     ]);
     assert(await Deno.stat(join(projectDir, ".env")));
     assert(await Deno.stat(join(projectDir, BACKUPS_DIR, "notes.tar.gz")));
+  } finally {
+    await Deno.remove(projectDir, { recursive: true });
+  }
+});
+
+Deno.test("a folder is listed, downloads as a tar, and counts shared files once", async () => {
+  const projectDir = await project([]);
+  const backups = join(projectDir, BACKUPS_DIR);
+  const older = "rift-backup-2026-09-14-0300";
+  const newer = "rift-backup-2026-09-15-0300-encrypted";
+  try {
+    for (const name of [older, newer]) {
+      await Deno.mkdir(join(backups, name, "backup", "attachments"), { recursive: true });
+      await Deno.writeTextFile(join(backups, name, "RESTORE.txt"), "steps");
+    }
+    const attachment = (name: string) => join(backups, name, "backup/attachments/f");
+    await Deno.writeFile(attachment(older), new Uint8Array(10_000));
+    await Deno.link(attachment(older), attachment(newer));
+
+    const listed = await listBackups(projectDir);
+    assertEquals(listed.map((backup) => [backup.name, backup.folder, backup.encrypted]), [
+      [newer, true, true],
+      [older, true, false],
+    ]);
+    // Each holds the attachment, but the disk holds it once.
+    assertEquals(await diskUsage(projectDir), 10_000 + 5 + 5);
+
+    const opened = await openBackup(projectDir, newer);
+    assert(opened);
+    assertEquals(opened.fileName, `${newer}.tar`);
+    const bytes = (await new Response(opened.stream).arrayBuffer()).byteLength;
+    assertEquals(bytes, opened.bytes);
+    assertEquals(listed[0].bytes, opened.bytes);
+
+    assertEquals(await deleteBackup(projectDir, older), true);
+    assertEquals(await Deno.readFile(attachment(newer)), new Uint8Array(10_000));
+    assertEquals((await listBackups(projectDir)).map((backup) => backup.name), [newer]);
   } finally {
     await Deno.remove(projectDir, { recursive: true });
   }

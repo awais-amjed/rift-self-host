@@ -164,9 +164,25 @@ reloaded to the sign-in; the new console applied 1.0.15 at start-up, every
 service came back healthy, and a two-person call carried audio before and
 after.
 
+**Backups that share their attachments** (Oct 22 2026). On a stack installed
+from this repository's compose file in a throwaway Docker-in-Docker machine,
+with 45 MB of attachments uploaded through storage's API: a second plain
+backup copied only the five new attachments and linked the other forty, so
+the two together took 45 MB on disk; encrypted backups shared the same way
+under one passphrase and copied everything under another. Both kinds were
+downloaded — each `.tar` exactly the length the response announced — and
+restored onto fresh machines. The encrypted one refused a wrong passphrase
+without writing anything, and both put back every attachment with the same
+SHA-256 it had. The rig also caught a scheduled backup starting halfway
+through a slow restore, which no longer happens.
+
 Not yet proved, and worth doing before anyone else runs one:
 
 - **A real certificate.** The runs used a domain that does not exist, so Caddy
   never completed an ACME challenge; clients reached Kong directly over http.
 - **The `studio` profile**, which has not been started once.
 - **Backups stay on the same disk.** The console makes them daily and keeps the newest few in `backups/`; copying them off the machine is up to the operator.
+- **Sharing on a folder shared into a VM.** Where the project folder cannot
+  hold hard links, a backup copies instead of linking — correct, but no
+  smaller. The dashboard's disk total shows which happened; no such machine
+  has been tried.

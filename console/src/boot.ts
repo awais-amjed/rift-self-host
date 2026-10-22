@@ -222,9 +222,9 @@ async function prepare(
 
     if (!await backupPresent(paths.projectDir)) {
       console.log(
-        "This database has no Rift schema. To restore a backup, extract the backup " +
-          "file so its contents sit beside the compose file, then restart the console. " +
-          "Nothing has been written to the database.",
+        "This database has no Rift schema. To restore a backup, start the stack from " +
+          "the backup's own folder (extract a downloaded backup first), then restart " +
+          "the console. Nothing has been written to the database.",
       );
       return;
     }
@@ -236,6 +236,13 @@ async function prepare(
         `Loading the database printed ${restored.databaseErrors.length} errors:`,
         restored.databaseErrors.slice(0, 5).join("\n"),
       );
+    }
+    if (restored.lostAttachments.length > 0) {
+      say(
+        `${restored.lostAttachments.length} attachments in the backup were damaged ` +
+          "or missing and were left out.",
+      );
+      console.error("Left out:", restored.lostAttachments.slice(0, 5).join(", "));
     }
     console.log("The backup is restored.");
   }

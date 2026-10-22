@@ -9,6 +9,8 @@
 import { join } from "jsr:@std/path@1";
 import { execFromFile, restartStackServices, waitForSettled } from "../docker.ts";
 import {
+  ATTACHMENT_DIR,
+  ATTACHMENT_INDEX,
   DATABASE_DUMP,
   MANIFEST,
   PAYLOAD_DIR,
@@ -16,6 +18,12 @@ import {
   STORAGE_ARCHIVE,
   unsealInto,
 } from "./archive.ts";
+import {
+  parseIndex,
+  putAttachmentsBack,
+  STORAGE_VOLUME,
+  unsealAttachments,
+} from "./attachments.ts";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -38,7 +46,8 @@ export async function backupPresent(projectDir: string): Promise<boolean> {
 }
 
 /**
- * Decrypt the backup beside the compose file into `.env` and `backup/`.
+ * Decrypt the backup beside the compose file into `.env` and `backup/`, and
+ * each of its attachments where it lies.
  *
  * The sealed file is removed once opened: the folder then looks exactly like
  * an unencrypted backup, and the console's next step is the same for both.
@@ -49,6 +58,10 @@ export async function openSealedBackup(
 ): Promise<void> {
   const sealed = join(projectDir, SEALED_FILE);
   await unsealInto(sealed, passphrase, projectDir);
+  const failed = await unsealAttachments(join(projectDir, ATTACHMENT_DIR), passphrase);
+  if (failed.length > 0) {
+    console.error(`${failed.length} attachments in the backup did not decrypt.`);
+  }
   await Deno.remove(sealed);
 }
 
@@ -56,6 +69,8 @@ export async function openSealedBackup(
 export interface RestoreResult {
   /** ERROR lines psql printed. Zero on a backup the console made. */
   databaseErrors: string[];
+  /** Attachments left out: their file in the backup is damaged or gone. */
+  lostAttachments: string[];
 }
 
 /**
@@ -85,7 +100,22 @@ export async function restoreFromBackup(
     line.includes("ERROR")
   );
 
-  if (await exists(join(projectDir, STORAGE_ARCHIVE))) {
+  let lostAttachments: string[] = [];
+  if (await exists(join(projectDir, ATTACHMENT_INDEX))) {
+    report("Putting the attachments back");
+    if (!await exists(STORAGE_VOLUME)) {
+      throw new Error(
+        "The console cannot see storage's volume, so the attachments cannot go back. " +
+          "Use the docker-compose.yml that came with the backup.",
+      );
+    }
+    const put = await putAttachmentsBack(
+      join(projectDir, ATTACHMENT_DIR),
+      parseIndex(await Deno.readTextFile(join(projectDir, ATTACHMENT_INDEX))),
+      STORAGE_VOLUME,
+    );
+    lostAttachments = [...put.damaged, ...put.missing];
+  } else if (await exists(join(projectDir, STORAGE_ARCHIVE))) {
     report("Putting the attachments back");
     const storage = await execFromFile(
       "storage",
@@ -108,5 +138,5 @@ export async function restoreFromBackup(
     join(projectDir, PAYLOAD_DIR),
     join(projectDir, `${PAYLOAD_DIR}.restored`),
   );
-  return { databaseErrors };
+  return { databaseErrors, lostAttachments };
 }

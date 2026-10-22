@@ -4,41 +4,46 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "jsr:@std/assert@1";
-import { UntarStream } from "jsr:@std/tar@0.1";
+import { TarStream, UntarStream } from "jsr:@std/tar@0.1";
 import { join } from "jsr:@std/path@1";
 import {
+  ATTACHMENT_INDEX,
   backupName,
   DATABASE_DUMP,
+  folderTar,
+  folderTarStream,
   isPayloadPath,
   MANIFEST,
   type Manifest,
   PAYLOAD_PATHS,
+  readSealedIndex,
   restoreInstructions,
-  SEALED_FILE,
+  SEALED_PATHS,
+  sealPayload,
   STORAGE_ARCHIVE,
   unsealInto,
-  writeArchive,
 } from "./archive.ts";
+import { sealStream } from "./seal.ts";
 
 const FAST = { iterations: 1000, chunkBytes: 256 };
 
 const manifest = (encrypted: boolean): Manifest => ({
-  format: 1,
+  format: 2,
   createdAt: "2026-09-15T12:03:00.000Z",
   consoleVersion: "0.2.0",
   domain: "chat.example.com",
   encrypted,
 });
 
-/** A project with a compose file and a payload of recognisable contents. */
-async function project(): Promise<{ dir: string; payload: Record<string, string> }> {
+/** A payload of recognisable contents, each in a file of its own. */
+async function payload(): Promise<{ dir: string; files: Record<string, string> }> {
   const dir = await Deno.makeTempDir({ prefix: "rift-backup-" });
-  await Deno.writeTextFile(join(dir, "docker-compose.yml"), "name: rift\n");
-  const payload: Record<string, string> = {};
+  const files: Record<string, string> = {};
   for (
     const [path, body] of [
       [".env", "JWT_SECRET=abc\n"],
-      [MANIFEST, JSON.stringify(manifest(false))],
+      [MANIFEST, JSON.stringify(manifest(true))],
+      [ATTACHMENT_INDEX, `${"a".repeat(64)} 3 1 stub/stub/avatars/me\n`],
       [DATABASE_DUMP, "x".repeat(1500)],
       [STORAGE_ARCHIVE, "y".repeat(700)],
     ]
@@ -46,103 +51,97 @@ async function project(): Promise<{ dir: string; payload: Record<string, string>
     const file = join(dir, "source", path);
     await Deno.mkdir(join(file, ".."), { recursive: true });
     await Deno.writeTextFile(file, body);
-    payload[path] = file;
+    files[path] = file;
   }
-  return { dir, payload };
+  return { dir, files };
 }
 
-async function entriesOf(file: string): Promise<Map<string, string | null>> {
-  const found = new Map<string, string | null>();
-  const stream = (await Deno.open(file)).readable
-    .pipeThrough(new DecompressionStream("gzip"))
-    .pipeThrough(new UntarStream());
-  for await (const entry of stream) {
-    found.set(
-      entry.path,
-      entry.readable ? await new Response(entry.readable).text() : null,
-    );
-  }
-  return found;
-}
+Deno.test("a sealed payload opens to what went in, and its list reads alone", async () => {
+  const { dir, files } = await payload();
+  const sealed = join(dir, "backup.sealed");
+  await sealPayload(files, sealed, "correct horse", FAST);
+  assert(!(await Deno.readTextFile(sealed)).includes("JWT_SECRET"), "secrets visible");
 
-Deno.test("a plain backup extracts to a folder ready to run", async () => {
-  const { dir, payload } = await project();
-  const destination = join(dir, "out.tar.gz");
-  await writeArchive({
-    destination,
-    name: "rift-backup-2026-09-15-1203",
-    composeFile: join(dir, "docker-compose.yml"),
-    instructions: "read me",
-    payload: payload as never,
-    workDir: dir,
-  });
+  assertEquals(
+    await readSealedIndex(sealed, "correct horse"),
+    await Deno.readTextFile(files[ATTACHMENT_INDEX]),
+  );
+  assertEquals(await readSealedIndex(sealed, "wrong"), null);
 
-  const entries = await entriesOf(destination);
-  const root = "rift-backup-2026-09-15-1203/";
-  assertEquals(entries.get(`${root}docker-compose.yml`), "name: rift\n");
-  assertEquals(entries.get(`${root}RESTORE.txt`), "read me");
-  for (const path of PAYLOAD_PATHS) {
+  const restored = join(dir, "restored");
+  const written = await unsealInto(sealed, "correct horse", restored);
+  // Only the four a new backup seals: format 1's tar of attachments is not one.
+  assertEquals(written, [...SEALED_PATHS]);
+  for (const path of SEALED_PATHS) {
     assertEquals(
-      entries.get(`${root}${path}`),
-      await Deno.readTextFile(payload[path]),
-      path,
+      await Deno.readTextFile(join(restored, path)),
+      await Deno.readTextFile(files[path]),
     );
   }
-  assertEquals(entries.has(`${root}${SEALED_FILE}`), false);
+  await assertRejects(() => unsealInto(sealed, "wrong", join(dir, "nope")), Error);
   await Deno.remove(dir, { recursive: true });
 });
 
-Deno.test("an encrypted backup shows only the compose file and the instructions", async () => {
-  const { dir, payload } = await project();
-  const destination = join(dir, "out.tar.gz");
-  await writeArchive({
-    destination,
-    name: "b",
-    composeFile: join(dir, "docker-compose.yml"),
-    instructions: "read me",
-    payload: payload as never,
-    passphrase: "correct horse",
-    workDir: dir,
-    seal: FAST,
-  });
-
-  const entries = await entriesOf(destination);
-  assertEquals(
-    [...entries.keys()].filter((path) => entries.get(path) !== null).sort(),
-    ["b/RESTORE.txt", `b/${SEALED_FILE}`, "b/docker-compose.yml"],
-  );
-  // Nothing of the payload readable in the archive itself.
-  for (const body of entries.values()) {
-    assert(!body?.includes("JWT_SECRET"), "the secrets are visible");
-  }
-
-  // And opening it puts the payload back exactly.
-  const extracted = await Deno.makeTempDir();
-  const sealed = join(extracted, SEALED_FILE);
-  await Deno.writeTextFile(sealed, "");
-  const bytes = (await Deno.open(destination)).readable
-    .pipeThrough(new DecompressionStream("gzip"))
-    .pipeThrough(new UntarStream());
-  for await (const entry of bytes) {
-    if (entry.path === `b/${SEALED_FILE}`) {
-      await entry.readable!.pipeTo((await Deno.create(sealed)).writable);
-    } else {
-      await entry.readable?.cancel();
+Deno.test("a sealed backup from before folders still opens", async () => {
+  const { dir, files } = await payload();
+  const sealed = join(dir, "backup.sealed");
+  const format1 = [".env", MANIFEST, DATABASE_DUMP, STORAGE_ARCHIVE];
+  const entries = async function* () {
+    for (const path of format1) {
+      yield {
+        type: "file" as const,
+        path,
+        size: (await Deno.stat(files[path])).size,
+        readable: (await Deno.open(files[path])).readable,
+      };
     }
+  };
+  await ReadableStream.from(entries())
+    .pipeThrough(new TarStream())
+    .pipeThrough(sealStream("correct horse", FAST))
+    .pipeTo((await Deno.create(sealed)).writable);
+
+  const restored = join(dir, "restored");
+  assertEquals(await unsealInto(sealed, "correct horse", restored), format1);
+  assertEquals(
+    await Deno.readTextFile(join(restored, STORAGE_ARCHIVE)),
+    "y".repeat(700),
+  );
+  await Deno.remove(dir, { recursive: true });
+});
+
+Deno.test("a folder downloads as a tar of exactly the size promised", async () => {
+  const dir = await Deno.makeTempDir();
+  const folder = join(dir, "rift-backup-2026-09-15-1203");
+  await Deno.mkdir(join(folder, "backup", "attachments"), { recursive: true });
+  // Sizes either side of a tar block, and none at all.
+  const files: Record<string, number> = {
+    "docker-compose.yml": 0,
+    "RESTORE.txt": 1,
+    ".env": 511,
+    "backup/database.sql.gz": 512,
+    [`backup/attachments/${"b".repeat(64)}`]: 513,
+    [`backup/attachments/${"c".repeat(64)}`]: 4000,
+  };
+  for (const [path, size] of Object.entries(files)) {
+    await Deno.writeFile(join(folder, path), new Uint8Array(size).fill(7));
   }
-  const restored = join(extracted, "restored");
-  const written = await unsealInto(sealed, "correct horse", restored);
-  assertEquals(written.sort(), [...PAYLOAD_PATHS].sort());
-  for (const path of PAYLOAD_PATHS) {
-    assertEquals(
-      await Deno.readTextFile(join(restored, path)),
-      await Deno.readTextFile(payload[path]),
+
+  const tar = await folderTar(folder, "rift-backup-2026-09-15-1203");
+  const bytes = new Uint8Array(await new Response(folderTarStream(tar)).arrayBuffer());
+  assertEquals(bytes.length, tar.bytes);
+
+  const found = new Map<string, number>();
+  for await (const entry of ReadableStream.from([bytes]).pipeThrough(new UntarStream())) {
+    found.set(
+      entry.path,
+      entry.readable ? (await new Response(entry.readable).arrayBuffer()).byteLength : -1,
     );
   }
-
-  await assertRejects(() => unsealInto(sealed, "wrong", join(extracted, "nope")), Error);
+  for (const [path, size] of Object.entries(files)) {
+    assertEquals(found.get(`rift-backup-2026-09-15-1203/${path}`), size, path);
+  }
   await Deno.remove(dir, { recursive: true });
-  await Deno.remove(extracted, { recursive: true });
 });
 
 Deno.test("opening a backup writes nothing outside its own names", () => {
@@ -173,7 +172,7 @@ Deno.test("the name says when it was made, in UTC, and whether it is encrypted",
 Deno.test("the instructions name the domain, and ask for a passphrase only when there is one", () => {
   const plain = restoreInstructions(manifest(false), "rift-backup-x");
   assertStringIncludes(plain, "chat.example.com");
-  assertStringIncludes(plain, "tar xzf rift-backup-x.tar.gz");
+  assertStringIncludes(plain, "tar xf rift-backup-x.tar");
   assertStringIncludes(plain, "docker compose up -d");
   assert(!plain.includes("passphrase"));
 

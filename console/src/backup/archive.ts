@@ -1,33 +1,58 @@
 /**
- * The backup file: one `.tar.gz` that is a server folder waiting to be run.
+ * A backup: a folder that is a server waiting to be run.
  *
- * Extracting it gives a folder with the compose file, the instructions, and
- * either the payload in the clear — `.env` and `backup/` — or, with a
- * passphrase, one sealed file holding the same. `docker compose up -d` in that
- * folder is the whole restore: the console finds the payload beside it and
- * does the rest, asking for the passphrase first if there is one.
+ * It holds the compose file, the instructions, and either the payload in the
+ * clear — `.env` and `backup/` — or, with a passphrase, one sealed file holding
+ * `.env`, the database and the list of attachments, with each attachment
+ * sealed on its own beside it (attachments.ts says why). `docker compose up -d`
+ * in that folder is the whole restore: the console finds the payload beside it
+ * and does the rest, asking for the passphrase first if there is one.
  *
- * `.tar.gz` rather than `.zip` because tar is on every server this runs on and
- * on Windows 10 and 11; the attachments inside are a tar of their own.
+ * On the server the backup stays a folder, so the next one can share its
+ * attachments. A download is the same folder as one `.tar`, written as it is
+ * sent; tar is on every server this runs on and on Windows 10 and 11, and the
+ * size of the file is known before the first byte, so a browser can show how
+ * far along it is. Nothing in it compresses: the dump is already gzipped and
+ * attachments are encrypted.
+ *
+ * Backups from before (format 1) are single `.tar.gz` files with the
+ * attachments as a tar inside. They are still listed, downloaded and restored.
  */
 import { TarStream, type TarStreamInput, UntarStream } from "jsr:@std/tar@0.1";
 import { dirname, join } from "jsr:@std/path@1";
-import { type SealOptions, sealStream, unsealStream } from "./seal.ts";
+import { type SealKey, type SealOptions, sealStream, unsealStream } from "./seal.ts";
 
+/** A format-1 backup, one compressed file. */
 export const ARCHIVE_EXTENSION = ".tar.gz";
+/** What downloading a backup folder gives. */
+export const DOWNLOAD_EXTENSION = ".tar";
 export const SEALED_FILE = "backup.sealed";
 export const PAYLOAD_DIR = "backup";
 export const MANIFEST = `${PAYLOAD_DIR}/manifest.json`;
 export const DATABASE_DUMP = `${PAYLOAD_DIR}/database.sql.gz`;
+export const ATTACHMENT_INDEX = `${PAYLOAD_DIR}/attachments.txt`;
+export const ATTACHMENT_DIR = `${PAYLOAD_DIR}/attachments`;
+/** Format 1's attachments, a tar of the whole volume. */
 export const STORAGE_ARCHIVE = `${PAYLOAD_DIR}/storage.tar.gz`;
 
-/** Everything a sealed backup may contain, and so everything opening one may write. */
-export const PAYLOAD_PATHS = [".env", MANIFEST, DATABASE_DUMP, STORAGE_ARCHIVE] as const;
+/** What a sealed backup holds, in the order it holds them: the list comes early,
+ * so the next backup can read it without decrypting the database. */
+export const SEALED_PATHS = [MANIFEST, ATTACHMENT_INDEX, ".env", DATABASE_DUMP] as const;
+
+/** Everything a sealed backup of either format may contain, and so everything opening one may write. */
+export const PAYLOAD_PATHS = [
+  ".env",
+  MANIFEST,
+  ATTACHMENT_INDEX,
+  DATABASE_DUMP,
+  STORAGE_ARCHIVE,
+] as const;
 export type PayloadPath = (typeof PAYLOAD_PATHS)[number];
 
 /** What a backup says about itself. No secrets: it is readable in either kind. */
 export interface Manifest {
-  format: 1;
+  /** 1: attachments as one tar inside. 2: one file each, shared between backups. */
+  format: 1 | 2;
   createdAt: string;
   consoleVersion: string;
   domain: string;
@@ -63,9 +88,10 @@ export function restoreInstructions(manifest: Manifest, name: string): string {
     `1. Point ${domain} at the machine you are restoring onto. It has to be`,
     "   the same one: every member's identity on this server is derived from it.",
     "",
-    "2. Extract this file and open the folder it makes:",
+    "2. Open this folder in a terminal. From a downloaded file, extract it",
+    "   first, which makes the folder:",
     "",
-    `     tar xzf ${name}${ARCHIVE_EXTENSION}`,
+    `     tar xf ${name}${DOWNLOAD_EXTENSION}`,
     `     cd ${name}`,
     "",
     "3. Start it:",
@@ -93,89 +119,134 @@ export function restoreInstructions(manifest: Manifest, name: string): string {
   return lines.join("\n");
 }
 
-function textEntry(path: string, text: string, mode: number): TarStreamInput {
-  const bytes = new TextEncoder().encode(text);
-  return {
-    type: "file",
-    path,
-    size: bytes.length,
-    readable: ReadableStream.from([bytes]),
-    options: { mode },
-  };
-}
-
-async function fileEntry(
-  path: string,
-  file: string,
-  mode: number,
-): Promise<TarStreamInput> {
-  return {
-    type: "file",
-    path,
-    size: (await Deno.stat(file)).size,
-    readable: (await Deno.open(file)).readable,
-    options: { mode },
-  };
-}
-
-/** What [writeArchive] needs. */
-export interface ArchiveSource {
-  /** Where to write. */
-  destination: string;
-  /** The folder extraction makes, and the name the file shares. */
-  name: string;
-  composeFile: string;
-  instructions: string;
-  /** Each payload path and the file on disk holding it. */
-  payload: Record<PayloadPath, string>;
-  /** Seal the payload with this, or leave it in the clear when absent. */
-  passphrase?: string;
-  /** Somewhere to put the sealed payload while the archive is written. */
-  workDir: string;
-  seal?: SealOptions;
-}
-
-/** Write the backup file. */
-export async function writeArchive(source: ArchiveSource): Promise<void> {
-  const { name, payload } = source;
-
-  let sealed: string | null = null;
-  if (source.passphrase) {
-    sealed = join(source.workDir, SEALED_FILE);
-    const inner = async function* (): AsyncGenerator<TarStreamInput> {
-      for (const path of PAYLOAD_PATHS) yield await fileEntry(path, payload[path], 0o600);
-    };
-    const out = await Deno.open(sealed, { write: true, create: true, truncate: true });
-    await ReadableStream.from(inner())
-      .pipeThrough(new TarStream())
-      .pipeThrough(sealStream(source.passphrase, source.seal))
-      .pipeTo(out.writable);
-  }
-
-  const outer = async function* (): AsyncGenerator<TarStreamInput> {
-    yield { type: "directory", path: name, options: { mode: 0o755 } };
-    yield await fileEntry(`${name}/docker-compose.yml`, source.composeFile, 0o644);
-    yield textEntry(`${name}/RESTORE.txt`, source.instructions, 0o644);
-    if (sealed !== null) {
-      yield await fileEntry(`${name}/${SEALED_FILE}`, sealed, 0o600);
-      return;
-    }
-    yield { type: "directory", path: `${name}/${PAYLOAD_DIR}`, options: { mode: 0o700 } };
-    for (const path of PAYLOAD_PATHS) {
-      yield await fileEntry(`${name}/${path}`, payload[path], 0o600);
+/**
+ * Seal [files] — payload paths and the files on disk holding them, in
+ * [SEALED_PATHS] order — into [destination].
+ */
+export async function sealPayload(
+  files: Partial<Record<PayloadPath, string>>,
+  destination: string,
+  secret: string | SealKey,
+  options?: SealOptions,
+): Promise<void> {
+  const entries = async function* (): AsyncGenerator<TarStreamInput> {
+    for (const path of SEALED_PATHS) {
+      const file = files[path];
+      if (file === undefined) continue;
+      yield {
+        type: "file",
+        path,
+        size: (await Deno.stat(file)).size,
+        readable: (await Deno.open(file)).readable,
+        options: { mode: 0o600 },
+      };
     }
   };
-
-  const out = await Deno.open(source.destination, {
+  const out = await Deno.open(destination, {
     write: true,
     create: true,
     truncate: true,
     mode: 0o600,
   });
-  await ReadableStream.from(outer())
+  await ReadableStream.from(entries())
     .pipeThrough(new TarStream())
-    .pipeThrough(new CompressionStream("gzip"))
+    .pipeThrough(sealStream(secret, options))
     .pipeTo(out.writable);
+}
+
+/**
+ * The list of attachments inside a sealed backup, or null when [passphrase]
+ * does not open it. Reading stops at the list, so the database — the bulk of
+ * the file — is never decrypted for it.
+ */
+export async function readSealedIndex(
+  sealedFile: string,
+  passphrase: string,
+): Promise<string | null> {
+  const entries = (await Deno.open(sealedFile)).readable
+    .pipeThrough(unsealStream(passphrase))
+    .pipeThrough(new UntarStream());
+  try {
+    for await (const entry of entries) {
+      if (entry.path === ATTACHMENT_INDEX && entry.readable) {
+        return await new Response(entry.readable).text();
+      }
+      await entry.readable?.cancel();
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await entries.cancel().catch(() => {});
+  }
+}
+
+/** One entry of a folder written as a tar, with what it takes to write it. */
+interface FolderEntry {
+  path: string;
+  /** The file on disk, or none for a directory. */
+  file?: string;
+  size: number;
+  mode: number;
+}
+
+/** A backup folder as one tar: what it holds, and the exact size it will be. */
+export interface FolderTar {
+  entries: FolderEntry[];
+  bytes: number;
+}
+
+/**
+ * Everything under [folder], named below [name], in the order a tar of it is
+ * written. The size counts what TarStream writes: a 512-byte header for each
+ * entry, each file padded to a whole block, and two empty blocks to finish.
+ */
+export async function folderTar(folder: string, name: string): Promise<FolderTar> {
+  const entries: FolderEntry[] = [];
+  const walk = async (directory: string, below: string) => {
+    const children: Deno.DirEntry[] = [];
+    for await (const child of Deno.readDir(directory)) children.push(child);
+    children.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const child of children) {
+      const path = `${below}/${child.name}`;
+      const file = join(directory, child.name);
+      const info = await Deno.stat(file);
+      const mode = (info.mode ?? 0o600) & 0o777;
+      if (child.isDirectory) {
+        entries.push({ path, size: 0, mode });
+        await walk(file, path);
+      } else if (child.isFile) {
+        entries.push({ path, file, size: info.size, mode });
+      }
+    }
+  };
+  entries.push({ path: name, size: 0, mode: 0o755 });
+  await walk(folder, name);
+  const bytes = entries.reduce(
+    (sum, entry) => sum + 512 + Math.ceil(entry.size / 512) * 512,
+    1024,
+  );
+  return { entries, bytes };
+}
+
+/** The tar [folderTar] described, written as it is read. */
+export function folderTarStream(tar: FolderTar): ReadableStream<Uint8Array> {
+  const inputs = async function* (): AsyncGenerator<TarStreamInput> {
+    for (const entry of tar.entries) {
+      if (entry.file === undefined) {
+        yield { type: "directory", path: entry.path, options: { mode: entry.mode } };
+      } else {
+        yield {
+          type: "file",
+          path: entry.path,
+          size: entry.size,
+          readable: (await Deno.open(entry.file)).readable,
+          options: { mode: entry.mode },
+        };
+      }
+    }
+  };
+  return ReadableStream.from(inputs()).pipeThrough(new TarStream());
 }
 
 /**

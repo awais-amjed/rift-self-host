@@ -13,36 +13,44 @@ const BACKUP_HELP = `
     steps.</li>
 </ul>
 <p>The server keeps running while a backup is made. A small server takes
-  seconds; many attachments take longer.</p>
+  seconds. The first backup copies every attachment, which takes longer; after
+  that, each one copies only what is new.</p>
+<h3>Space on this disk</h3>
+<p>Attachments never change once uploaded, so backups share them: an
+  attachment the previous backup already holds is linked to its copy, not
+  copied again. Five backups take about the space of one, plus five
+  databases and whatever was uploaded in between. The list shows what all of
+  them take together.</p>
 <h3>Steps</h3>
 <ol>
   <li>Optional: type a passphrase, twice. See below for when to use one.</li>
   <li>Press <strong>Create backup</strong>. Progress shows under the button,
     and you can use other tabs meanwhile.</li>
-  <li>When it finishes, the file appears in the list. It is in the
-    <code>backups</code> folder next to <code>docker-compose.yml</code>.</li>
-  <li>Copy the file off this machine. A backup on the same disk is lost with
+  <li>When it finishes, the backup appears in the list. It is a folder in
+    <code>backups</code>, next to <code>docker-compose.yml</code>.</li>
+  <li>Copy it off this machine. A backup on the same disk is lost with
     the disk. The quickest way is its <strong>Download</strong> button.</li>
 </ol>
 <h3>Passphrase</h3>
-<p>Without one, anyone who gets the file has every key to this server. With
-  one, the file is encrypted and useless without it. Use one whenever the file
+<p>Without one, anyone who gets the backup has every key to this server. With
+  one, the backup is encrypted and useless without it. Use one whenever the file
   will be kept anywhere other people or services can reach: cloud storage, a
   shared drive, email.</p>
 <p><strong>A lost passphrase cannot be recovered</strong>, and nobody can open
   the backup without it. Keep it in a password manager.</p>
 <h3>Copy it off this machine</h3>
-<p><strong>Download:</strong> press <strong>Download</strong> beside the file.
-  Your browser saves it to this computer's Downloads folder; the copy in
-  <code>backups/</code> stays where it is. The download travels through the
-  browser and your SSH tunnel, so it stops if either closes — for a file of
-  several gigabytes, scp is more reliable.</p>
+<p><strong>Download:</strong> press <strong>Download</strong> beside the
+  backup. Your browser saves it as one <code>.tar</code> file in this
+  computer's Downloads folder; the backup in <code>backups/</code> stays where
+  it is. The download travels through the browser and your SSH tunnel, so it
+  stops if either closes — for several gigabytes, scp is more reliable.</p>
 <p><strong>scp:</strong> from your own computer — this works in a Linux or
   macOS terminal and in Windows PowerShell:</p>
-<p><code>scp you@your-server:/path/to/rift/backups/FILE.tar.gz .</code></p>
+<p><code>scp -r you@your-server:/path/to/rift/backups/NAME .</code></p>
 <p>WinSCP and FileZilla (SFTP) do the same in a window. If the copy is refused,
-  the file belongs to root: on the server run
-  <code>sudo chown $USER backups/*</code> first.</p>
+  the backup belongs to root: on the server run
+  <code>sudo chown -R $USER backups</code> first. To copy every backup and
+  keep them sharing space, use <code>rsync -aH</code>.</p>
 <h3>How often</h3>
 <p>Scheduled backups already run by themselves (see <strong>Scheduled
   backups</strong> below). Make one by hand as well before every update and
@@ -52,17 +60,20 @@ const BACKUP_HELP = `
   backups — and that includes backups made here. When a new one would delete
   an old one, a yellow note under the button names it. Download a backup you
   want to keep for longer. To delete one yourself, press
-  <strong>Delete</strong> beside it in the list.</p>`;
+  <strong>Delete</strong> beside it in the list. Deleting one frees only the
+  attachments no other backup shares.</p>`;
 
 const RESTORE_HELP = `
-<p>Restoring builds this server again from a backup file, on a machine that is
+<p>Restoring builds this server again from a backup, on a machine that is
   not already running it — a new server, or this one after a fresh install.</p>
 <ol>
   <li>Install Docker on the machine.</li>
-  <li>Copy the backup file there and extract it:
-    <code>tar -xzf FILE.tar.gz</code>. This works on Linux, macOS and Windows 10
-    or later. 7-Zip works too, in two steps (.gz, then .tar).</li>
-  <li>Open a terminal in the folder it makes and run
+  <li>Copy the backup there. A downloaded file needs extracting:
+    <code>tar -xf FILE.tar</code>, or <code>tar -xzf FILE.tar.gz</code> for
+    one made before backups were folders. This works on Linux, macOS and
+    Windows 10 or later; 7-Zip works too. A folder copied with scp is ready
+    as it is.</li>
+  <li>Open a terminal in the backup's folder and run
     <code>docker compose up -d</code>.</li>
   <li><strong>Without a passphrase</strong>, the console restores it by itself.
     Follow along with <code>docker compose logs -f console</code> until it says
@@ -85,19 +96,20 @@ export function backupsTab(): Tab {
     id: "backups",
     label: "Backups",
     html: `
-<p class="intro">Everything needed to bring this server back, in one file.</p>
+<p class="intro">Everything needed to bring this server back, in one folder.</p>
 
 ${heading("Create a backup", "backup", BACKUP_HELP, "/backups/#dashboard")}
 <div class="panel">
-  <p>Saves the database, the attachments and <code>.env</code> as one file in
-    <code>backups/</code>, next to the compose file. Copy it off this machine
-    afterwards — a backup on the same disk is lost with the disk.</p>
+  <p>Saves the database, the attachments and <code>.env</code> as a folder in
+    <code>backups/</code>, next to the compose file. Attachments an earlier
+    backup holds are shared with it, not copied. Copy the backup off this
+    machine afterwards — a backup on the same disk is lost with the disk.</p>
   <div class="field">
     <label for="backupPassphrase">Passphrase (optional)</label>
     <input id="backupPassphrase" type="password" autocomplete="new-password">
     <input id="backupPassphraseAgain" type="password" autocomplete="new-password"
       placeholder="Type it again" style="margin-top:8px">
-    <p class="hint">Encrypts the file. Without one, anyone who has the file has
+    <p class="hint">Encrypts the backup. Without one, anyone who has it has
       every key to this server. A lost passphrase cannot be recovered.</p>
   </div>
   <button id="backupButton">Create backup</button>
@@ -110,12 +122,14 @@ ${schedulePanel()}
 
 <h2>Backups on this machine</h2>
 <div class="panel"><div id="backupList"><p class="hint" style="margin:0">Loading…</p></div>
+  <p class="hint" id="backupDisk" hidden style="margin:8px 0 0"></p>
   ${resultBox("listResult")}</div>
 
 ${heading("Restore a backup", "restore", RESTORE_HELP, "/backups/#restore")}
 <div class="panel">
-  <p style="margin:0">Extract the file on the machine you are restoring to, then
-    run <code>docker compose up -d</code> in the folder it makes. Press the
+  <p style="margin:0">Copy the backup to the machine you are restoring to,
+    extracting a downloaded file, then run <code>docker compose up -d</code>
+    in its folder. Press the
     <strong>i</strong> above for every step. The steps are also inside the
     file, in <code>RESTORE.txt</code>.</p>
 </div>`,
@@ -170,6 +184,11 @@ async function loadBackups() {
     '">Delete</button></div></div>'
   ).join("") || '<p class="hint" style="margin:0">No backups yet.</p>';
 
+  const disk = document.getElementById("backupDisk");
+  disk.hidden = state.files.length < 2;
+  disk.textContent = "Together they take " + formatBytes(state.diskBytes) +
+    " on this disk: attachments they share are stored once.";
+
   // One poll at a time, however often the ten-second refresh calls this.
   clearTimeout(window._backupPoll);
   if (state.running) window._backupPoll = setTimeout(loadBackups, 2000);
@@ -192,14 +211,19 @@ function reportBackup(last) {
   const name = (last.file || "").split("/").pop();
   showResult("backupResult", "Backup saved",
     "<p><code>" + file + "</code>" + (last.bytes ? " · " + formatBytes(last.bytes) : "") +
-    "</p><p>" + downloadLink(name) + "</p><ol>" +
+    "</p>" + (last.copied !== undefined
+      ? '<p class="hint">' + last.copied + " new attachments copied (" +
+        formatBytes(last.copiedBytes) + "), " + last.shared +
+        " shared with the previous backup.</p>"
+      : "") +
+    "<p>" + downloadLink(name) + "</p><ol>" +
     "<li>Copy it off this machine: press <strong>Download</strong> to save it to this " +
-    "computer's Downloads folder, or from your own computer run " +
-    "<code>scp you@your-server:/path/to/rift/" + file + " .</code> — better for a large " +
-    "file, because a download stops if the browser or SSH tunnel closes.</li>" +
+    "computer's Downloads folder as one file, or from your own computer run " +
+    "<code>scp -r you@your-server:/path/to/rift/" + file + " .</code> — better for a " +
+    "large backup, because a download stops if the browser or SSH tunnel closes.</li>" +
     (window._backupEncrypted
-      ? "<li>Keep the passphrase in a password manager. Without it this file cannot be opened.</li>"
-      : "<li>This file is not encrypted and holds every key to the server. Keep it " +
+      ? "<li>Keep the passphrase in a password manager. Without it this backup cannot be opened.</li>"
+      : "<li>This backup is not encrypted and holds every key to the server. Keep it " +
         "somewhere private.</li>") +
     (last.pruned.length
       ? "<li>To keep the newest backups only, " + last.pruned.length + " older " +
@@ -219,7 +243,7 @@ document.getElementById("backupList").addEventListener("click", async (event) =>
   if (!button) return;
   const name = button.dataset.delete;
   hideResult("listResult");
-  if (!confirm("Delete " + name + "?\\n\\nThe file is removed from this server for good. " +
+  if (!confirm("Delete " + name + "?\\n\\nThe backup is removed from this server for good. " +
     "Copies you downloaded or copied elsewhere are not affected.")) return;
 
   button.disabled = true;
@@ -227,8 +251,8 @@ document.getElementById("backupList").addEventListener("click", async (event) =>
   if (body.error) {
     button.disabled = false;
     showResult("listResult", "The backup was not deleted", errorBody(body.error,
-      "If the file belongs to root, delete it on the server: " +
-      "<code>sudo rm backups/" + escapeHtml(name) + "</code>"), true);
+      "If the backup belongs to root, delete it on the server: " +
+      "<code>sudo rm -r backups/" + escapeHtml(name) + "</code>"), true);
     return;
   }
   showResult("listResult", "Backup deleted",

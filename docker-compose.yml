@@ -74,6 +74,10 @@ services:
       # The edge runtime reads its functions from here; the console writes
       # them, including deleting ones a release removed.
       - functions:/srv/functions
+      # Storage's attachments. A backup reads them here, sharing each one an
+      # earlier backup already holds rather than copying it, and a restore
+      # writes them back.
+      - storage-data:/var/lib/storage
     working_dir: ${PWD}
     environment:
       # Deliberately minimal. Anything else the console needs it reads from

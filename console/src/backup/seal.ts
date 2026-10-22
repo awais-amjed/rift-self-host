@@ -9,6 +9,12 @@
  * reordered, and a flag on the last one so the file cannot be quietly cut
  * short. The key comes from the passphrase through PBKDF2-SHA-256.
  *
+ * Each attachment in a backup is sealed on its own, so that the next backup
+ * can share the file instead of copying it. PBKDF2 is deliberately slow, so a
+ * backup derives one key ([deriveSealKey]) and seals every attachment with
+ * it; each file still carries the salt in its header and opens with the
+ * passphrase alone.
+ *
  * Layout: MAGIC, salt (16), iterations (u32), chunk size (u32), nonce prefix
  * (8); then frames of [u32 ciphertext length][ciphertext with its 16-byte tag].
  */
@@ -39,6 +45,28 @@ export interface SealOptions {
   chunkBytes?: number;
 }
 
+/** A key derived once, to seal many files with one passphrase. */
+export interface SealKey {
+  key: CryptoKey;
+  salt: Uint8Array<ArrayBuffer>;
+  iterations: number;
+  chunkBytes: number;
+}
+
+export async function deriveSealKey(
+  passphrase: string,
+  options: SealOptions = {},
+): Promise<SealKey> {
+  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const iterations = options.iterations ?? DEFAULT_ITERATIONS;
+  return {
+    key: await deriveKey(passphrase, salt, iterations),
+    salt,
+    iterations,
+    chunkBytes: options.chunkBytes ?? DEFAULT_CHUNK_BYTES,
+  };
+}
+
 async function deriveKey(
   passphrase: string,
   salt: Uint8Array<ArrayBuffer>,
@@ -67,6 +95,11 @@ function nonceFor(prefix: Uint8Array, index: number): Uint8Array<ArrayBuffer> {
   return nonce;
 }
 
+/** Whether a file starting with [head] is sealed: its first bytes are the magic. */
+export function looksSealed(head: Uint8Array): boolean {
+  return head.length >= MAGIC.length && startsLikeMagic(head);
+}
+
 /** Whether [bytes] agree with the magic for as far as both go. */
 function startsLikeMagic(bytes: Uint8Array): boolean {
   const length = Math.min(bytes.length, MAGIC.length);
@@ -84,14 +117,19 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-/** Plaintext in, sealed bytes out. */
+/**
+ * Plaintext in, sealed bytes out: with a passphrase, or a key already derived
+ * from one. Every stream draws its own nonce prefix, so many files sealed with
+ * one key never share a nonce.
+ */
 export function sealStream(
-  passphrase: string,
+  secret: string | SealKey,
   options: SealOptions = {},
 ): TransformStream<Uint8Array, Uint8Array> {
-  const iterations = options.iterations ?? DEFAULT_ITERATIONS;
-  const chunkBytes = options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
-  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const derived = typeof secret === "string" ? null : secret;
+  const iterations = derived?.iterations ?? options.iterations ?? DEFAULT_ITERATIONS;
+  const chunkBytes = derived?.chunkBytes ?? options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
+  const salt = derived?.salt ?? crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const prefix = crypto.getRandomValues(new Uint8Array(PREFIX_BYTES));
   let key: CryptoKey;
   let pending: Uint8Array<ArrayBuffer> = new Uint8Array(0);
@@ -121,7 +159,8 @@ export function sealStream(
 
   return new TransformStream({
     async start(controller) {
-      key = await deriveKey(passphrase, salt, iterations);
+      key = derived?.key ??
+        await deriveKey(secret as string, salt, iterations);
       const header = new Uint8Array(HEADER_BYTES);
       header.set(MAGIC, 0);
       header.set(salt, MAGIC.length);
@@ -146,9 +185,17 @@ export function sealStream(
   });
 }
 
+/**
+ * Keys already derived while opening, by salt and iterations: a backup's
+ * attachments share a handful of salts, and deriving for each file would take
+ * half a second apiece.
+ */
+export type UnsealKeys = Map<string, CryptoKey>;
+
 /** Sealed bytes in, plaintext out. Throws [SealError] with a readable reason. */
 export function unsealStream(
   passphrase: string,
+  keys: UnsealKeys = new Map(),
 ): TransformStream<Uint8Array, Uint8Array> {
   let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(0);
   let key: CryptoKey | null = null;
@@ -207,7 +254,9 @@ export function unsealStream(
         }
         const salt = buffer.slice(MAGIC.length, MAGIC.length + SALT_BYTES);
         prefix = buffer.slice(MAGIC.length + SALT_BYTES + 8, HEADER_BYTES);
-        key = await deriveKey(passphrase, salt, iterations);
+        const known = `${iterations}:${salt.join(",")}`;
+        key = keys.get(known) ?? await deriveKey(passphrase, salt, iterations);
+        keys.set(known, key);
         buffer = buffer.slice(HEADER_BYTES);
       }
 
