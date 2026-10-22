@@ -41,7 +41,13 @@ COPY supabase/functions ./functions
 # Resolve and compile the dependency graph now, so a container that starts on a
 # machine with no outbound network still runs. Without this the first request
 # would try to fetch jose from npm.
-RUN deno cache /app/src/main.ts /app/src/migrations/cli.ts
+RUN deno cache /app/src/main.ts /app/src/migrations/cli.ts /app/src/reset_password.ts
+
+# `docker compose exec console reset-password`, for a lost console password.
+# Its own process, with no network and no docker: it writes one line of .env.
+RUN printf '#!/bin/sh\nexec deno run --allow-env --allow-read --allow-write /app/src/reset_password.ts "$@"\n' \
+    > /usr/local/bin/reset-password \
+  && chmod +x /usr/local/bin/reset-password
 
 # Reads and writes the project directory and the functions volume, runs psql
 # and docker, listens, and calls create_server through Kong. Enumerated rather

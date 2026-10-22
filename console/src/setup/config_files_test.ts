@@ -466,6 +466,23 @@ Deno.test("setup starts unfinished, and a second run can read its secrets back",
   assertEquals(read.consolePassword, written.secrets.consolePassword);
 });
 
+Deno.test("a setup begun from a hashed password writes the hash, not a blank", async () => {
+  const written = await context();
+  written.secrets.consolePassword = "";
+  written.secrets.consolePasswordHash = "pbkdf2-sha256:600000:00:00";
+  const env = parseEnv(renderEnv(written));
+  assertEquals(env.CONSOLE_PASSWORD, undefined);
+  assertEquals(env.CONSOLE_PASSWORD_HASH, "pbkdf2-sha256:600000:00:00");
+});
+
+Deno.test("a finished stack's secrets read back with no password in the clear", async () => {
+  // Rotation and the boot-time repairs read them; the console password is
+  // only a hash by then, and its absence must not stop either.
+  const env = parseEnv(renderEnv(await context()));
+  delete env.CONSOLE_PASSWORD;
+  assertEquals(secretsFromEnv(env).consolePassword, "");
+});
+
 Deno.test("the gateway answers its own address and /healthz", async () => {
   const kong = render(
     await Deno.readTextFile(new URL("../../templates/api/kong.yml", import.meta.url)),

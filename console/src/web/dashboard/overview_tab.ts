@@ -91,7 +91,8 @@ const RESTART_HELP = `
   they are created. Recreate the one service that uses the setting:</p>
 <p><code>docker compose --profile full up -d --force-recreate --no-deps &lt;service&gt;</code></p>
 <p>The console password is the exception. It is read at every sign-in, so a new
-  <code>CONSOLE_PASSWORD</code> works straight away.</p>`;
+  <code>CONSOLE_PASSWORD</code> works straight away, and is then replaced by a
+  hash.</p>`;
 
 /** Release, health, containers and the restart button. */
 export function overviewTab(): Tab {

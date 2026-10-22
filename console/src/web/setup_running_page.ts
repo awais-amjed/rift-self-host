@@ -15,9 +15,10 @@ export function setupRunningPage(): string {
   <p>Reloading the page doesn't stop it. This page checks again every few
     seconds, and shows the sign-in page once setup has finished.</p>
   <p class="hint">The console password and your invite link were on the page
-    that started setup. If you closed it, the password is in
-    <code>docker compose logs console</code>, and you can make a new invite
-    from the <strong>Servers</strong> tab once you're signed in.</p>
+    that started setup. If you closed it, run
+    <code>docker compose exec console reset-password</code> once setup has
+    finished for a new password, and make a new invite from the
+    <strong>Servers</strong> tab once you're signed in.</p>
 </div>`,
     `setTimeout(() => location.reload(), 4000);`,
   );

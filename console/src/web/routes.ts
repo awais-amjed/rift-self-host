@@ -9,12 +9,11 @@ import { setting } from "../env_file.ts";
 import { fields, optionsFromEnv } from "../setup/options.ts";
 import { defaultPaths } from "../setup/run.ts";
 import { sealedBackupPresent } from "../backup/restore.ts";
+import { storedPasswordHash, verifyPassword } from "../console_password.ts";
 import {
   closeSession,
-  configuredPassword,
   isAuthenticated,
   openSession,
-  passwordMatches,
   sessionCookie,
   tokenFrom,
 } from "./auth.ts";
@@ -66,12 +65,12 @@ export async function handle(request: Request): Promise<Response> {
   if (path === "/healthz") return new Response("ok");
 
   if (path === "/login" && request.method === "POST") {
-    const expected = configuredPassword();
+    const expected = await storedPasswordHash();
     const form = await request.formData();
     const attempt = String(form.get("password") ?? "");
 
-    if (expected !== null && await passwordMatches(attempt, expected)) {
-      return redirect("/", { "Set-Cookie": sessionCookie(openSession()) });
+    if (expected !== null && await verifyPassword(attempt, expected)) {
+      return redirect("/", { "Set-Cookie": sessionCookie(openSession(expected)) });
     }
     return html(loginPage(true), { "Set-Cookie": sessionCookie(null) });
   }
@@ -85,13 +84,12 @@ export async function handle(request: Request): Promise<Response> {
   // An unfinished setup counts as no password too: setup writes one in its
   // first step and only shows it in its last, so asking for it in between
   // locks the operator out of their own setup.
-  const password = setupUnfinished() ? null : configuredPassword();
+  const password = setupUnfinished() ? null : await storedPasswordHash();
   if (password === null && !boundToLoopback()) {
     return html(exposedPage());
   }
 
-  const needsPassword = password !== null;
-  if (needsPassword && !isAuthenticated(request)) {
+  if (password !== null && !isAuthenticated(request, password)) {
     if (path === "/") return html(loginPage(false));
     return json({ error: "Not signed in" }, 401);
   }

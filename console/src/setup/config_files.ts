@@ -151,10 +151,15 @@ export function renderEnv(context: RenderContext): string {
     `LIVEKIT_API_KEY=${secrets.livekitApiKey}`,
     `LIVEKIT_API_SECRET=${secrets.livekitApiSecret}`,
     "",
-    "# The console's own password, and where it listens. Moving it off the",
-    "# loopback exposes an interface that can replace any container on this",
-    "# host; put it behind a tunnel instead.",
-    `CONSOLE_PASSWORD=${secrets.consolePassword}`,
+    "# The console's own password, and where it listens. The password is in the",
+    "# clear only until setup finishes; then the console keeps just a hash, in",
+    "# CONSOLE_PASSWORD_HASH. To choose a new one, write CONSOLE_PASSWORD= here",
+    "# and it is hashed the next time the console reads this file. Moving the",
+    "# console off the loopback exposes an interface that can replace any",
+    "# container on this host; put it behind a tunnel instead.",
+    secrets.consolePassword
+      ? `CONSOLE_PASSWORD=${secrets.consolePassword}`
+      : `CONSOLE_PASSWORD_HASH=${secrets.consolePasswordHash}`,
     `CONSOLE_BIND=${context.consoleBind}`,
     `CONSOLE_PORT=${context.consolePort}`,
     "",
@@ -228,7 +233,10 @@ export function secretsFromEnv(values: Record<string, string>): StackSecrets {
     realtimeEncryptionKey: required("REALTIME_DB_ENC_KEY"),
     livekitApiKey: required("LIVEKIT_API_KEY"),
     livekitApiSecret: required("LIVEKIT_API_SECRET"),
-    consolePassword: required("CONSOLE_PASSWORD"),
+    // Neither is required: once setup has finished the password is only a
+    // hash, and nothing but setup reads either back.
+    consolePassword: values.CONSOLE_PASSWORD ?? "",
+    consolePasswordHash: values.CONSOLE_PASSWORD_HASH ?? "",
     signingKeys: { signing, verifying, kid },
     publishableKey: required("SUPABASE_PUBLISHABLE_KEY"),
     secretKey: required("SUPABASE_SECRET_KEY"),

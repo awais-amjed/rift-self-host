@@ -12,17 +12,22 @@ const CREDENTIALS_HELP = `
     Keep it out of screenshots anyway.</li>
 </ul>
 <h3>Where the other keys are</h3>
-<p>Every other key and password — the database password, the signing keys, the
-  voice credentials and the console password — is in <code>.env</code> beside
+<p>Every other key and password — the database password, the signing keys and
+  the voice credentials — is in <code>.env</code> beside
   <code>docker-compose.yml</code>. Anyone who can read that file controls this
-  server. Keep it private, and never put it in git or a public backup.</p>
+  server. Keep it private, and never put it in git or a public backup. The
+  console password is the exception: <code>.env</code> keeps only a hash of
+  it.</p>
 <h3>Change the console password</h3>
 <ol>
-  <li>Open <code>.env</code> and set <code>CONSOLE_PASSWORD=</code> to a new,
-    long password.</li>
-  <li>Save the file. The new password works at the next sign-in, with no
-    restart.</li>
-</ol>`;
+  <li>Beside <code>docker-compose.yml</code>, run
+    <code>docker compose exec console reset-password</code>.</li>
+  <li>It prints a new password once. Save it in a password manager.</li>
+</ol>
+<p>Everyone signed in to the console is signed out. To choose the password
+  yourself instead, add <code>CONSOLE_PASSWORD=</code> and your password to
+  <code>.env</code>: it works at the next sign-in, and the console then replaces
+  that line with a hash.</p>`;
 
 const ROTATE_HELP = `
 <p>Replace a key when it may have leaked: <code>.env</code> shown in a

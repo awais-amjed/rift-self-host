@@ -1,3 +1,4 @@
+import { RESET_COMMAND } from "../banner.ts";
 import { shell } from "./shell.ts";
 
 /** The login form. */
@@ -5,10 +6,9 @@ export function loginPage(failed: boolean): string {
   return shell(
     "Rift console",
     `<h1>Rift console</h1>
-<p class="sub">Setup showed this password once, and printed it with
-<code>docker compose logs console</code>. If the log has rotated away it is
-still <code>CONSOLE_PASSWORD</code> in the <code>.env</code> beside your
-<code>docker-compose.yml</code>.</p>
+<p class="sub">Setup showed this password once. Lost it? Beside your
+<code>docker-compose.yml</code>, run
+<code>${RESET_COMMAND}</code> for a new one.</p>
 <form method="post" action="/login" class="panel">
   <div class="field">
     <label for="password">Console password</label>

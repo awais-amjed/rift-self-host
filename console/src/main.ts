@@ -9,7 +9,7 @@ import { announce, LISTEN_PORT } from "./banner.ts";
 import { startScheduler } from "./backup/scheduler.ts";
 import { startTopicRuleWatch } from "./setup/topic_rules.ts";
 import { isDockerReachable } from "./docker.ts";
-import { configuredPassword } from "./web/auth.ts";
+import { storedPasswordHash } from "./console_password.ts";
 import { prepareStack } from "./boot.ts";
 import { defaultPaths } from "./setup/run.ts";
 import { handle } from "./web/routes.ts";
@@ -27,7 +27,14 @@ async function main(): Promise<void> {
     );
   }
 
-  announce({ password: configuredPassword(), configured });
+  // A plain password left in .env — by a stack set up before the console kept
+  // a hash, by hand, or by a restored backup — is hashed now rather than at
+  // the next sign-in, so it does not sit in the file meanwhile.
+  await storedPasswordHash().catch((error) =>
+    console.error("Could not hash the console password:", error)
+  );
+
+  announce({ configured });
 
   // Everything a configured stack needs each time the console starts: missing
   // configuration and endpoints put back, a stack that was never brought up

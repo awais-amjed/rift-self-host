@@ -98,27 +98,33 @@ export function updateSetting(
  *
  * Every line naming a key is rewritten, not just the first: compose takes the
  * last one, so a duplicate left behind is the one that wins.
+ *
+ * A null value removes the key's lines instead, so swapping one setting for
+ * another (the console password for its hash) is one write as well.
  */
 export async function updateSettings(
-  values: Record<string, string>,
+  values: Record<string, string | null>,
   directory: string = projectDir(),
 ): Promise<void> {
   const path = join(directory, ".env");
   const text = await Deno.readTextFile(path);
 
   const seen = new Set<string>();
-  const lines = text.split("\n").map((line) => {
+  const lines = text.split("\n").flatMap((line) => {
     const trimmed = line.trim();
     const separator = trimmed.indexOf("=");
-    if (trimmed.startsWith("#") || separator === -1) return line;
+    if (trimmed.startsWith("#") || separator === -1) return [line];
     const name = trimmed.slice(0, separator).trim();
-    if (!Object.hasOwn(values, name)) return line;
+    if (!Object.hasOwn(values, name)) return [line];
     seen.add(name);
-    return `${name}=${values[name]}`;
+    const value = values[name];
+    return value === null ? [] : [`${name}=${value}`];
   });
 
   // Before the final newline rather than after it, so the file still ends in one.
-  const missing = Object.keys(values).filter((name) => !seen.has(name));
+  const missing = Object.keys(values).filter((name) =>
+    !seen.has(name) && values[name] !== null
+  );
   const end = lines.at(-1) === "" ? lines.length - 1 : lines.length;
   lines.splice(end, 0, ...missing.map((name) => `${name}=${values[name]}`));
 

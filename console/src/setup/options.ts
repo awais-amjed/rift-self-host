@@ -346,10 +346,13 @@ export function optionsFromEnv(directory?: string): SetupOptions {
   };
 }
 
-/** Whether a hand-written `.env` already supplies a console password. */
+/**
+ * Whether a hand-written `.env` already supplies a console password, in the
+ * clear or already hashed.
+ */
 export function envHasPassword(directory?: string): boolean {
-  const value = readEnvFile(directory).CONSOLE_PASSWORD;
-  return value !== undefined && value.length > 0;
+  const values = readEnvFile(directory);
+  return Boolean(values.CONSOLE_PASSWORD || values.CONSOLE_PASSWORD_HASH);
 }
 
 /** Complain about anything that would produce a stack that cannot start. */

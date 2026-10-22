@@ -1,13 +1,15 @@
 /**
- * The console's own address and password, on a terminal.
+ * The console's own address, on a terminal — and never its password.
  *
- * Printed at startup and again the moment setup generates a password. The
- * second call is not a nicety: the container starts *before* setup exists, so
- * the startup banner necessarily says there is no password — and if nothing
- * ever corrected it, `docker compose logs console` went on saying so after a
- * password had been created. The instruction on the login page pointed at a
- * place the password was not, and the operator was locked out of their own
- * console with no way in but reading .env by hand.
+ * It used to print the password, on every start, so anybody who could read
+ * `docker compose logs` had the console, and the Docker socket behind it. Setup
+ * shows the password once, on the page, and the console keeps only a hash
+ * (console_password.ts); the banner says how to get a new one instead.
+ *
+ * Printed at startup and again when setup finishes. The second call is not a
+ * nicety: the container starts *before* setup exists, so the startup banner
+ * necessarily says there is no password, and if nothing corrected it the log
+ * went on saying so after setup had made one.
  */
 import { setting } from "./env_file.ts";
 
@@ -26,24 +28,19 @@ export function consolePort(): number {
   return Number(setting("CONSOLE_PORT") ?? String(LISTEN_PORT));
 }
 
-/**
- * Print the banner.
- *
- * [password] is passed in rather than read back, so the call made at the end
- * of setup does not depend on the write to .env having landed and been
- * re-read first.
- */
-export function announce(
-  options: { password?: string | null; configured: boolean },
-): void {
+/** The command that replaces a lost console password. */
+export const RESET_COMMAND = "docker compose exec console reset-password";
+
+/** Print the banner. */
+export function announce(options: { configured: boolean }): void {
   const rule = "\u2500".repeat(58);
 
   console.log(`\n${rule}`);
   console.log("  Rift console");
   console.log(`  http://localhost:${consolePort()}`);
-  if (options.password) {
-    console.log(`  password: ${options.password}`);
-  } else if (!options.configured) {
+  if (options.configured) {
+    console.log(`  Lost the password? ${RESET_COMMAND}`);
+  } else {
     console.log("  No password yet - set one up at the address above.");
   }
   console.log(`${rule}\n`);

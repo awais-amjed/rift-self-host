@@ -93,8 +93,9 @@ ${
 
   <h2>Console password</h2>
   <p>Save this now. You will need it to reload this page as a dashboard, and it
-     is not shown again — though it stays in <code>.env</code>, and
-     <code>docker compose logs console</code> prints it too.</p>
+     is not shown again: the console keeps only a hash of it. If you lose it,
+     run <code>docker compose exec console reset-password</code> for a new
+     one.</p>
   <div class="secret"><div class="mono" id="issuedPassword"></div></div>
 
   <div id="moving" style="display:none">
@@ -197,7 +198,10 @@ form.addEventListener("submit", async (event) => {
       // and getElementById returns the first match — so this wrote
       // textContent onto an <input>, which shows nothing, and the panel
       // stayed blank while the password sat in the log.
-      document.getElementById("issuedPassword").textContent = event.consolePassword || "";
+      // Blank when the password came from a hand-written .env: the operator's
+      // own, already hashed before setup began.
+      document.getElementById("issuedPassword").textContent =
+        event.consolePassword || "The one you put in .env.";
       if (event.consoleMovingTo) {
         const to = event.consoleMovingTo;
         const host = to.bind === "127.0.0.1" ? "localhost"

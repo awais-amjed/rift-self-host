@@ -15,7 +15,8 @@
  * happening. Pulling the images alone can take minutes on a small VPS, and a
  * blank screen for that long reads as a hang.
  */
-import { readEnvFile, setting, updateSetting } from "../env_file.ts";
+import { readEnvFile, updateSetting } from "../env_file.ts";
+import { storedPasswordHash } from "../console_password.ts";
 import { type PostgresTarget, waitUntilReachable } from "../postgres.ts";
 import { restartService, startStack } from "../docker.ts";
 import { applyPlan, planMigrations } from "../migrations/runner.ts";
@@ -116,12 +117,15 @@ export async function runSetup(
   // An operator's own choice wins over a generated one, in that order of
   // preference: what they typed, then what a hand-written .env already said,
   // then a fresh random string. The middle case is what lets somebody deploy
-  // from a script and still reach the console afterwards.
+  // from a script and still reach the console afterwards — and the console
+  // may already have hashed that one, having read the file before setup ran.
   const chosen = request.consolePassword.trim();
   if (chosen.length > 0) {
     secrets.consolePassword = chosen;
-  } else if (envHasPassword(paths.projectDir)) {
-    secrets.consolePassword = setting("CONSOLE_PASSWORD") ?? secrets.consolePassword;
+    secrets.consolePasswordHash = "";
+  } else if (previous.RIFT_SETUP !== "running" && envHasPassword(paths.projectDir)) {
+    secrets.consolePassword = previous.CONSOLE_PASSWORD ?? "";
+    secrets.consolePasswordHash = previous.CONSOLE_PASSWORD_HASH ?? "";
   }
 
   const context = { ...request, secrets };
@@ -227,6 +231,10 @@ export async function runSetup(
   // is.
   await writeState(database, APPLIED_VERSION, imageVersion());
   await updateSetting("RIFT_SETUP", "done", paths.projectDir);
+  // The password has been in .env in the clear since the first step, because
+  // a setup that stopped part-way must still be able to show it at the end.
+  // From here only its hash is kept.
+  await storedPasswordHash(paths.projectDir);
 
   return { secrets, server };
 }

@@ -29,7 +29,8 @@ export function exposedPage(): string {
   <p>Give it a password before it is reachable, by putting one in
      <code>.env</code> beside your <code>docker-compose.yml</code>:</p>
   <div class="secret"><div class="mono">CONSOLE_PASSWORD=something-long-and-random</div></div>
-  <p class="hint">Then <code>docker compose up -d --force-recreate console</code>.</p>
+  <p class="hint">Then <code>docker compose up -d --force-recreate console</code>.
+     It replaces that line with a hash when it starts.</p>
 </div>`,
   );
 }

@@ -26,8 +26,14 @@ export interface StackSecrets {
   realtimeEncryptionKey: string;
   livekitApiKey: string;
   livekitApiSecret: string;
-  /** What the operator types to open the console. */
+  /**
+   * What the operator types to open the console. In `.env` in the clear only
+   * until setup finishes, which then hashes it (console_password.ts); blank
+   * when the `.env` setup started from held a hash instead.
+   */
   consolePassword: string;
+  /** That hash, when setup started from one. Blank otherwise. */
+  consolePasswordHash: string;
 
   /**
    * The EC keypair GoTrue signs sessions with.
@@ -200,5 +206,6 @@ export async function generateSecrets(): Promise<StackSecrets> {
     // otherwise, with an Elixir stacktrace rather than a sentence.
     realtimeEncryptionKey: randomString(16),
     consolePassword: randomString(24),
+    consolePasswordHash: "",
   };
 }

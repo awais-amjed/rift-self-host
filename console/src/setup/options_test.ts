@@ -60,6 +60,12 @@ Deno.test("a password in .env is never echoed into the form", async () => {
   await Deno.remove(directory, { recursive: true });
 });
 
+Deno.test("a password the console has already hashed still counts as supplied", async () => {
+  const directory = await projectWith("CONSOLE_PASSWORD_HASH=pbkdf2-sha256:1:00:00\n");
+  assert(envHasPassword(directory));
+  await Deno.remove(directory, { recursive: true });
+});
+
 Deno.test("every field the form renders is a real option", () => {
   // The form is generated from this list, so a key that is not on
   // SetupOptions would render an input nothing reads.

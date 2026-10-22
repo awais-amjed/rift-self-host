@@ -115,3 +115,13 @@ Deno.test("writing leaves nothing beside .env", async () => {
   assertEquals(names, [".env"]);
   await Deno.remove(directory, { recursive: true });
 });
+
+Deno.test("a null value removes every line for the key, and adds none", async () => {
+  const directory = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${directory}/.env`, "A=1\nB=2\nA=3\n");
+
+  await updateSettings({ A: null, C: "4", D: null }, directory);
+
+  assertEquals(await Deno.readTextFile(`${directory}/.env`), "B=2\nC=4\n");
+  await Deno.remove(directory, { recursive: true });
+});

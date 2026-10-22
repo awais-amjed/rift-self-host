@@ -11,57 +11,26 @@
  * restart is the correct behaviour rather than a limitation: the console is
  * restarted by upgrades, and an upgrade is a fine moment to have to log in.
  */
-import { timingSafeEqual } from "jsr:@std/crypto@1/timing-safe-equal";
 import { encodeHex } from "jsr:@std/encoding@1/hex";
-import { setting } from "../env_file.ts";
 
 /** How long a session lasts without being used. */
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const COOKIE_NAME = "rift_console";
 
-/** Live sessions, by token. */
-const sessions = new Map<string, number>();
-
 /**
- * The password setup wrote, or null before it has run.
- *
- * From the `.env` file rather than this process's environment, so a password
- * generated during setup protects the console immediately — it cannot restart
- * itself to pick up a new environment, being the container that would be
- * replaced.
+ * Live sessions, by token: when each expires, and the password hash it was
+ * opened under. A session ends with its password, so `reset-password` after a
+ * leak also signs out whoever used the leaked one.
  */
-export function configuredPassword(): string | null {
-  return setting("CONSOLE_PASSWORD") ?? null;
-}
+const sessions = new Map<string, { expiry: number; hash: string }>();
 
-/**
- * Compare an attempt against the real password without leaking a prefix.
- *
- * Both sides are hashed first, so the comparison is over two fixed 32-byte
- * digests. `timingSafeEqual` alone would short-circuit on differing lengths
- * and tell an attacker how long the password is; that is a small leak, but
- * hashing costs nothing here and removes the question.
- */
-export async function passwordMatches(
-  attempt: string,
-  expected: string,
-): Promise<boolean> {
-  const [a, b] = await Promise.all([digest(attempt), digest(expected)]);
-  return timingSafeEqual(a, b);
-}
-
-async function digest(value: string): Promise<Uint8Array> {
-  const bytes = new TextEncoder().encode(value);
-  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-}
-
-/** Start a session and return the cookie to set. */
-export function openSession(): string {
+/** Start a session under the password [hash] and return its token. */
+export function openSession(hash: string): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   const token = encodeHex(bytes);
-  sessions.set(token, Date.now() + SESSION_TTL_MS);
+  sessions.set(token, { expiry: Date.now() + SESSION_TTL_MS, hash });
   return token;
 }
 
@@ -82,19 +51,19 @@ export function tokenFrom(request: Request): string | null {
   return null;
 }
 
-/** True if [request] carries a live session. */
-export function isAuthenticated(request: Request): boolean {
+/** True if [request] carries a live session, opened under the password [hash]. */
+export function isAuthenticated(request: Request, hash: string): boolean {
   const token = tokenFrom(request);
   if (!token) return false;
 
-  const expiry = sessions.get(token);
-  if (expiry === undefined) return false;
-  if (expiry < Date.now()) {
+  const session = sessions.get(token);
+  if (session === undefined) return false;
+  if (session.expiry < Date.now() || session.hash !== hash) {
     sessions.delete(token);
     return false;
   }
 
-  sessions.set(token, Date.now() + SESSION_TTL_MS);
+  session.expiry = Date.now() + SESSION_TTL_MS;
   return true;
 }
 

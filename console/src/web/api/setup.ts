@@ -73,11 +73,10 @@ export const setupRoutes: ApiRoutes = async (request, url, paths) => {
         running = false;
       }
       console.log("[setup] finished");
-      // Both channels, because the operator is on the page and the login
-      // page sends them to the log. Until this existed the log's last word
-      // was the startup banner's "no password yet", printed before setup
-      // could possibly have made one.
-      announce({ password: result.secrets.consolePassword, configured: true });
+      // The log's last word was otherwise the startup banner's "no password
+      // yet", printed before setup could possibly have made one. The password
+      // itself goes to the page alone.
+      announce({ configured: true });
       // Decided before the answer is sent, carried out a few seconds after.
       const moving = await moveConsoleIfChanged();
       send({
