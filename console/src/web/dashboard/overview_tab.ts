@@ -27,10 +27,16 @@ const RELEASE_HELP = `
   <code>docker-compose.yml.new</code> and shows what differs. Either replace
   yours with it, or bring its changes into yours and press
   <strong>Update, keeping my file</strong>.</p>
+<h3>Applying …</h3>
+<p>Each time the console starts, after an update or any restart, it brings
+  the database and endpoints up to its release by itself. Meanwhile this panel
+  says <strong>Applying</strong> and the step it is on, and the two version
+  numbers differ. Wait: there is nothing to press.</p>
 <h3>Apply this release</h3>
-<p>This button appears only when something is still waiting, usually because an
-  update was interrupted. Press it and wait. If it shows an error, run
-  <code>docker compose logs console</code> for the full reason.</p>
+<p>This button appears only once the console has finished, when that failed or
+  something is still waiting, usually because it was interrupted. Press it and
+  wait. If it shows an error, run <code>docker compose logs console</code> for
+  the full reason.</p>
 <h3>Changed after running</h3>
 <p>If this row appears, a database change that already ran here was edited
   afterwards, and the console will not apply anything on top of it. Official
@@ -115,7 +121,9 @@ ${heading("Release", "release", RELEASE_HELP, "/updating/")}
 <div class="panel">
   <table id="version"><tr><td class="name">Loading…</td></tr></table>
   ${updatePanel()}
+  <p id="preparingBox" class="hint" hidden style="margin-top:14px"></p>
   <div id="upgradeBox" hidden style="margin-top:14px">
+    <p id="preparingFailed" class="warn" hidden style="margin:0 0 14px"></p>
     <button id="applyUpgrade">Apply this release</button>
     <p class="hint">This happens by itself when the console starts. Press it if
       that was interrupted, or left a reload undone.</p>
@@ -167,8 +175,33 @@ function renderHealth(state) {
   setBadge("overview", broken);
 }
 
+/** Set while the console is applying its release by itself, to look again soon. */
+let versionTimer = null;
+
 async function loadVersion() {
   const v = await (await fetch("/api/version")).json();
+  // While the console applies its release by itself — after an update, or any
+  // start — the page says so and keeps the button back: pressed now it would
+  // be refused, and a waiting migration is not yet a problem.
+  const preparing = v.preparing || { running: false };
+  const preparingBox = document.getElementById("preparingBox");
+  preparingBox.hidden = !preparing.running;
+  if (preparing.running) {
+    preparingBox.innerHTML = "<strong>Applying " +
+      escapeHtml(v.imageVersion || "this release") + "…</strong> " +
+      escapeHtml(preparing.step || "Getting the stack ready") +
+      ". The console does this by itself; it can take a few minutes.";
+  }
+  clearTimeout(versionTimer);
+  if (preparing.running) versionTimer = setTimeout(loadVersion, 3000);
+  const failed = document.getElementById("preparingFailed");
+  failed.hidden = !preparing.failure;
+  if (preparing.failure) {
+    failed.innerHTML = "<span>Applying this release when the console started " +
+      "failed:<br><code>" + escapeHtml(preparing.failure) + "</code><br>Check that " +
+      "every container is green, then press the button.</span>";
+  }
+
   const rows = [];
   if (v.unknown) {
     rows.push(["Release", "Could not be read — the database may be down."]);
@@ -188,7 +221,10 @@ async function loadVersion() {
   document.getElementById("version").innerHTML = rows
     .map(([k, val]) => '<tr><td class="name">' + k + "</td><td>" + val + "</td></tr>")
     .join("");
-  document.getElementById("upgradeBox").hidden = v.unknown || !v.needed;
+  // A failed start leaves the release unrecorded, so it is still needed; once
+  // the button has applied it, the failure is no longer worth showing.
+  document.getElementById("upgradeBox").hidden = preparing.running || v.unknown ||
+    !v.needed;
 }
 
 document.getElementById("applyUpgrade").addEventListener("click", async (event) => {

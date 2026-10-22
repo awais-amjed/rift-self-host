@@ -71,9 +71,64 @@ export function stepReporter(
   };
 }
 
-export async function prepareStack(
+// ── What the dashboard shows meanwhile ────────────────────────────────────
+
+/**
+ * What [prepareStack] is doing, for the Overview tab.
+ *
+ * An update ends with a new console applying its release here, while the page
+ * that pressed Update has already reloaded. Seeing work waiting and nothing
+ * saying why, the page offered Apply this release, which reads as a step the
+ * update left to the operator and, pressed, starts a second apply beside the
+ * first. With this the page says what is happening, and offers the button
+ * only once the console has finished: when something failed, or is still
+ * waiting.
+ */
+export interface Preparing {
+  running: boolean;
+  /** The step under way, while running. */
+  step: string | null;
+  /** Why the last run stopped, when it did. */
+  failure: string | null;
+}
+
+let preparing: Preparing = { running: false, step: null, failure: null };
+
+export function preparingState(): Preparing {
+  return { ...preparing };
+}
+
+/** Get the stack ready for this release, saying what it is doing in [preparingState]. */
+export function prepareStack(
   paths: Paths,
   report: (step: string) => void = () => {},
+): Promise<void> {
+  return tracked((step) => prepare(paths, step), report);
+}
+
+/** Run [work], keeping [preparingState] to what it reports and how it ended. */
+export async function tracked(
+  work: (report: (step: string) => void) => Promise<void>,
+  report: (step: string) => void = () => {},
+): Promise<void> {
+  preparing = { running: true, step: null, failure: null };
+  try {
+    await work((step) => {
+      preparing.step = step;
+      report(step);
+    });
+  } catch (error) {
+    preparing.failure = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    preparing.running = false;
+    preparing.step = null;
+  }
+}
+
+async function prepare(
+  paths: Paths,
+  report: (step: string) => void,
 ): Promise<void> {
   // The log and, during a restore from the console page, the page itself.
   const say = stepReporter(report);
@@ -154,8 +209,7 @@ export async function prepareStack(
 
   const target = targetFromEnv();
   if (!await waitUntilReachable(target, DATABASE_TIMEOUT_MS)) {
-    console.error("Postgres did not come up. `docker compose logs db` will say why.");
-    return;
+    throw new Error("Postgres did not come up. `docker compose logs db` will say why.");
   }
 
   if (!await hasRiftSchema(target)) {
@@ -204,17 +258,19 @@ export async function prepareStack(
 
   const work = await pendingWork(target, paths);
   if (work.needed) {
-    say(
+    console.log(
       `Applying ${work.imageVersion} (this stack is at ` +
         `${work.appliedVersion ?? "an unrecorded version"})`,
     );
+    // The page hears each step as it starts, the log as it finishes.
     const result = await applyUpgrade(target, paths, (progress) => {
-      if (progress.done) say(`  ${progress.step}`);
+      if (progress.done) console.log(`  ${progress.step}`);
+      else report(progress.step);
     });
     if (!result.endpointsRestarted) {
       say(
         "  Endpoints were installed but not reloaded — compose was still busy. " +
-          "They take effect within a minute, or press Apply in the console.",
+          "They take effect within a minute, or press Restart the stack in the console.",
       );
     }
     say(`Now at ${result.version}.`);

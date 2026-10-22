@@ -5,6 +5,7 @@
 import { setting } from "../../env_file.ts";
 import { runChecks } from "../../health.ts";
 import { applyUpgrade, pendingWork } from "../../upgrade.ts";
+import { preparingState } from "../../boot.ts";
 import { livekitUrl, publicUrl } from "../../servers.ts";
 import {
   DEFAULT_API_PORT,
@@ -25,6 +26,9 @@ import { targetFromEnv } from "../../postgres.ts";
 import { type ApiRoutes, failure, json } from "../responses.ts";
 import { portSetting, setupWasLocal } from "../stack_state.ts";
 import { visibleSecrets } from "./security.ts";
+
+/** True while Apply this release is running. */
+let upgrading = false;
 
 export const statusRoutes: ApiRoutes = async (request, url, paths) => {
   const path = url.pathname;
@@ -83,14 +87,26 @@ export const statusRoutes: ApiRoutes = async (request, url, paths) => {
 
   if (path === "/api/version") {
     const work = await pendingWork(targetFromEnv(), paths).catch(() => null);
-    return json(work === null ? { unknown: true } : work);
+    const preparing = preparingState();
+    return json(work === null ? { unknown: true, preparing } : { ...work, preparing });
   }
 
   if (path === "/api/upgrade" && request.method === "POST") {
+    // Two applies at once would run the same migrations side by side.
+    if (preparingState().running) {
+      return json({
+        error:
+          "The console is still applying this release by itself. Wait for it to finish.",
+      }, 409);
+    }
+    if (upgrading) return json({ error: "The release is already being applied." }, 409);
+    upgrading = true;
     try {
       return json(await applyUpgrade(targetFromEnv(), paths));
     } catch (error) {
       return failure("upgrade", error);
+    } finally {
+      upgrading = false;
     }
   }
 
