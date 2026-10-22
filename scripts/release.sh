@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Makes a release of the console image: sets VERSION, names that version as the
 # console in docker-compose.yml, records the file in the list of published ones
-# (scripts/known_compose.sh), commits the three and tags the commit.
+# (scripts/known_compose.sh), commits them and tags the commit.
 #
 #   scripts/release.sh 1.0.0                 # a release
 #   scripts/release.sh 1.1.0-beta.1          # a pre-release: anything with a `-`
@@ -44,7 +44,10 @@ sed -i -E "s|(ghcr\.io/awais-amjed/rift-console:)[^}[:space:]]+|\1$version|" doc
 grep -q "rift-console:$version}" docker-compose.yml ||
   { git checkout -q -- VERSION docker-compose.yml; echo "Could not name the console in docker-compose.yml." >&2; exit 1; }
 scripts/known_compose.sh >/dev/null
-git commit -q -m "Release $version" -- VERSION docker-compose.yml console/known-compose.sha256
+# Added rather than named to commit: this release's copy in known-compose/ is a
+# new file, and a path given to commit takes only files git already tracks.
+git add -- VERSION docker-compose.yml console/known-compose.sha256 console/known-compose
+git commit -q -m "Release $version"
 # An empty message (the editor closed without notes) refuses the tag; take the
 # commit back with it, so a second try starts from where this one did.
 if ! git tag -a "v$version" ${notes:+-F "$notes"}; then
