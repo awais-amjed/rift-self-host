@@ -6,7 +6,8 @@ export const updateRoutes: ApiRoutes = async (request, url) => {
   const path = url.pathname;
 
   if (path === "/api/update" && request.method === "GET") {
-    return json(await updateStatus());
+    // Check now: ?fresh=1 asks GitHub again unless it was asked a minute ago.
+    return json(await updateStatus(url.searchParams.get("fresh") === "1"));
   }
 
   if (path === "/api/update" && request.method === "POST") {

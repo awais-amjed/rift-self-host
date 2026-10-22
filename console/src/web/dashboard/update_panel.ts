@@ -7,6 +7,10 @@ import { resultBox } from "./help.ts";
  */
 export function updatePanel(): string {
   return `<table id="updateInfo"></table>
+  <p class="hint" id="checkedRow" hidden style="margin-top:8px">
+    <span id="checkedAgo"></span>
+    <button class="small quiet" id="checkNow" type="button">Check now</button>
+  </p>
   <div id="updateBox" hidden style="margin-top:14px">
     <div id="updateNotes"></div>
     <button id="update">Update</button>
@@ -29,12 +33,19 @@ const COMPOSE_STATES = {
 /// The release the Update button names, and the one it installs.
 let updateTarget = null;
 
+/// When the console last asked GitHub, on this browser's clock.
+let checkedAt = null;
+
 /// Asked once per page load, not every ten seconds: the console asks GitHub,
-/// which allows sixty requests an hour.
-async function loadUpdate() {
-  const res = await fetch("/api/update").catch(() => null);
+/// which allows sixty requests an hour, and remembers the answer for one.
+/// [fresh] is Check now, which asks again unless it asked a minute ago.
+async function loadUpdate(fresh) {
+  const res = await fetch("/api/update" + (fresh ? "?fresh=1" : "")).catch(() => null);
   if (!res || !res.ok) return;
   const u = await res.json();
+  checkedAt = Date.now() - u.checkedSecondsAgo * 1000;
+  document.getElementById("checkedRow").hidden = !!u.foreignImage;
+  showChecked();
   const rows = [];
   if (u.foreignImage) {
     rows.push(["Updates", "This stack runs a console image of its own (" +
@@ -61,6 +72,22 @@ async function loadUpdate() {
   updateTarget = u.target;
   document.getElementById("update").textContent = "Update to " + (u.target || "");
   document.getElementById("updateBox").hidden = !u.target;
+}
+
+function showChecked() {
+  if (checkedAt === null) return;
+  const minutes = Math.floor((Date.now() - checkedAt) / 60000);
+  document.getElementById("checkedAgo").textContent = "Checked " +
+    (minutes < 1 ? "just now." : minutes < 60 ? minutes + " min ago." : "over an hour ago.");
+}
+
+async function checkNow() {
+  const button = document.getElementById("checkNow");
+  button.disabled = true;
+  button.textContent = "Checking…";
+  await loadUpdate(true);
+  button.disabled = false;
+  button.textContent = "Check now";
 }
 
 async function startUpdate(keepCompose) {
@@ -139,4 +166,6 @@ async function waitForConsole(version) {
 }
 
 document.getElementById("update").addEventListener("click", () => startUpdate(false));
+document.getElementById("checkNow").addEventListener("click", checkNow);
+setInterval(showChecked, 30000);
 `;

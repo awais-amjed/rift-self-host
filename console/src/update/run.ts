@@ -70,6 +70,8 @@ export interface UpdateStatus {
   releases: Release[] | null;
   /** Why they could not, when they could not. */
   problem: string | null;
+  /** How many seconds ago GitHub was asked, the answer being remembered for an hour. */
+  checkedSecondsAgo: number;
   /** How the compose file on disk stands against this console's own. */
   compose: ComposeState;
   /**
@@ -146,11 +148,14 @@ export function updateTarget(
   return compose === "release" ? current : null;
 }
 
-/** What is installed and what is available. */
-export async function updateStatus(): Promise<UpdateStatus> {
+/**
+ * What is installed and what is available, asking GitHub again when [fresh]
+ * and the last answer is over a minute old.
+ */
+export async function updateStatus(fresh = false): Promise<UpdateStatus> {
   const current = imageVersion();
   const [found, own, known, onDisk, named] = await Promise.all([
-    knownReleases(),
+    knownReleases(fresh),
     Deno.readTextFile(IMAGE_COMPOSE).catch(() => null),
     Deno.readTextFile(IMAGE_KNOWN).catch(() => ""),
     readCompose(projectDir()),
@@ -167,6 +172,7 @@ export async function updateStatus(): Promise<UpdateStatus> {
     current,
     releases,
     problem: found.problem,
+    checkedSecondsAgo: Math.round((Date.now() - found.checkedAt) / 1000),
     compose,
     foreignImage: foreign,
     target: foreign === null ? updateTarget(current, releases, compose) : null,

@@ -117,26 +117,54 @@ export async function fetchReleases(): Promise<Release[]> {
  * A remembered answer. GitHub allows sixty unauthenticated requests an hour
  * from one address, and the dashboard reloads its state every ten seconds.
  */
-let cached: { at: number; releases: Release[] | null; problem: string | null } | null =
-  null;
+let cached: CheckedReleases | null = null;
+
+/** An answer from GitHub, or why there was none, and when it was asked. */
+interface CheckedReleases {
+  at: number;
+  releases: Release[] | null;
+  problem: string | null;
+}
 
 const FRESH_MS = 3_600_000;
 const RETRY_MS = 300_000;
+/** The least time between checks the operator asks for with Check now. */
+const RECHECK_MS = 60_000;
 
-/** The releases, from at most one request an hour (five minutes after a failure). */
-export async function knownReleases(): Promise<
-  { releases: Release[]; problem: null } | { releases: null; problem: string }
+/**
+ * Whether [entry] is too old to answer with: an hour for an answer, five
+ * minutes for a failure, and a minute when the operator asked to check now,
+ * so pressing the button over and over still cannot use up GitHub's allowance.
+ */
+export function needsCheck(
+  entry: { at: number; releases: unknown[] | null } | null,
+  now: number,
+  fresh: boolean,
+): boolean {
+  if (entry === null) return true;
+  const limit = fresh ? RECHECK_MS : entry.releases === null ? RETRY_MS : FRESH_MS;
+  return now - entry.at > limit;
+}
+
+/**
+ * The releases, from at most one request an hour (five minutes after a
+ * failure, a minute when [fresh]), and when GitHub was last asked.
+ */
+export async function knownReleases(fresh = false): Promise<
+  & { checkedAt: number }
+  & ({ releases: Release[]; problem: null } | { releases: null; problem: string })
 > {
-  const age = cached === null ? Infinity : Date.now() - cached.at;
-  if (cached === null || age > (cached.releases === null ? RETRY_MS : FRESH_MS)) {
+  let entry = cached;
+  if (entry === null || needsCheck(entry, Date.now(), fresh)) {
     try {
-      cached = { at: Date.now(), releases: await fetchReleases(), problem: null };
+      entry = { at: Date.now(), releases: await fetchReleases(), problem: null };
     } catch (error) {
       const why = error instanceof Error ? error.message : String(error);
-      cached = { at: Date.now(), releases: null, problem: why };
+      entry = { at: Date.now(), releases: null, problem: why };
     }
+    cached = entry;
   }
-  return cached.releases === null
-    ? { releases: null, problem: cached.problem ?? "unknown" }
-    : { releases: cached.releases, problem: null };
+  return entry.releases === null
+    ? { checkedAt: entry.at, releases: null, problem: entry.problem ?? "unknown" }
+    : { checkedAt: entry.at, releases: entry.releases, problem: null };
 }

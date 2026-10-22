@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   compareVersions,
+  needsCheck,
   newerReleases,
   type Release,
   releasesFrom,
@@ -70,4 +71,19 @@ Deno.test("GitHub's list is read without its drafts or stray tags", () => {
     { version: "1.1.0-beta.1", notes: "", url: "", prerelease: true },
   ]);
   assertEquals(releasesFrom({ message: "rate limited" }), []);
+});
+
+Deno.test("GitHub is asked hourly, after a failure in five minutes, on Check now in one", () => {
+  const minute = 60_000;
+  const answer = { at: 0, releases: [] };
+  const failure = { at: 0, releases: null };
+  assert(needsCheck(null, 0, false));
+  assert(!needsCheck(answer, 59 * minute, false));
+  assert(needsCheck(answer, 61 * minute, false));
+  assert(!needsCheck(failure, 4 * minute, false));
+  assert(needsCheck(failure, 6 * minute, false));
+  // Pressing Check now over and over still asks at most once a minute.
+  assert(!needsCheck(answer, 30_000, true));
+  assert(needsCheck(answer, 2 * minute, true));
+  assert(needsCheck(failure, 2 * minute, true));
 });

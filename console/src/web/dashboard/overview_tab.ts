@@ -5,6 +5,9 @@ const RELEASE_HELP = `
 <p>Two version numbers. <strong>This image</strong> is the console running
   now. <strong>This stack</strong> is the release the database and endpoints
   have been brought up to. On a healthy server they match.</p>
+<p><strong>Newest release</strong> comes from GitHub. The console asks at most
+  once an hour, because GitHub limits how often one address may ask.
+  <strong>Check now</strong> asks again straight away.</p>
 <h3>Update to a new release</h3>
 <ol>
   <li>Make a backup from the <a href="#backups">Backups</a> tab and wait for it
