@@ -67,8 +67,9 @@ const LOCAL_HELP = `
   normal.</p>
 <h3>Turn it on</h3>
 <ol>
-  <li>Find this machine's address on your network: <code>hostname -I</code> on
-    Linux, <code>ipconfig getifaddr en0</code> on macOS, or
+  <li>Find this machine's address on your network:
+    <code>ip -4 route get 1.1.1.1</code> on Linux (the address after
+    <code>src</code>), <code>ipconfig getifaddr en0</code> on macOS, or
     <code>ipconfig</code> on Windows (the IPv4 address). It usually starts with
     <code>192.168.</code> or <code>10.</code></li>
   <li>Type it into the first box. Leave the port unless something else on this
