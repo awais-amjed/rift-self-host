@@ -17,13 +17,16 @@
 # Every image below is upstream and unmodified. The one image built from this
 # repo is the console.
 
+# One stack per Docker host. The project and container names are fixed, so a
+# second copy of this file anywhere on the same host takes over this one's
+# containers and volumes. A second community is a second server in this stack,
+# from the console's Servers tab.
 name: rift
 
 # Published ports are variables with the standard value as their default, so a
-# host that already uses 80, 443 or 7882 — a machine running something else, or
-# a second Rift server — can move them without editing this file. Setup offers
-# them, and an operator who writes a .env by hand before ever starting the
-# console has them honoured.
+# host that already uses 80, 443 or 7882 for something else can move them
+# without editing this file. Setup offers them, and an operator who writes a
+# .env by hand before ever starting the console has them honoured.
 #
 # Every other variable below carries an empty default (`${NAME:-}`), and that is
 # about the first minute rather than about correctness.

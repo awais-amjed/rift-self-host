@@ -11,7 +11,8 @@ console. You never edit a `.env` by hand.
 ## Quick start
 
 You need Docker with Compose, a domain pointing at the machine, and ports 80,
-443, UDP 7882 and TCP 7881 open.
+443, UDP 7882 and TCP 7881 open. A machine runs one Rift stack, and that stack
+can host several Rift servers: the console's Servers tab creates more.
 
 ```bash
 mkdir rift && cd rift

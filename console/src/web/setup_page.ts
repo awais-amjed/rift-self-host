@@ -72,8 +72,7 @@ ${
   <details id="advanced">
     <summary>Ports and console access</summary>
     <p class="hint">Defaults are right for almost every server. Change them if
-      this machine already uses one of these ports, or if you are running a
-      second Rift server beside an existing one.</p>
+      this machine already uses one of these ports.</p>
     ${advanced}
   </details>
   <button type="submit" id="go">Set up</button>
