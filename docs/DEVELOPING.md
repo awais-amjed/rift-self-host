@@ -65,10 +65,11 @@ The release commit also names the version as the console's image in
 disagree — and rewrites `console/known-compose.sha256` with
 `scripts/known_compose.sh`: the hash of every version of the compose file this
 repository has held, which is how an update tells a downloaded file from an
-edited one. Once the image is published, copy the compose file to the website
-(`scripts/sync-self-host.sh` in rift-website), which hands it to new servers.
-Not before: the file names an image that does not exist until the build
-finishes.
+edited one. The workflow attaches the compose file to the GitHub release
+once the image is published, and `joinrift.app/self-host/docker-compose.yml`
+redirects to the newest full release's copy
+(`releases/latest/download/docker-compose.yml`), so new servers get it with
+nothing more to do: never before its image exists, and never a pre-release's.
 
 The tag reaches the GitHub mirror, where `.github/workflows/release.yml`
 builds the image for amd64 and arm64 and pushes it to GitHub's registry as

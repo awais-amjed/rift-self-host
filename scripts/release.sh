@@ -12,9 +12,9 @@
 # brings a stack up to date, so every image that changes anything needs a new
 # one.
 #
-# The website hands out docker-compose.yml to new servers: once this release's
-# image is published, copy it there (scripts/sync-self-host.sh in
-# rift-website).
+# The release workflow attaches docker-compose.yml to the GitHub release, and
+# the website's install link redirects to the newest full release's copy, so a
+# new server gets this one as soon as its image is published.
 #
 # Nothing is pushed. When the commit and the tag look right:
 #

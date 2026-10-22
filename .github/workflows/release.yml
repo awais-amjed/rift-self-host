@@ -83,7 +83,11 @@ jobs:
       - uses: actions/checkout@v7
       # The checkout holds the tag without its message, which is the notes.
       - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-      - name: Publish the release notes
+      # With the release's compose file attached: the newest full release's is
+      # what https://joinrift.app/self-host/docker-compose.yml redirects to
+      # (releases/latest/download/…), so a new server gets it the moment this
+      # runs — after the image job, so never before its console exists.
+      - name: Publish the release notes and compose file
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.image.outputs.version }}
@@ -92,4 +96,5 @@ jobs:
           pre=()
           [[ $VERSION == *-* ]] && pre=(--prerelease)
           gh release create "$GITHUB_REF_NAME" --verify-tag \
-            --title "rift-self-host $VERSION" --notes-file notes.md "${pre[@]}"
+            --title "rift-self-host $VERSION" --notes-file notes.md "${pre[@]}" \
+            docker-compose.yml
