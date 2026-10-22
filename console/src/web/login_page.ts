@@ -5,7 +5,8 @@ import { shell } from "./shell.ts";
 export function loginPage(failed: boolean): string {
   return shell(
     "Rift console",
-    `<h1>Sign in</h1>
+    `<p class="eyebrow">Server console</p>
+<h1>Sign in</h1>
 <p class="sub">Setup showed this password once. Lost it? Beside your
 <code>docker-compose.yml</code>, run
 <code>${RESET_COMMAND}</code> for a new one.</p>

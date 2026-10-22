@@ -147,7 +147,7 @@ ${heading("Containers", "containers", CONTAINERS_HELP, "/console/#containers")}
 
 ${heading("Restart the stack", "restart", RESTART_HELP, "/console/#restart")}
 <div class="panel">
-  <button class="quiet" id="restart">Restart the stack</button>
+  <button class="quiet danger" id="restart">Restart the stack</button>
   <p class="hint">Starts anything that has stopped, moves any service onto the
     version the compose file names, and restarts the rest. The server does not
     answer for up to a minute.</p>

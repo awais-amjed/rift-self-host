@@ -59,8 +59,13 @@ main.centred { max-width: 508px; min-height: calc(100vh - 61px); display: flex;
 h1 { font-family: var(--font-display); font-size: clamp(30px, 5vw, 40px); line-height: 1.1;
   letter-spacing: -0.035em; font-weight: 750; margin: 0 0 10px; overflow-wrap: anywhere;
   text-wrap: balance; }
-.eyebrow { margin: 0 0 12px; font-family: var(--font-mono); font-size: 12.5px;
+.eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 0 0 12px; font-family: var(--font-mono); font-size: 12.5px;
   font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.chip { display: inline-block; border: 1px solid var(--ghost); border-radius: 99px;
+  padding: 2px 10px; font: 500 11.5px/1.5 var(--font-mono); letter-spacing: 0.06em;
+  text-transform: uppercase; color: #B5B6C0; }
+.chip.warn { color: #F5B85C; background: #26180A; border-color: #5E3D12; }
 h2 { font-family: var(--font-display); font-size: 21px; line-height: 1.25;
   letter-spacing: -0.02em; font-weight: 700; margin: 36px 0 12px; color: var(--text); }
 p { color: var(--dim); margin: 0 0 16px; }
@@ -98,6 +103,7 @@ label.check { display: flex; gap: 10px; align-items: center; text-transform: non
   cursor: pointer; margin: 0; }
 label.check input { width: auto; margin: 0; accent-color: var(--accent); }
 .field { margin-bottom: 20px; }
+.panel .field:last-child { margin-bottom: 0; }
 .hint { font-size: 13.5px; color: var(--faint); margin: 6px 0 0; }
 
 /* ── Buttons ────────────────────────────────────────────── */
@@ -114,6 +120,10 @@ button:disabled { opacity: 0.5; cursor: default; }
 button.quiet, a.button { background: transparent; color: #E4E4EA; border: 1px solid var(--ghost); }
 button.quiet:hover:not(:disabled) { background: var(--inset); color: var(--text); }
 button.small { padding: 7px 14px; min-height: 36px; font-size: 14px; font-weight: 500; }
+/* What costs something: deleting, replacing a key, restarting. Red as the
+   website's danger notes, so it never looks like Copy or Download. */
+button.danger { color: #FF8A95; border-color: #6A2530; }
+button.danger:hover:not(:disabled) { background: #2A1014; color: #FFB3BB; }
 a.button { display: inline-flex; align-items: center; border-radius: 8px; padding: 7px 14px;
   min-height: 36px; font-size: 14px; font-weight: 500; text-decoration: none; flex-shrink: 0; }
 a.button:hover { background: var(--inset); color: var(--text); }
@@ -164,11 +174,22 @@ code { background: var(--inset); border: 1px solid var(--line); border-radius: 6
   border-radius: 8px; padding: 14px; word-break: break-all;
   font-family: var(--font-mono); font-size: 14px; color: var(--accent-bright);
 }
-.secret { display: flex; gap: 8px; align-items: center; }
+/* A box and the buttons that act on it, all one height: stretched to the
+   box, so a button beside a field is never shorter than the field. */
+.secret { display: flex; gap: 8px; align-items: stretch; }
 .secret .mono { flex: 1; background: var(--inset); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px 11px; overflow-x: auto; white-space: nowrap; }
 .secret .mono.masked { color: var(--faint); letter-spacing: 0.18em; user-select: none; }
-.secret button { padding: 7px 12px; min-height: 36px; font-size: 13.5px; font-weight: 500; }
+.secret button { padding: 0 16px; min-height: 38px; font-size: 14px; }
+.secret button.quiet { font-weight: 500; }
+.secret input { min-width: 0; }
+/* A number with its unit inside the field, rather than in a label over it. */
+.unit { position: relative; flex: 1; display: flex; }
+.unit input { padding-right: 48px; -moz-appearance: textfield; appearance: textfield; }
+.unit input::-webkit-inner-spin-button, .unit input::-webkit-outer-spin-button {
+  -webkit-appearance: none; margin: 0; }
+.unit span { position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  font: 500 13px var(--font-mono); color: var(--faint); pointer-events: none; }
 .block {
   font-family: var(--font-mono); font-size: 12.5px;
   line-height: 1.6; background: var(--bg-content); border: 1px solid var(--line);
@@ -242,7 +263,7 @@ p.warn a { color: #FFD08A; }
 .head { display: flex; align-items: center; gap: 10px; margin: 36px 0 12px; }
 .head h2 { margin: 0; }
 button.info { width: 22px; height: 22px; min-height: 0; padding: 0; border-radius: 50%;
-  flex-shrink: 0; font: italic 600 13px/20px Georgia, serif; background: var(--inset);
+  flex-shrink: 0; font: 600 12px/20px var(--font-mono); background: var(--inset);
   color: var(--dim); border: 1px solid var(--line); }
 button.info:hover:not(:disabled) { background: var(--raised); color: var(--text); }
 button.info[aria-expanded="true"] { border-color: var(--accent-deep); color: var(--accent); }

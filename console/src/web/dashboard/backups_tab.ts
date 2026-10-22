@@ -180,7 +180,7 @@ async function loadBackups() {
       ? ' · <span class="doomed">deleted by the next backup</span>'
       : "") + "</p>" +
     '</div><div class="actions">' + downloadLink(file.name) +
-    '<button type="button" class="quiet small" data-delete="' + escapeHtml(file.name) +
+    '<button type="button" class="quiet small danger" data-delete="' + escapeHtml(file.name) +
     '">Delete</button></div></div>'
   ).join("") || '<p class="hint" style="margin:0">No backups yet.</p>';
 

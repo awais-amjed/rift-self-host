@@ -13,7 +13,8 @@ import { shell } from "./shell.ts";
 export function exposedPage(): string {
   return shell(
     "Rift console",
-    `<h1>Not from here</h1>
+    `<p class="eyebrow">Setup</p>
+<h1>Not from here</h1>
 <p class="sub">Set this up over the loopback first.</p>
 <div class="panel">
   <p class="warn">This console can start, stop and replace every container on

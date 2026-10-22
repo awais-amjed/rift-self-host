@@ -55,7 +55,8 @@ export function setupPage(
 
   return shell(
     "Set up your Rift server",
-    `<h1>Set up your Rift server</h1>
+    `<p class="eyebrow">Setup</p>
+<h1>Set up your Rift server</h1>
 <p class="sub">Everything not filled in here is generated. The
   <a href="https://docs.joinrift.app/install/" target="_blank" rel="noopener">installation
   guide</a> explains each choice.</p>

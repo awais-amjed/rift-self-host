@@ -10,7 +10,8 @@ import { shell, STREAM_SCRIPT } from "./shell.ts";
 export function restorePage(): string {
   return shell(
     "Restore your Rift server",
-    `<h1>Restore your Rift server</h1>
+    `<p class="eyebrow">Restore</p>
+<h1>Restore your Rift server</h1>
 <p class="sub">An encrypted backup is next to the compose file.</p>
 
 <form id="form" class="panel">

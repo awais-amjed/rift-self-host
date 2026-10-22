@@ -161,7 +161,7 @@ function renderRotations(rotations) {
       "<strong>" + rotation.title + "</strong>" +
       '<p class="hint">' + rotation.cost + "</p>" +
       (last ? '<p class="hint">' + last + "</p>" : "") +
-      '</div><button class="quiet" data-kind="' + rotation.kind + '"' +
+      '</div><button class="quiet small danger" data-kind="' + rotation.kind + '"' +
       (window._rotating ? " disabled" : "") + ">" +
       (busy ? "Replacing…" : rotation.action) + "</button></div>";
   }).join("");

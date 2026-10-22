@@ -71,9 +71,9 @@ ${heading("Servers", "servers", SERVERS_HELP, "/console/#servers")}
 ${heading("Largest file", "files", FILES_HELP, "/console/#servers")}
 <div class="panel">
   <div class="field" style="margin:0">
-    <label for="maxFileMb">Largest file (MB)</label>
     <div class="secret">
-      <input id="maxFileMb" type="number" min="1" step="1" style="flex:1">
+      <div class="unit"><input id="maxFileMb" type="number" min="1" step="1"
+        aria-label="Largest file, in MB"><span>MB</span></div>
       <button id="saveMaxFile">Save</button>
     </div>
     <p class="hint" id="maxFileHint">The biggest attachment anyone can send.
@@ -92,10 +92,11 @@ async function loadServers() {
 
   document.getElementById("servers").innerHTML = data.servers.map((server) => {
     const link = linkFor(server.id);
-    return '<tr><td class="name">' + escapeHtml(server.name) + "</td><td>" +
+    return '<tr><td><strong>' + escapeHtml(server.name) + "</strong>" +
+      '<p class="hint" style="margin:2px 0 10px">' +
       server.memberCount + " member" + (server.memberCount === 1 ? "" : "s") + " · " +
-      server.channelCount + " channel" + (server.channelCount === 1 ? "" : "s") +
-      '<div class="secret" style="margin-top:8px">' +
+      server.channelCount + " channel" + (server.channelCount === 1 ? "" : "s") + "</p>" +
+      '<div class="secret">' +
       (link
         ? '<div class="mono">' + escapeHtml(link) + "</div>" +
           '<button class="quiet" data-copy-invite="' + escapeHtml(link) + '">Copy</button>'

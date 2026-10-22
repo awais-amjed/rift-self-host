@@ -13,14 +13,14 @@ export function dashboardPage(domain: string, localTesting = false): string {
   // Said on every load, not once at setup. A throwaway stack that has been
   // running for a fortnight stops looking like one, and the thing that makes it
   // throwaway — its address, which every member's identity derives from — is
-  // invisible from here.
-  const banner = localTesting
-    ? `<p class="warn" style="margin:0 0 22px"><span>This is a
-       <strong>local testing</strong> stack: plain HTTP on a LAN address, no
-       certificate, and unreachable from any phone. It cannot become a real
-       server — every member's identity is derived from the address they joined
-       at, so changing it makes them strangers and their history unreadable.
-       Build a real one when you want to keep it.</span></p>`
+  // invisible from here. A chip and a sentence rather than a box, which sat
+  // above every tab and pushed each one down the page.
+  const chip = localTesting ? ' <span class="chip warn">Local testing</span>' : "";
+  const local = localTesting
+    ? `<p class="sub" style="margin-bottom:8px">A throwaway stack on plain HTTP,
+       which no phone can reach. It can never become a real server: every
+       member's identity comes from this address, so changing it makes them
+       strangers. Build a real one when you want to keep it.</p>`
     : "";
 
   const nav = tabs.map((tab) =>
@@ -35,11 +35,10 @@ export function dashboardPage(domain: string, localTesting = false): string {
     "Rift console",
     // Escaped like every other operator-supplied value on this page. The
     // domain comes out of `.env`, which somebody may have written by hand.
-    `<p class="eyebrow">Server console</p>
+    `<p class="eyebrow">Server console${chip}</p>
 <h1>${escapeAttribute(domain)}</h1>
-<p class="sub" style="margin-bottom:24px">Press <strong>i</strong> beside any
+${local}<p class="sub" style="margin-bottom:24px">Press <strong>i</strong> beside any
   heading for step-by-step help.</p>
-${banner}
 <nav class="tabs" role="tablist">${nav}</nav>
 ${panels}`,
     `${COMMON_SCRIPT}

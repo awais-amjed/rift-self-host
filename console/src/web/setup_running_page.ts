@@ -10,7 +10,8 @@ import { shell } from "./shell.ts";
 export function setupRunningPage(): string {
   return shell(
     "Setting up your Rift server",
-    `<h1>Setup is still running</h1>
+    `<p class="eyebrow">Setup</p>
+<h1>Setup is still running</h1>
 <div class="panel">
   <p>Reloading the page doesn't stop it. This page checks again every few
     seconds, and shows the sign-in page once setup has finished.</p>
