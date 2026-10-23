@@ -19,7 +19,8 @@ import { livekitRoomServices } from "../_shared/livekit.ts";
  *     still in one — the same reason `delete_channel` is an edge function;
  *   * the `chat-<serverId>` attachment bucket, which `storage.protect_delete()`
  *     keeps out of reach of every database role;
- *   * each member's avatar, in the shared `avatars` bucket.
+ *   * each member's avatar, in the shared `avatars` bucket;
+ *   * the server's icons, its folder of the shared `servers` bucket.
  *
  * Every one of those is best-effort and reported back, not swallowed: a
  * LiveKit that cannot be reached must not leave the owner with a server that
@@ -33,6 +34,7 @@ const supabase = createClient(
 );
 
 const AVATARS_BUCKET = "avatars";
+const ICONS_BUCKET = "servers";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -139,7 +141,10 @@ async function deleteRooms(serverId: string, channelIds: string[]): Promise<stri
   }
 }
 
-/** The server's own bucket, whole, and its members' avatars from the shared one. */
+/**
+ * The server's own bucket, whole, and from the shared ones its members'
+ * avatars and its icons.
+ */
 async function deleteStorage(serverId: string, avatarPaths: string[]): Promise<string | null> {
   const failures: string[] = [];
   const bucket = `chat-${serverId}`;
@@ -155,6 +160,15 @@ async function deleteStorage(serverId: string, avatarPaths: string[]): Promise<s
   if (avatarPaths.length > 0) {
     const { error } = await supabase.storage.from(AVATARS_BUCKET).remove(avatarPaths);
     if (error) failures.push(`avatars: ${error.message}`);
+  }
+  const { data: icons, error: listError } = await supabase.storage.from(ICONS_BUCKET).list(serverId);
+  if (listError) {
+    failures.push(`icons: ${listError.message}`);
+  } else if (icons && icons.length > 0) {
+    const { error } = await supabase.storage
+      .from(ICONS_BUCKET)
+      .remove(icons.map((icon: { name: string }) => `${serverId}/${icon.name}`));
+    if (error) failures.push(`icons: ${error.message}`);
   }
   return failures.length === 0 ? null : failures.join("; ");
 }

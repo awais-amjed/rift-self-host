@@ -16,8 +16,8 @@ const supabase = createClient(
  * When several servers share one Supabase project, the client must know which
  * server it's joining *before* it can derive that server's per-`(host, serverId)`
  * SIWS identity and sign in. This unauthenticated lookup provides that: given a
- * valid, unexpired invite code it returns the target `server_id` (+ name for the
- * join UI). Registration still validates and atomically claims the invite
+ * valid, unexpired invite code it returns the target `server_id` (+ name and
+ * icon for the join UI). Registration still validates and atomically claims the invite
  * (`register_user`), so exposing the mapping here grants nothing on its own —
  * you already hold the code.
  */
@@ -77,16 +77,20 @@ Deno.serve(async (req) => {
 
     const serverId = invite[DBSchema.invites.serverId] as string;
 
-    // Server name for the join UI (best-effort — not required to proceed).
+    // Server name and icon for the join UI (best-effort — not required to
+    // proceed). The icon is a path in the public `servers` bucket, which is
+    // public for this screen: whoever opens it has no session yet.
     const { data: serverData } = await supabase
       .from(DBSchema.servers.tableName)
-      .select(DBSchema.servers.name)
+      .select(`${DBSchema.servers.name}, ${DBSchema.servers.iconUrl}`)
       .eq(DBSchema.servers.id, serverId)
       .maybeSingle();
+    const server = serverData as Record<string, any> | null;
 
     return CustomResponse.success({
       server_id: serverId,
-      server_name: (serverData as Record<string, any> | null)?.[DBSchema.servers.name] ?? null,
+      server_name: server?.[DBSchema.servers.name] ?? null,
+      server_icon: server?.[DBSchema.servers.iconUrl] ?? null,
     });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);

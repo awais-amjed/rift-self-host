@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS auth.users (
   created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS storage.buckets (
-  id TEXT PRIMARY KEY, name TEXT, public BOOLEAN, file_size_limit BIGINT
+  id TEXT PRIMARY KEY, name TEXT, public BOOLEAN, file_size_limit BIGINT,
+  allowed_mime_types TEXT[]
 );
 CREATE TABLE IF NOT EXISTS storage.objects (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

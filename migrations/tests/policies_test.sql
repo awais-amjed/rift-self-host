@@ -9425,5 +9425,118 @@ BEGIN
   RAISE NOTICE 'ok  a rested holder takes it again';
 END $$;
 
+
+-- ============================================================
+-- 26. A server's own icon (021)
+-- ============================================================
+-- In Gamma: ann made its admin, ben a member who is not one. The `ffff…`
+-- folder stands for any other server on the project.
+RESET ROLE;
+UPDATE users SET is_banned = false, kicked_at = NULL, is_server_admin = true
+ WHERE id = '77777777-eeee-4eee-8eee-000000000001';
+UPDATE users SET is_banned = false, kicked_at = NULL, is_server_admin = false
+ WHERE id = '77777777-eeee-4eee-8eee-000000000002';
+
+DO $$
+BEGIN
+  IF (SELECT allowed_mime_types FROM storage.buckets WHERE id = 'servers')
+     IS DISTINCT FROM ARRAY['image/png'] THEN
+    RAISE EXCEPTION 'FAIL: the public icon bucket takes any type, so it can host a page';
+  END IF;
+  RAISE NOTICE 'ok  the public icon bucket takes a PNG and nothing else';
+END $$;
+
+SET LOCAL ROLE authenticated;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  INSERT INTO storage.objects (bucket_id, name, metadata)
+  VALUES ('servers', 'eeee0000-0000-4000-8000-000000000001/icon.img',
+          '{"size": 2000}'::jsonb);
+  RAISE NOTICE 'ok  an admin stores an icon in their own server''s folder';
+
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, metadata)
+    VALUES ('servers', 'ffff0000-0000-4000-8000-000000000001/icon.img',
+            '{"size": 2000}'::jsonb);
+    RAISE EXCEPTION 'FAIL: an admin of one server stored an icon for another';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  but not in another server''s';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"77777777-eeee-4eee-8eee-000000000002","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, metadata)
+    VALUES ('servers', 'eeee0000-0000-4000-8000-000000000001/mine.img',
+            '{"size": 2000}'::jsonb);
+    RAISE EXCEPTION 'FAIL: a member who is not an admin stored a server icon';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+
+  DELETE FROM storage.objects
+   WHERE bucket_id = 'servers'
+     AND name = 'eeee0000-0000-4000-8000-000000000001/icon.img';
+  RESET ROLE;
+  IF NOT EXISTS (SELECT 1 FROM storage.objects
+                  WHERE bucket_id = 'servers'
+                    AND name = 'eeee0000-0000-4000-8000-000000000001/icon.img') THEN
+    RAISE EXCEPTION 'FAIL: a member who is not an admin deleted the server icon';
+  END IF;
+  RAISE NOTICE 'ok  a member who is not an admin can neither store nor remove one';
+END $$;
+
+-- ---------- bounded between sweeps ----------
+RESET ROLE;
+DO $$
+BEGIN
+  FOR i IN 2..app.server_icons_per_server() LOOP
+    INSERT INTO storage.objects (bucket_id, name, metadata)
+    VALUES ('servers', 'eeee0000-0000-4000-8000-000000000001/' || i || '.img',
+            '{"size": 2000}'::jsonb);
+  END LOOP;
+
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, metadata)
+    VALUES ('servers', 'eeee0000-0000-4000-8000-000000000001/over.img',
+            '{"size": 2000}'::jsonb);
+    RAISE EXCEPTION 'FAIL: a server may hold icons without bound';
+  EXCEPTION WHEN disk_full THEN NULL;
+  END;
+
+  -- One server's ceiling is not another's.
+  INSERT INTO storage.objects (bucket_id, name, metadata)
+  VALUES ('servers', 'ffff0000-0000-4000-8000-000000000001/icon.img',
+          '{"size": 2000}'::jsonb);
+  RAISE NOTICE 'ok  a server holds app.server_icons_per_server() icons and no more';
+END $$;
+
+-- ---------- and the one nobody names is swept ----------
+DO $$
+DECLARE v_orphans TEXT[];
+BEGIN
+  UPDATE storage.objects SET created_at = now() - interval '2 hours'
+   WHERE bucket_id = 'servers';
+  UPDATE servers SET icon_url = 'eeee0000-0000-4000-8000-000000000001/icon.img'
+   WHERE id = 'eeee0000-0000-4000-8000-000000000001';
+
+  SELECT array_agg(object_name) INTO v_orphans
+    FROM app.orphaned_attachments() WHERE bucket = 'servers';
+
+  IF 'eeee0000-0000-4000-8000-000000000001/icon.img' = ANY(v_orphans) THEN
+    RAISE EXCEPTION 'FAIL: the icon a server shows was swept';
+  END IF;
+  IF NOT ('eeee0000-0000-4000-8000-000000000001/2.img' = ANY(v_orphans)
+          AND 'ffff0000-0000-4000-8000-000000000001/icon.img' = ANY(v_orphans)) THEN
+    RAISE EXCEPTION 'FAIL: an icon no server names is not swept';
+  END IF;
+  RAISE NOTICE 'ok  the sweep keeps the icon a server shows and collects the rest';
+END $$;
+
 RESET ROLE;
 ROLLBACK;

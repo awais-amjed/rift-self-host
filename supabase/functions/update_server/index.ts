@@ -50,6 +50,20 @@ const SERVER_SELECT = [
   ...LIMIT_FIELDS.map((f) => f.column),
 ].join(", ");
 
+/**
+ * An icon is an object in this server's own folder of the `servers` bucket,
+ * named the way the app names every upload: random hex, then `.img`.
+ *
+ * Never an address. Every member's app fetches whatever this column names, so
+ * a URL here would let an admin point every member at a host that logs who
+ * opened the app and when. A path can only be read from this server's own
+ * Storage, and only an admin of it can write there (021).
+ */
+function isIconPath(serverId: string, value: string): boolean {
+  const prefix = `${serverId}/`;
+  return value.startsWith(prefix) && /^[0-9a-f]{8,64}\.img$/.test(value.slice(prefix.length));
+}
+
 /** A `servers` row as the client reads it — snake_case, limits included. */
 function toServerResponse(row: Record<string, any> | null) {
   if (!row) return row;
@@ -120,13 +134,23 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Unauthorized: Only server admins can update server details", EC.PERMISSION_DENIED);
     }
 
+    // Null or empty clears the icon.
+    if (icon_url !== undefined && icon_url !== null && icon_url !== "") {
+      if (typeof icon_url !== "string" || !isIconPath(auth.serverId, icon_url)) {
+        return CustomResponse.error(
+          "icon_url must be the path of an icon uploaded to this server's folder of the servers bucket",
+          EC.ICON_INVALID,
+        );
+      }
+    }
+
     // Build update object dynamically
     const updateData: Record<string, unknown> = {};
     if (name) {
       updateData[DBSchema.servers.name] = name;
     }
     if (icon_url !== undefined) {
-      updateData[DBSchema.servers.iconUrl] = icon_url;
+      updateData[DBSchema.servers.iconUrl] = icon_url || null;
     }
     if (livekit_url) {
       updateData[DBSchema.servers.livekitUrl] = livekit_url;

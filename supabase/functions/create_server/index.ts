@@ -19,7 +19,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { name, icon_url, livekit_url, livekit_api_key, livekit_secret_key, service_key } =
+    const { name, livekit_url, livekit_api_key, livekit_secret_key, service_key } =
       await req.json();
 
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -46,8 +46,10 @@ Deno.serve(async (req) => {
     const { data, error } = await supabase
       .from(DBSchema.servers.tableName)
       .insert({
+        // No icon: one is a path in the server's own folder, which cannot
+        // exist before the server does. An admin uploads it afterwards
+        // (update_server).
         [DBSchema.servers.name]: name,
-        [DBSchema.servers.iconUrl]: icon_url || null,
         [DBSchema.servers.livekitUrl]: livekit_url,
       })
       .select()
