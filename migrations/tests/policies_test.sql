@@ -3334,6 +3334,102 @@ DELETE FROM messages WHERE id IN (9210, 9211, 9212, 9213);
 SET LOCAL ROLE authenticated;
 
 -- ============================================================
+-- 18d. What is live in a channel (022)
+-- ============================================================
+-- The bar above a channel's message box holds its open polls and a bot's live
+-- panel, however far back in the chat they were posted. `channel_live_messages`
+-- finds them; the policy still decides each row, as it does for a page.
+
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, poll) VALUES
+  (9701, 'aaaa1111-0000-4000-8000-000000000001', 'open-poll', 'n', 's', 1,
+   jsonb_build_object('options', 2, 'multiple', false,
+                      'closes_at', (now() + interval '1 day')::TEXT)),
+  (9702, 'aaaa1111-0000-4000-8000-000000000001', 'closed-poll', 'n', 's', 1,
+   jsonb_build_object('options', 2, 'multiple', false,
+                      'closes_at', (now() + interval '1 day')::TEXT));
+-- Closed by hand, as the superuser: a poll cannot be posted already over.
+UPDATE messages
+   SET poll = jsonb_set(poll, '{closes_at}', to_jsonb((now() - interval '1 hour')::TEXT))
+ WHERE id = 9702;
+
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks) VALUES
+  (9703, 'aaaa1111-0000-4000-8000-000000000001', '', 0,
+   '{"v":1,"live":true,"blocks":[{"type":"text","text":"Now playing"}]}'),
+  (9704, 'aaaa1111-0000-4000-8000-000000000001', '', 0,
+   '{"v":1,"blocks":[{"type":"text","text":"Left the call"}]}'),
+  (9705, 'aaaa1111-0000-4000-8000-000000000001', '', 0,
+   '{"v":1,"live":"true","blocks":[{"type":"text","text":"not a boolean"}]}');
+-- Alice's, so bob is neither its sender nor the one it is for.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks, ephemeral_for) VALUES
+  (9706, 'aaaa1111-0000-4000-8000-000000000001', '', 0,
+   '{"v":1,"live":true,"blocks":[{"type":"text","text":"for carol"}]}',
+   '11111111-aaaa-4aaa-8aaa-000000000003');
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
+SET LOCAL ROLE authenticated;
+
+DO $$
+DECLARE v_ids BIGINT[];
+BEGIN
+  SELECT array_agg(id) INTO v_ids
+    FROM channel_live_messages('aaaa1111-0000-4000-8000-000000000001');
+  IF v_ids IS NULL OR NOT (9701 = ANY(v_ids) AND 9703 = ANY(v_ids)) THEN
+    RAISE EXCEPTION 'FAIL: an open poll or a live panel did not come back: %', v_ids;
+  END IF;
+  IF 9702 = ANY(v_ids) OR 9704 = ANY(v_ids) OR 9705 = ANY(v_ids) THEN
+    RAISE EXCEPTION 'FAIL: a closed poll or a panel that is not live came back: %', v_ids;
+  END IF;
+  IF v_ids[1] < v_ids[cardinality(v_ids)] THEN
+    RAISE EXCEPTION 'FAIL: what is live came back oldest first';
+  END IF;
+  RAISE NOTICE 'ok  open polls and live panels come back, newest first, and nothing else';
+
+  IF 9706 = ANY(v_ids) THEN
+    RAISE EXCEPTION 'FAIL: a live panel shown only to carol came back to bob';
+  END IF;
+  IF NOT (9706 = ANY(ARRAY(SELECT app.channel_live_ids(
+            'aaaa1111-0000-4000-8000-000000000001')))) THEN
+    RAISE EXCEPTION 'FAIL: the id half is filtering, so this proves nothing';
+  END IF;
+  RAISE NOTICE 'ok  the policy still decides each live row';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM channel_live_messages('aaaa1111-0000-4000-8000-000000000001')) THEN
+    RAISE EXCEPTION 'FAIL: somebody outside the channel read what is live in it';
+  END IF;
+  RAISE NOTICE 'ok  outside the channel nothing is live';
+END $$;
+
+RESET ROLE;
+SET LOCAL ROLE anon;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM channel_live_messages('aaaa1111-0000-4000-8000-000000000001');
+    RAISE EXCEPTION 'FAIL: anon read what is live in a channel';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  anon cannot ask what is live';
+END $$;
+
+RESET ROLE;
+DELETE FROM messages WHERE id BETWEEN 9701 AND 9706;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-0000000000a1","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
+-- ============================================================
 -- 19. What a granted bot actually reads (035)
 -- ============================================================
 -- 017 built the key half of the moderation grant and it was correct. It never
@@ -9537,6 +9633,7 @@ BEGIN
   END IF;
   RAISE NOTICE 'ok  the sweep keeps the icon a server shows and collects the rest';
 END $$;
+
 
 RESET ROLE;
 ROLLBACK;
