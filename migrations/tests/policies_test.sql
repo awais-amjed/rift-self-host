@@ -9845,5 +9845,82 @@ BEGIN
   RAISE NOTICE 'ok  a player''s news reaches its call''s topic, and no further';
 END $$;
 
+-- ============================================================
+-- 28. Only a bot draws a panel, edits included (024)
+-- ============================================================
+-- dee sends the bot a command from #hideout: a plain row of her own, the one
+-- kind a private channel holds. Writing blocks onto it afterwards would have
+-- put her interface in the bar of everybody in the public call, and opened
+-- whatever file of #hideout it named to them.
+RESET ROLE;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_id BIGINT;
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, to_bot)
+  VALUES ('dddd1111-0000-4000-8000-000000000002', '/play', 'n', 's', 0,
+          '88888888-dddd-4ddd-8ddd-000000000003')
+  RETURNING id INTO v_id;
+  PERFORM set_config('rift_test.command', v_id::TEXT, true);
+  BEGIN
+    UPDATE messages SET blocks =
+      '{"v":1,"live":true,"call":"dddd1111-0000-4000-8000-000000000003","blocks":[
+         {"type":"image","path":"dddd1111-0000-4000-8000-000000000002/secret.jpg"}]}'
+     WHERE id = v_id;
+    RAISE EXCEPTION 'FAIL: a member drew a panel onto their own message';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a member cannot write blocks onto a message of their own';
+END $$;
+
+RESET ROLE;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000002');
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM messages
+              WHERE id = current_setting('rift_test.command')::BIGINT)
+     OR app.can_read_attachment('dddd1111-0000-4000-8000-000000000002/secret.jpg') THEN
+    RAISE EXCEPTION 'FAIL: outside #hideout, a member''s message or its file read through the call';
+  END IF;
+  RAISE NOTICE 'ok  so nothing of #hideout reaches the call through one';
+END $$;
+
+-- The bot still redraws its own, and plays to the call again.
+RESET ROLE;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000003');
+SET LOCAL ROLE authenticated;
+UPDATE messages SET blocks =
+  '{"v":1,"live":true,"call":"dddd1111-0000-4000-8000-000000000003","blocks":[]}'
+ WHERE id = 9901;
+DO $$
+BEGIN
+  IF (SELECT blocks ->> 'call' FROM messages WHERE id = 9901)
+     IS DISTINCT FROM 'dddd1111-0000-4000-8000-000000000003' THEN
+    RAISE EXCEPTION 'FAIL: a bot could not redraw its own player';
+  END IF;
+  RAISE NOTICE 'ok  a bot still redraws its own panel';
+END $$;
+
+-- A row that is not a bot's names no call, however it was written: here past
+-- every policy, as the table's owner.
+RESET ROLE;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000001');
+DO $$
+DECLARE
+  v_id BIGINT;
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, key_version, blocks)
+  VALUES ('dddd1111-0000-4000-8000-000000000002', '', 0,
+          '{"v":1,"live":true,"call":"dddd1111-0000-4000-8000-000000000003","blocks":[]}')
+  RETURNING id INTO v_id;
+  IF (SELECT blocks ? 'call' FROM messages WHERE id = v_id) THEN
+    RAISE EXCEPTION 'FAIL: a member''s row named a call';
+  END IF;
+  RAISE NOTICE 'ok  a call is a bot''s to name';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
