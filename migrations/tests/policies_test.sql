@@ -9635,5 +9635,215 @@ BEGIN
 END $$;
 
 
+-- ============================================================
+-- 27. A bot's player belongs to its call (023)
+-- ============================================================
+-- In Delta: dee, who is in the private #hideout and the private #backroom
+-- call; eli, who is in neither; and a music bot, in both. The bot plays to
+-- the public #lounge call from #hideout, and to #backroom.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('88888888-dddd-4ddd-8ddd-000000000001'),  -- dee
+  ('88888888-dddd-4ddd-8ddd-000000000002'),  -- eli
+  ('88888888-dddd-4ddd-8ddd-000000000003');  -- the bot
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('dddd0000-0000-4000-8000-000000000001', 'Delta', 'ws://lan:7880');
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('dddd1111-0000-4000-8000-000000000001', 'dddd0000-0000-4000-8000-000000000001', 'general',  'text',  false),
+  ('dddd1111-0000-4000-8000-000000000002', 'dddd0000-0000-4000-8000-000000000001', 'hideout',  'text',  true),
+  ('dddd1111-0000-4000-8000-000000000003', 'dddd0000-0000-4000-8000-000000000001', 'lounge',   'voice', false),
+  ('dddd1111-0000-4000-8000-000000000004', 'dddd0000-0000-4000-8000-000000000001', 'backroom', 'voice', true);
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key, is_bot)
+VALUES
+  ('88888888-dddd-4ddd-8ddd-000000000001', 'dddd0000-0000-4000-8000-000000000001',
+   'dee', 'Dee', 'pk-dee', 'sid-dee', 'chat-dee', false),
+  ('88888888-dddd-4ddd-8ddd-000000000002', 'dddd0000-0000-4000-8000-000000000001',
+   'eli', 'Eli', 'pk-eli', 'sid-eli', 'chat-eli', false),
+  ('88888888-dddd-4ddd-8ddd-000000000003', 'dddd0000-0000-4000-8000-000000000001',
+   'dj', 'DJ', 'pk-dj', 'sid-dj', NULL, true);
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('dddd1111-0000-4000-8000-000000000002', '88888888-dddd-4ddd-8ddd-000000000001'),
+  ('dddd1111-0000-4000-8000-000000000002', '88888888-dddd-4ddd-8ddd-000000000003'),
+  ('dddd1111-0000-4000-8000-000000000004', '88888888-dddd-4ddd-8ddd-000000000001'),
+  ('dddd1111-0000-4000-8000-000000000004', '88888888-dddd-4ddd-8ddd-000000000003');
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'dddd0000-0000-4000-8000-000000000001';
+
+-- Written as the bot, so `attest_messages` stamps it the sender, and then the
+-- trigger decides what is left of `call`.
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000003');
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks) VALUES
+  (9901, 'dddd1111-0000-4000-8000-000000000002', '', 0,
+   '{"v":1,"live":true,"call":"dddd1111-0000-4000-8000-000000000003","blocks":[
+      {"type":"image","path":"dddd1111-0000-4000-8000-000000000002/cover.jpg"}]}'),
+  (9902, 'dddd1111-0000-4000-8000-000000000002', '', 0,
+   '{"v":1,"live":true,"call":"dddd1111-0000-4000-8000-000000000004","blocks":[]}'),
+  -- A text channel is not a call.
+  (9903, 'dddd1111-0000-4000-8000-000000000002', '', 0,
+   '{"v":1,"live":true,"call":"dddd1111-0000-4000-8000-000000000001","blocks":[]}'),
+  -- Nor is something that is not an id, nor a call on another server.
+  (9904, 'dddd1111-0000-4000-8000-000000000002', '', 0,
+   '{"v":1,"live":true,"call":"lounge","blocks":[]}'),
+  (9905, 'dddd1111-0000-4000-8000-000000000002', '', 0,
+   '{"v":1,"live":true,"call":"aaaa1111-0000-4000-8000-000000000001","blocks":[]}'),
+  -- A panel that is not live plays to no call.
+  (9906, 'dddd1111-0000-4000-8000-000000000002', '', 0,
+   '{"v":1,"call":"dddd1111-0000-4000-8000-000000000003","blocks":[]}');
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000001');
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (9907, 'dddd1111-0000-4000-8000-000000000002', 'play-from-dee', 'n', 's', 1);
+
+DO $$
+BEGIN
+  IF (SELECT blocks ->> 'call' FROM messages WHERE id = 9901)
+     IS DISTINCT FROM 'dddd1111-0000-4000-8000-000000000003'
+     OR (SELECT blocks ->> 'call' FROM messages WHERE id = 9902)
+     IS DISTINCT FROM 'dddd1111-0000-4000-8000-000000000004' THEN
+    RAISE EXCEPTION 'FAIL: a bot''s own call was taken off its player';
+  END IF;
+  IF EXISTS (SELECT 1 FROM messages WHERE id BETWEEN 9903 AND 9906 AND blocks ? 'call') THEN
+    RAISE EXCEPTION 'FAIL: a panel kept a call that is not a voice channel on its server, or is not live';
+  END IF;
+  RAISE NOTICE 'ok  a live panel names a call on its server, or none';
+END $$;
+
+-- ---------- eli, in neither private channel ----------
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000002');
+DO $$
+DECLARE v_ids BIGINT[];
+BEGIN
+  SELECT array_agg(id ORDER BY id) INTO v_ids FROM messages
+   WHERE channel_id = 'dddd1111-0000-4000-8000-000000000002';
+  IF v_ids IS DISTINCT FROM ARRAY[9901]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: outside #hideout, the public call''s player and nothing else should read: %', v_ids;
+  END IF;
+  RAISE NOTICE 'ok  a public call''s player reads from a private channel, and the rest of it does not';
+
+  SELECT array_agg(id) INTO v_ids
+    FROM call_live_messages('dddd1111-0000-4000-8000-000000000003');
+  IF v_ids IS DISTINCT FROM ARRAY[9901]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: the call''s players were %, not its one', v_ids;
+  END IF;
+  IF EXISTS (SELECT 1 FROM call_live_messages('dddd1111-0000-4000-8000-000000000004')) THEN
+    RAISE EXCEPTION 'FAIL: a private call''s player reached somebody who cannot join it';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_live_messages('dddd1111-0000-4000-8000-000000000002')) THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s bar opened to somebody outside it';
+  END IF;
+  RAISE NOTICE 'ok  a call''s players come back to who can see the call';
+
+  IF NOT app.can_read_attachment('dddd1111-0000-4000-8000-000000000002/cover.jpg') THEN
+    RAISE EXCEPTION 'FAIL: the call could not read its player''s cover';
+  END IF;
+  IF app.can_read_attachment('dddd1111-0000-4000-8000-000000000002/other.jpg') THEN
+    RAISE EXCEPTION 'FAIL: a player''s call read a file of the channel the player does not draw';
+  END IF;
+  RAISE NOTICE 'ok  the call reads its player''s cover and no other file of the channel';
+
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                        to_bot, reply_to, is_interaction, action_id)
+  VALUES ('dddd1111-0000-4000-8000-000000000002', 'skip', 'n', 's', 0,
+          '88888888-dddd-4ddd-8ddd-000000000003', 9901, true, 'skip');
+  RAISE NOTICE 'ok  somebody who can see the call presses its player';
+
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                          to_bot, reply_to, is_interaction, action_id)
+    VALUES ('dddd1111-0000-4000-8000-000000000002', 'skip', 'n', 's', 0,
+            '88888888-dddd-4ddd-8ddd-000000000003', 9902, true, 'skip');
+    RAISE EXCEPTION 'FAIL: a private call''s player was pressed from outside it';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                          to_bot, reply_to, is_interaction, action_id)
+    VALUES ('dddd1111-0000-4000-8000-000000000002', 'skip', 'n', 's', 0,
+            '88888888-dddd-4ddd-8ddd-000000000003', 9906, true, 'skip');
+    RAISE EXCEPTION 'FAIL: a panel playing to no call was pressed from outside its channel';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, to_bot)
+    VALUES ('dddd1111-0000-4000-8000-000000000002', '/play', 'n', 's', 0,
+            '88888888-dddd-4ddd-8ddd-000000000003');
+    RAISE EXCEPTION 'FAIL: somebody outside a private channel posted in it through its player';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  and nothing else: not a private call''s, not a panel with no call, not a message';
+END $$;
+
+-- ---------- dee, in both ----------
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000001');
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM call_live_messages('dddd1111-0000-4000-8000-000000000004')
+                  WHERE id = 9902) THEN
+    RAISE EXCEPTION 'FAIL: a private call''s player did not reach somebody in the call';
+  END IF;
+  RAISE NOTICE 'ok  a private call''s player reaches the people who can join it';
+END $$;
+
+-- ---------- mallory, on another server ----------
+SELECT pg_temp.as_member('22222222-bbbb-4bbb-8bbb-000000000001');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM messages WHERE id IN (9901, 9902))
+     OR EXISTS (SELECT 1 FROM call_live_messages('dddd1111-0000-4000-8000-000000000003')) THEN
+    RAISE EXCEPTION 'FAIL: another server''s member read a call''s player';
+  END IF;
+  RAISE NOTICE 'ok  another server''s member reads no call''s player';
+END $$;
+
+-- ---------- a player that stops is the call's no longer ----------
+RESET ROLE;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000003');
+UPDATE messages SET blocks = '{"v":1,"blocks":[]}' WHERE id = 9901;
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000002');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM messages WHERE id = 9901) THEN
+    RAISE EXCEPTION 'FAIL: a player redrawn without its live mark still read outside its channel';
+  END IF;
+  IF app.can_read_attachment('dddd1111-0000-4000-8000-000000000002/cover.jpg') THEN
+    RAISE EXCEPTION 'FAIL: a player that stopped still opened its cover to the call';
+  END IF;
+  RAISE NOTICE 'ok  a player that stops goes back to its channel''s readers';
+END $$;
+
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '{}', true); END $$;
+DO $$
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+  -- #hideout is private, so its players' news reaches the call's topic as
+  -- well: the server's for the public #lounge, its own for #backroom.
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'server:dddd0000-0000-4000-8000-000000000001'
+                    AND event = 'message' AND payload->>'id' = '9901') THEN
+    RAISE EXCEPTION 'FAIL: a player in a private channel was not told to its public call';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'server:dddd0000-0000-4000-8000-000000000001'
+                    AND event = 'message_changed' AND payload->>'message_id' = '9901') THEN
+    RAISE EXCEPTION 'FAIL: a player that stopped was not told to its call';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'channel:dddd1111-0000-4000-8000-000000000004'
+                    AND event = 'message' AND payload->>'id' = '9902') THEN
+    RAISE EXCEPTION 'FAIL: a private call''s player was not told to its own topic';
+  END IF;
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE topic = 'server:dddd0000-0000-4000-8000-000000000001'
+                AND payload->>'id' IN ('9902', '9907')) THEN
+    RAISE EXCEPTION 'FAIL: a private call''s player, or #hideout''s own message, reached the server''s topic';
+  END IF;
+  RAISE NOTICE 'ok  a player''s news reaches its call''s topic, and no further';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
