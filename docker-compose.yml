@@ -55,7 +55,7 @@ services:
     # copy of this file ran new migrations beside old upstream images, so a
     # bare `docker compose pull` now changes nothing. The console's Update
     # (or `docker compose exec console update`) moves both together.
-    image: ${RIFT_CONSOLE_IMAGE:-ghcr.io/awais-amjed/rift-console:1.3.0}
+    image: ${RIFT_CONSOLE_IMAGE:-ghcr.io/awais-amjed/rift-console:1.4.0}
     restart: unless-stopped
     ports:
       # Bound to the loopback on purpose. This container can start, stop and
