@@ -7,7 +7,7 @@
  * on an old schema serving old endpoints, with the dashboard showing a red
  * "schema out of date" row and no way to act on it.
  *
- * Three steps, in an order that matters:
+ * Three steps, in an order that matters, and one that only ever runs once:
  *
  *   1. **Endpoints first.** They are files; installing them is atomic enough
  *      and reversible by reinstalling. Nothing depends on them being new.
@@ -19,9 +19,13 @@
  *      so an edited endpoint keeps serving old code for that long. Recreating
  *      closes the window in which new schema meets old code.
  *
- * Step 3 is the only one that touches a container, and it is why [applyUpgrade]
- * waits for compose to settle: the console runs during the very `up -d` that
- * started it, and two compose runs converging one project is undefined.
+ *   4. **LiveKit's webhook**, added to a `livekit.yaml` from before there was
+ *      one (`setup/livekit_webhook.ts`), and LiveKit restarted to read it.
+ *
+ * Steps 3 and 4 are the only ones that touch a container, and they are why
+ * [applyUpgrade] waits for compose to settle: the console runs during the very
+ * `up -d` that started it, and two compose runs converging one project is
+ * undefined.
  *
  * There is no switch for any of this, and that is deliberate. Somebody who
  * does not want a release does not pull it; having pulled one, the only states
@@ -37,6 +41,7 @@ import {
   installFunctions,
   missingFunctions,
 } from "./setup/functions.ts";
+import { ensureLivekitWebhook } from "./setup/livekit_webhook.ts";
 import { type Paths } from "./setup/run.ts";
 import { APPLIED_VERSION, imageVersion, readState, writeState } from "./state.ts";
 
@@ -160,6 +165,14 @@ export async function applyUpgrade(
     if (!await waitForSettled()) return false;
     const result = await restartService("functions");
     return result.ok;
+  });
+
+  // A stack set up before LiveKit had a webhook gets one, once. LiveKit reads
+  // its file only as it starts, so calls drop for the moment it restarts.
+  await step("Connecting LiveKit to the server", async () => {
+    if (!await ensureLivekitWebhook(paths.projectDir)) return;
+    if (!await waitForSettled()) return;
+    await restartService("livekit");
   });
 
   const version = imageVersion();

@@ -56,6 +56,13 @@ changes nothing), moves every service onto it, and restarts the console, which
 applies the new migrations and endpoints by itself. See
 [updating](https://docs.joinrift.app/updating/).
 
+`volumes/livekit/livekit.yaml` is yours to edit, and an update adds to it only
+what is missing, leaving the rest as it is. The first update after Nov 2 2026
+adds LiveKit's `webhook:` block and restarts LiveKit, so calls drop for a
+moment and reconnect. A file that no longer lists the key in `.env` is left
+alone; add the block from `console/templates/livekit/livekit.yaml` by hand. An
+extra region needs it too ([call regions](https://docs.joinrift.app/regions/)).
+
 The console image is [`ghcr.io/awais-amjed/rift-console`](https://github.com/awais-amjed/rift-self-host/pkgs/container/rift-console),
 for amd64 and arm64, tagged with each release's version. The compose file names
 the console by version, so a bare `docker compose pull` changes nothing.

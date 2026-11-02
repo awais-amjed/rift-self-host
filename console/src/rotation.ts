@@ -143,7 +143,8 @@ export function livekitStatement(currentKey: string, next: LivekitCredentials): 
 }
 
 /**
- * [yaml] with LiveKit's key pair swapped, and nothing else touched.
+ * [yaml] with LiveKit's key pair swapped, in its keys and its webhook, and
+ * nothing else touched.
  *
  * Edited in place rather than re-rendered, unlike kong.yml, because this is the
  * one generated file operators are told to change: a busy server widens
@@ -170,7 +171,14 @@ export function withLivekitKey(
     );
   }
   lines[index] = `  ${next.livekitApiKey}: ${next.livekitApiSecret}`;
-  return lines.join("\n");
+  // The webhook signs with the same key (`setup/livekit_webhook.ts`); left
+  // naming the old one, LiveKit would not start.
+  return lines.map((line) => {
+    const match = line.match(/^(\s*api_key:\s*)(\S+)\s*$/);
+    return match && match[2] === current.livekitApiKey
+      ? `${match[1]}${next.livekitApiKey}`
+      : line;
+  }).join("\n");
 }
 
 /**

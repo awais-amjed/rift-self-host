@@ -6,27 +6,26 @@ import { connectionKind, WATCH_SUFFIX } from "./livekit.ts";
  * receives, so a stream being watched can be decoded and drawn outside the
  * app's own call connection (the app's `docs/gpu-codecs/STEP3_PLAN.md`).
  *
- * **It is the one connection that can listen without being seen.** A voice
+ * **It is a second connection that listens, so it is never hidden.** A voice
  * connection is in the roster and a share publishes nothing it can hear. A
- * watch connection subscribes and is hidden, because showing it would put
- * everyone watching a stream in the call twice. That is the hole the share
- * token closed, so three rules keep it from opening here:
+ * hidden watch connection would be a way to hear a call without being shown
+ * in it, which is the hole the share token closed. So it is visible like any
+ * other participant, and the app folds it into its owner rather than drawing
+ * it twice (`ParticipantIdentity.isWatch`). Four rules keep it tied to a
+ * device that is in the call:
  *
  * - it is minted only while the same device's voice connection is in the
- *   room (`admitWatcher`), so nobody can listen to a call they are not shown in;
- * - one whose voice connection has gone is removed — whenever anyone mints
- *   one in that room, and whenever a member's roster is read (`voice_roster`);
+ *   room (`admitWatcher`);
+ * - one whose voice connection has gone is removed: when LiveKit reports a
+ *   voice connection leaving or a watcher joining (`livekit_webhook`), whenever
+ *   anyone mints one in that room, and whenever a member's roster is read
+ *   (`voice_roster`);
  * - kicks and bans remove it with the rest of the member's connections, since
  *   they match the user id, and moderation sets its permissions as a watcher's
- *   (`livePermissionsFor`).
- *
- * **Not yet closed:** between the voice connection going and the next mint or
- * roster read, a watcher can go on receiving, and nothing schedules either of
- * those — a roster is read when a member's app connects. LiveKit renews the
- * token of a connection that is up, so a watcher that stays connected is not
- * stopped by its token's age. Found Nov 2 2026; the fix is still to choose.
+ *   (`livePermissionsFor`);
+ * - if every one of those is missed, a region with no webhook set up say, the
+ *   watcher is still on everyone's screen as its owner, still in the call.
  */
-
 /**
  * How long a watch token can be used to join. Short, because the presence
  * check happens only when it is minted: a token that outlived its device's
@@ -61,14 +60,30 @@ export async function admitWatcher(
   room: string,
   voiceIdentity: string,
 ): Promise<boolean> {
+  const identities = await sweepOrphanedWatchers(service, room);
+  return identities?.includes(voiceIdentity) ?? false;
+}
+
+/**
+ * Remove [room]'s orphaned watchers, answering who was in it, or null when
+ * the room did not answer.
+ *
+ * Decided from the room as it is now, not from whatever event prompted the
+ * sweep, so asking twice, late, or with an old event is harmless: a watcher
+ * whose voice connection is back is never touched.
+ */
+export async function sweepOrphanedWatchers(
+  service: RoomServiceClient,
+  room: string,
+): Promise<string[] | null> {
   let identities: string[];
   try {
     identities = (await service.listParticipants(room)).map((p) => p.identity);
   } catch {
-    return false;
+    return null;
   }
   await removeWatchers(service, room, orphanedWatchers(identities));
-  return identities.includes(voiceIdentity);
+  return identities;
 }
 
 /** Remove [identities] from [room], each on its own: one already gone is not a failure. */
@@ -86,8 +101,8 @@ export async function removeWatchers(
  * The grant for a watch connection.
  *
  * Subscribes as its voice connection does; publishes nothing, not even data,
- * so it can say nothing in the call; hidden, so it is not drawn as a second
- * copy of its owner; and never an admin, whatever its owner is.
+ * so it can say nothing in the call; visible, so nobody listens unseen; and
+ * never an admin, whatever its owner is.
  */
 export function watchGrant(room: string, maySubscribe: boolean): VideoGrant {
   return {
@@ -98,7 +113,7 @@ export function watchGrant(room: string, maySubscribe: boolean): VideoGrant {
     canPublishData: false,
     canSubscribe: maySubscribe,
     canUpdateOwnMetadata: false,
-    hidden: true,
+    hidden: false,
     roomAdmin: false,
   };
 }

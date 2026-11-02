@@ -62,7 +62,7 @@ export function permissionSources(
  * connection a voice connection's set, so muting someone who was sharing let
  * their share connection subscribe: the share token's "never listens" undone
  * by a moderator's click, with the share hidden from the roster. A watch
- * connection given that set could publish while hidden.
+ * connection given that set could publish.
  */
 export function livePermissionsFor(
   kind: ConnectionKind,
@@ -93,8 +93,8 @@ export function livePermissionsFor(
         canPublish: false,
         canPublishData: false,
         canPublishSources: [],
-        // Stated, or the update unhides it.
-        hidden: true,
+        // Visible, as minted (`watchGrant`): a hidden one would listen unseen.
+        hidden: false,
       };
   }
 }

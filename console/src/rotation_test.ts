@@ -30,6 +30,20 @@ Deno.test("the voice key is swapped and the rest of livekit.yaml is left alone",
   );
 });
 
+Deno.test("the webhook's key follows the voice key, or LiveKit would not start", () => {
+  const yaml = "keys:\n  APIcurrent0001: currentsecret\n" +
+    "webhook:\n  api_key: APIcurrent0001\n  urls:\n    - http://functions:9000/livekit_webhook\n";
+  const rotated = withLivekitKey(yaml, current, next);
+  assertStringIncludes(rotated, "  api_key: APInext0000001\n");
+  assert(!rotated.includes("APIcurrent0001"), "the old key is still named");
+});
+
+Deno.test("a webhook signing with some other key is left alone", () => {
+  const yaml = "keys:\n  APIcurrent0001: currentsecret\n  APIother: othersecret\n" +
+    "webhook:\n  api_key: APIother\n";
+  assertStringIncludes(withLivekitKey(yaml, current, next), "  api_key: APIother\n");
+});
+
 Deno.test("a livekit.yaml with a hand-changed key is refused without naming a secret", () => {
   const yaml = "keys:\n  APIsomethingelse: othersecret\n";
   const error = assertThrows(() => withLivekitKey(yaml, current, next)) as Error;

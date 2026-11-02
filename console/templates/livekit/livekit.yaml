@@ -67,3 +67,10 @@ room:
 logging:
   level: info
   json: false
+
+# Tells this server who leaves its calls (the livekit_webhook endpoint),
+# signed with the key above. If you change that key by hand, change it here too.
+webhook:
+  api_key: {{LIVEKIT_API_KEY}}
+  urls:
+    - http://functions:9000/livekit_webhook
