@@ -20,11 +20,20 @@ import { connectionKind, WATCH_SUFFIX } from "./livekit.ts";
  *   they match the user id, and moderation sets its permissions as a watcher's
  *   (`livePermissionsFor`).
  *
- * What is left: between the voice connection going and the next mint or
- * roster read, a watcher can go on receiving for a moment. Accepted by the
- * owner, Nov 2 2026 — it is the member's own device, which a moment earlier
- * was in the call and heard the same.
+ * **Not yet closed:** between the voice connection going and the next mint or
+ * roster read, a watcher can go on receiving, and nothing schedules either of
+ * those — a roster is read when a member's app connects. LiveKit renews the
+ * token of a connection that is up, so a watcher that stays connected is not
+ * stopped by its token's age. Found Nov 2 2026; the fix is still to choose.
  */
+
+/**
+ * How long a watch token can be used to join. Short, because the presence
+ * check happens only when it is minted: a token that outlived its device's
+ * voice connection was a way back in. The app asks for a fresh one for every
+ * connect, and LiveKit renews the token of a connection that is up.
+ */
+export const WATCH_TOKEN_TTL = "1m";
 
 /** The watch identity for a voice identity. */
 export function watchIdentity(voiceIdentity: string): string {

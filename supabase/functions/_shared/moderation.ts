@@ -68,11 +68,14 @@ export function livePermissionsFor(
   kind: ConnectionKind,
   isMuted: boolean,
   isDeafened: boolean,
+  // False for a bot without a `bot_voice_grants` row for this room: a mute
+  // must not hand a bot the ears it was never granted (BOTS.md §6b).
+  mayListen = true,
 ) {
   switch (kind) {
     case "voice":
       return {
-        canSubscribe: !isDeafened,
+        canSubscribe: !isDeafened && mayListen,
         canPublish: true,
         canPublishData: true,
         canPublishSources: permissionSources(isMuted, isDeafened),
@@ -86,7 +89,7 @@ export function livePermissionsFor(
       };
     case "watch":
       return {
-        canSubscribe: !isDeafened,
+        canSubscribe: !isDeafened && mayListen,
         canPublish: false,
         canPublishData: false,
         canPublishSources: [],

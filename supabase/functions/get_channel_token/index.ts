@@ -7,7 +7,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { admitWatcher, watchGrant, watchIdentity } from "../_shared/watch.ts";
+import { admitWatcher, WATCH_TOKEN_TTL, watchGrant, watchIdentity } from "../_shared/watch.ts";
 import {
   callNodeOf,
   claimVoiceNode,
@@ -267,7 +267,7 @@ Deno.serve(async (req) => {
       const watchToken = new AccessToken(node.pair.apiKey, node.pair.apiSecret, {
         identity: watchIdentity(voiceIdentity),
         name: displayName,
-        ttl: "1h",
+        ttl: WATCH_TOKEN_TTL,
       });
       watchToken.addGrant(watchGrant(room, !isDeafened && mayListen));
       return CustomResponse.success({

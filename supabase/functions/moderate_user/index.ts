@@ -108,7 +108,7 @@ Deno.serve(async (req) => {
       .from(DBSchema.users.tableName)
       .select(
         `${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ${DBSchema.users.isBanned}, ` +
-          DBSchema.users.kickedAt,
+          `${DBSchema.users.kickedAt}, ${DBSchema.users.isBot}`,
       )
       .eq(DBSchema.users.id, target_user_id)
       .single();
@@ -122,6 +122,7 @@ Deno.serve(async (req) => {
     const isDeafened: boolean = target[DBSchema.users.isDeafened] === true;
     const isBanned: boolean = target[DBSchema.users.isBanned] === true;
     const isKicked: boolean = target[DBSchema.users.kickedAt] != null;
+    const isBot: boolean = target[DBSchema.users.isBot] === true;
 
     // 3. Apply it to whatever they are connected to right now. The row is
     //    already written, so a LiveKit failure must not fail the request —
@@ -132,6 +133,7 @@ Deno.serve(async (req) => {
       isMuted,
       isDeafened,
       isBanned,
+      isBot,
     );
 
     return CustomResponse.success({
@@ -164,8 +166,24 @@ async function applyToLiveRooms(
   isMuted: boolean,
   isDeafened: boolean,
   isBanned: boolean,
+  isBot: boolean,
 ): Promise<{ updated: number; error: string | null }> {
   try {
+    // A bot hears only where it was granted to. Until Nov 2 2026 a mute here
+    // pushed `canSubscribe: true` onto a bot's connection whatever its grants,
+    // so a channel manager could give a bot the ears that need MANAGE_BOTS.
+    // Unreadable grants are none, failing closed as `get_channel_token` does.
+    let botListensIn = new Set<string>();
+    if (isBot) {
+      const { data: grants } = await supabase
+        .from("bot_voice_grants")
+        .select("channel_id")
+        .eq("bot_id", targetUserId);
+      botListensIn = new Set(
+        (grants ?? []).map((g) => (g as Record<string, any>).channel_id as string),
+      );
+    }
+
     // One admin API per node: a muted member has to stay muted whichever
     // LiveKit the call they are in happens to be on.
     const services = await livekitRoomServices(supabase, serverId);
@@ -234,6 +252,7 @@ async function applyToLiveRooms(
             connectionKind(participant.identity),
             isMuted,
             isDeafened,
+            !isBot || botListensIn.has(room),
           ),
         });
 
