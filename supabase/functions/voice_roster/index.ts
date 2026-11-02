@@ -10,6 +10,7 @@ import {
   releaseVoiceNodes,
   voiceUserId,
 } from "../_shared/livekit.ts";
+import { orphanedWatchers, removeWatchers } from "../_shared/watch.ts";
 
 /**
  * Who is in which voice channel on this server, right now: `{userId: channelId}`.
@@ -150,11 +151,17 @@ Deno.serve(async (req) => {
               const startedAt = Number(room.creationTimeMs) ||
                 Number(room.creationTime) * 1000;
               try {
-                return {
-                  room: room.name,
-                  startedAt,
-                  participants: await service.listParticipants(room.name),
-                };
+                const participants = await service.listParticipants(room.name);
+                // A watch connection whose device has left the call goes
+                // here: this is read whenever a member looks at the server,
+                // and nothing else tells us a room changed (`_shared/watch.ts`).
+                // With nobody to remove it costs nothing.
+                await removeWatchers(
+                  service,
+                  room.name,
+                  orphanedWatchers(participants.map((p) => p.identity)),
+                );
+                return { room: room.name, startedAt, participants };
               } catch {
                 return { room: room.name, startedAt, participants: [] };
               }

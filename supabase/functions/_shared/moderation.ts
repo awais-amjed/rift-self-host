@@ -1,4 +1,5 @@
 import { TrackSource } from "livekit-server-sdk";
+import type { ConnectionKind } from "./livekit.ts";
 
 /**
  * What a moderation flag means in LiveKit terms.
@@ -53,17 +54,46 @@ export function permissionSources(
 }
 
 /**
- * The permission set a live participant should hold. Permissions are replaced
- * atomically by `updateParticipant`, so every field has to be stated — omitting
- * one clears it.
+ * The permission set a live connection of [kind] should hold. Permissions are
+ * replaced atomically by `updateParticipant`, so every field has to be stated
+ * — omitting one clears it.
+ *
+ * **Per kind, matching what each was minted with.** This once gave every
+ * connection a voice connection's set, so muting someone who was sharing let
+ * their share connection subscribe: the share token's "never listens" undone
+ * by a moderator's click, with the share hidden from the roster. A watch
+ * connection given that set could publish while hidden.
  */
-export function livePermissions(isMuted: boolean, isDeafened: boolean) {
-  return {
-    canSubscribe: !isDeafened,
-    canPublish: true,
-    canPublishData: true,
-    canPublishSources: permissionSources(isMuted, isDeafened),
-  };
+export function livePermissionsFor(
+  kind: ConnectionKind,
+  isMuted: boolean,
+  isDeafened: boolean,
+) {
+  switch (kind) {
+    case "voice":
+      return {
+        canSubscribe: !isDeafened,
+        canPublish: true,
+        canPublishData: true,
+        canPublishSources: permissionSources(isMuted, isDeafened),
+      };
+    case "share":
+      return {
+        canSubscribe: false,
+        canPublish: true,
+        canPublishData: true,
+        canPublishSources: permissionSources(isMuted, isDeafened),
+      };
+    case "watch":
+      return {
+        canSubscribe: !isDeafened,
+        canPublish: false,
+        canPublishData: false,
+        canPublishSources: [],
+        // Stated, or the update unhides it.
+        hidden: true,
+      };
+  }
 }
 
 /** The flags as every client reads them off participant metadata. */

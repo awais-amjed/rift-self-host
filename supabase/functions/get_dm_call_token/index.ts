@@ -6,6 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { admitWatcher, watchGrant, watchIdentity } from "../_shared/watch.ts";
 import {
   LiveKitNode,
   livekitCredentials,
@@ -64,7 +65,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { call_id, screen_share, sound_share, device_id, preferred_node_id } =
+    const { call_id, screen_share, sound_share, watch, device_id, preferred_node_id } =
       await req.json();
 
     const auth = await authenticateToken(supabase, extractBearerToken(req));
@@ -80,6 +81,11 @@ Deno.serve(async (req) => {
     }
 
     const wantsShare = screen_share === true || sound_share === true;
+    // A watch connection only receives (`_shared/watch.ts`), as for a channel.
+    const wantsWatch = watch === true;
+    if (wantsWatch && wantsShare) {
+      return CustomResponse.error("A connection either shares or watches", EC.PERMISSION_DENIED);
+    }
     const [
       { data: claim, error: claimError },
       { data: mayConnect },
@@ -136,11 +142,43 @@ Deno.serve(async (req) => {
 
     const room = `dm-${call_id}`;
 
+    // Identity as for a channel — "<userId>~<device>" plus a share or watch
+    // suffix — because the client's roster, keys and tiles all parse it that
+    // way.
+    const deviceSuffix =
+      (typeof device_id === "string" ? device_id : "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16) ||
+      "default";
+    const voiceIdentity = `${auth.userId}~${deviceSuffix}`;
+
     // Where the call is: the node the claim named, or the server's own
     // LiveKit on a server that has no node rows.
     let node = nodeOf((claim as Record<string, any>).node);
     let pair = await nodeKeyPair(supabase, node, credentials);
     let host = node ? normaliseHost(node.url) : credentials.host;
+
+    // A watch connection joins the call this device is already in: no room is
+    // opened and the call is never moved, and the voice connection being in
+    // the room is the condition for the token at all.
+    if (wantsWatch) {
+      const service = pair ? new RoomServiceClient(host, pair.apiKey, pair.apiSecret) : null;
+      if (!pair || !service || !(await admitWatcher(service, room, voiceIdentity))) {
+        return CustomResponse.error("Join the call before watching in it", EC.USER_NOT_IN_VOICE);
+      }
+      const watchToken = new AccessToken(pair.apiKey, pair.apiSecret, {
+        identity: watchIdentity(voiceIdentity),
+        name: (userData as Record<string, any>)[DBSchema.users.displayName],
+        ttl: "1h",
+      });
+      watchToken.addGrant(watchGrant(room, true));
+      const limits = (limitsRow ?? {}) as Record<string, any>;
+      return CustomResponse.success({
+        token: await watchToken.toJwt(),
+        identity: watchIdentity(voiceIdentity),
+        room,
+        livekit_url: node?.url ?? credentials.url,
+        max_share_mbps: Number(limits[DBSchema.servers.maxShareMbps] ?? 0),
+      });
+    }
     let opened = pair
       ? await openRoom(new RoomServiceClient(host, pair.apiKey, pair.apiSecret), room)
       : false;
@@ -175,12 +213,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Identity as for a channel — "<userId>~<device>" plus a share suffix —
-    // because the client's roster, keys and tiles all parse it that way.
-    const deviceSuffix =
-      (typeof device_id === "string" ? device_id : "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16) ||
-      "default";
-    let identity = `${auth.userId}~${deviceSuffix}`;
+    let identity = voiceIdentity;
     if (screen_share === true) {
       identity = `${identity}_screenshare`;
     } else if (sound_share === true) {

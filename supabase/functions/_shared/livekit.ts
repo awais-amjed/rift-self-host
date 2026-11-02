@@ -78,16 +78,36 @@ export function normaliseHost(livekitUrl: string): string {
 }
 
 /**
- * The user behind a LiveKit identity, or null when the connection isn't one.
+ * What a connection is, read off its identity.
  *
- * Identities are `<userId>~<deviceId>`, with a `_screenshare` or `_soundshare`
- * suffix for that device's screen or sound share. A share is a second
- * connection held by the same person, so anything counting *people* has to
- * drop it — it would double them up in a roster, and telling a screen share to
- * join a channel means nothing.
+ * Identities are `<userId>~<deviceId>` for the connection a member talks on,
+ * with a suffix for that device's other connections: `_screenshare` or
+ * `_soundshare` for a share, which only publishes, and `_watch` for the
+ * desktop's connection that receives a stream it is watching, which only
+ * subscribes (`_shared/watch.ts`). The device segment is stripped to letters
+ * and digits when a token is minted, so no member can choose a suffix.
+ */
+export type ConnectionKind = "voice" | "share" | "watch";
+
+export const WATCH_SUFFIX = "_watch";
+const SHARE_SUFFIXES = ["_screenshare", "_soundshare"];
+
+export function connectionKind(identity: string): ConnectionKind {
+  if (identity.endsWith(WATCH_SUFFIX)) return "watch";
+  if (SHARE_SUFFIXES.some((suffix) => identity.endsWith(suffix))) return "share";
+  return "voice";
+}
+
+/**
+ * The user behind a LiveKit identity, or null when the connection isn't the
+ * one they talk on.
+ *
+ * A share or a watch connection is a second connection held by the same
+ * person, so anything counting *people* has to drop it — it would double them
+ * up in a roster, and telling a screen share to join a channel means nothing.
  */
 export function voiceUserId(identity: string): string | null {
-  if (identity.endsWith("_screenshare") || identity.endsWith("_soundshare")) return null;
+  if (connectionKind(identity) !== "voice") return null;
   const userId = identity.split("~")[0];
   return userId.length > 0 ? userId : null;
 }
@@ -367,6 +387,22 @@ export async function livekitRoomServiceForChannel(
 ): Promise<RoomServiceClient | null> {
   const credentials = await livekitCredentials(supabase, serverId);
   if (!credentials) return null;
+  const node = await callNodeOf(supabase, serverId, channelId, credentials);
+  if (!node) return null;
+  return new RoomServiceClient(normaliseHost(node.url), node.pair.apiKey, node.pair.apiSecret);
+}
+
+/**
+ * Where [channelId]'s call is and the key that node signs with, read without
+ * claiming anything — the address half of [livekitRoomServiceForChannel], for
+ * a caller that also mints a token there (a watch connection).
+ */
+export async function callNodeOf(
+  supabase: SupabaseClient,
+  serverId: string,
+  channelId: string,
+  credentials: LiveKitCredentials,
+): Promise<{ url: string; pair: KeyPair } | null> {
 
   // Only a channel on [serverId], and only a node that is that server's too.
   // The service role reads `voice_rooms` for every server in the project, so
@@ -396,5 +432,5 @@ export async function livekitRoomServiceForChannel(
   );
   if (!pair) return null;
 
-  return new RoomServiceClient(normaliseHost(url), pair.apiKey, pair.apiSecret);
+  return { url, pair };
 }

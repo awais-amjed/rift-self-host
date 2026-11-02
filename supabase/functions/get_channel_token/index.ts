@@ -7,7 +7,9 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { admitWatcher, watchGrant, watchIdentity } from "../_shared/watch.ts";
 import {
+  callNodeOf,
   claimVoiceNode,
   livekitCredentials,
   nodeKeyPair,
@@ -47,7 +49,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { channel_id, screen_share, sound_share, device_id, preferred_node_id } =
+    const { channel_id, screen_share, sound_share, watch, device_id, preferred_node_id } =
       await req.json();
     const token = extractBearerToken(req);
 
@@ -87,6 +89,12 @@ Deno.serve(async (req) => {
     // answer is thrown away costs a query and reveals nothing: none of these
     // writes anything, and nothing is returned on a refusal.
     const wantsShare = screen_share === true || sound_share === true;
+    // A watch connection only receives (`_shared/watch.ts`); one that also
+    // shared would be a hidden publisher.
+    const wantsWatch = watch === true;
+    if (wantsWatch && wantsShare) {
+      return CustomResponse.error("A connection either shares or watches", EC.PERMISSION_DENIED);
+    }
     const [
       { data: visible, error: visibleError },
       { data: mayConnect },
@@ -147,9 +155,10 @@ Deno.serve(async (req) => {
     const userRecord = userData as Record<string, any>;
 
     // Identity = "<userId>~<deviceId>" (+ "_screenshare" for the screen-share
-    // connection, or "_soundshare" for the sound-share one — a separate suffix
-    // so one member can do both at once; two connections claiming the same
-    // identity would kick each other). The device segment lets the same user
+    // connection, "_soundshare" for the sound-share one, or "_watch" for the
+    // watch connection — a separate suffix each so one member can hold them
+    // all at once; two connections claiming the same identity would kick
+    // each other). The device segment lets the same user
     // join from multiple
     // devices without a LiveKit identity collision — without it, a second
     // device joining the same room kicks the first one out. The userId prefix
@@ -159,7 +168,8 @@ Deno.serve(async (req) => {
     const deviceSuffix =
       (typeof device_id === "string" ? device_id : "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16) ||
       "default";
-    let identity = `${auth.userId}~${deviceSuffix}`;
+    const voiceIdentity = `${auth.userId}~${deviceSuffix}`;
+    let identity = voiceIdentity;
 
     if (screen_share === true) {
       identity = `${identity}_screenshare`;
@@ -171,6 +181,12 @@ Deno.serve(async (req) => {
     const isMuted: boolean = userRecord[DBSchema.users.isMuted] === true;
     const isDeafened: boolean = userRecord[DBSchema.users.isDeafened] === true;
     const isBot: boolean = userRecord[DBSchema.users.isBot] === true;
+
+    // A bot hears on its one connection, by an explicit grant; a hidden
+    // second one would be listening nobody sees.
+    if (wantsWatch && isBot) {
+      return CustomResponse.error("A bot cannot watch", EC.PERMISSION_DENIED);
+    }
 
     // A bot publishes; it does not hear (BOTS.md §6b).
     //
@@ -233,6 +249,34 @@ Deno.serve(async (req) => {
     const limits = (limitsRow ?? {}) as Record<string, any>;
     const maxVoice = Number(limits[DBSchema.servers.maxVoiceParticipants] ?? 0);
     const maxShareMbps = Number(limits[DBSchema.servers.maxShareMbps] ?? 0);
+
+    // ── A watch connection ──────────────────────────────────
+    //
+    // Into the call this device is already in, so nothing below applies: no
+    // region is chosen, no room opened, nobody counted. Where the call is
+    // comes from `voice_rooms`, read rather than claimed, and the voice
+    // connection being in that room is the condition for the token at all.
+    if (wantsWatch) {
+      const node = await callNodeOf(supabase, auth.serverId, channel_id, credentials);
+      const service = node
+        ? new RoomServiceClient(normaliseHost(node.url), node.pair.apiKey, node.pair.apiSecret)
+        : null;
+      if (!node || !service || !(await admitWatcher(service, room, voiceIdentity))) {
+        return CustomResponse.error("Join the call before watching in it", EC.USER_NOT_IN_VOICE);
+      }
+      const watchToken = new AccessToken(node.pair.apiKey, node.pair.apiSecret, {
+        identity: watchIdentity(voiceIdentity),
+        name: displayName,
+        ttl: "1h",
+      });
+      watchToken.addGrant(watchGrant(room, !isDeafened && mayListen));
+      return CustomResponse.success({
+        token: await watchToken.toJwt(),
+        identity: watchIdentity(voiceIdentity),
+        livekit_url: node.url,
+        max_share_mbps: maxShareMbps,
+      });
+    }
 
     // The channel's pinned region, needed only to know whether a failure to
     // open the room is the *pin* failing — which is the one case that falls

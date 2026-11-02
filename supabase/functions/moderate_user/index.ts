@@ -6,8 +6,12 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomServices, roomParticipantsAcross } from "../_shared/livekit.ts";
-import { livePermissions, micDenied, moderationMetadata } from "../_shared/moderation.ts";
+import {
+  connectionKind,
+  livekitRoomServices,
+  roomParticipantsAcross,
+} from "../_shared/livekit.ts";
+import { livePermissionsFor, micDenied, moderationMetadata } from "../_shared/moderation.ts";
 
 /**
  * Server-side mute / deafen / ban / kick.
@@ -200,11 +204,10 @@ async function applyToLiveRooms(
     )).flat();
 
     const metadata = moderationMetadata(isMuted, isDeafened);
-    const permission = livePermissions(isMuted, isDeafened);
 
-    // The identity is "<userId>~<device>", with a "_screenshare" suffix for
-    // that device's share. Match on the user id so every device they are on
-    // is covered, not just the one a moderator happened to click.
+    // The identity is "<userId>~<device>", with a suffix for that device's
+    // share or watch connection. Match on the user id so every device they
+    // are on is covered, not just the one a moderator happened to click.
     const mine = (await roomParticipantsAcross(services, rooms)).flatMap(
       ({ room, participants, service }) =>
         participants
@@ -227,7 +230,11 @@ async function applyToLiveRooms(
 
         await service.updateParticipant(room, participant.identity, {
           metadata,
-          permission,
+          permission: livePermissionsFor(
+            connectionKind(participant.identity),
+            isMuted,
+            isDeafened,
+          ),
         });
 
         if (micDenied(isMuted, isDeafened)) {
