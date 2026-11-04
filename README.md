@@ -59,7 +59,8 @@ applies the new migrations and endpoints by itself. See
 `volumes/livekit/livekit.yaml` is yours to edit, and an update adds to it only
 what is missing, leaving the rest as it is. The first update after Nov 2 2026
 adds LiveKit's `webhook:` block and restarts LiveKit, so calls drop for a
-moment and reconnect. A file that no longer lists the key in `.env` is left
+moment and reconnect; if the restart could not happen then, the next update
+does it. A file that no longer lists the key in `.env` is left
 alone; add the block from `console/templates/livekit/livekit.yaml` by hand. An
 extra region needs it too ([call regions](https://docs.joinrift.app/regions/)).
 

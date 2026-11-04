@@ -41,9 +41,16 @@ import {
   installFunctions,
   missingFunctions,
 } from "./setup/functions.ts";
-import { ensureLivekitWebhook } from "./setup/livekit_webhook.ts";
+import { connectLivekit, ensureLivekitWebhook } from "./setup/livekit_webhook.ts";
 import { type Paths } from "./setup/run.ts";
-import { APPLIED_VERSION, imageVersion, readState, writeState } from "./state.ts";
+import {
+  APPLIED_VERSION,
+  clearState,
+  imageVersion,
+  LIVEKIT_RESTART_OWED,
+  readState,
+  writeState,
+} from "./state.ts";
 
 /** What this stack still needs. */
 export interface PendingWork {
@@ -169,11 +176,17 @@ export async function applyUpgrade(
 
   // A stack set up before LiveKit had a webhook gets one, once. LiveKit reads
   // its file only as it starts, so calls drop for the moment it restarts.
-  await step("Connecting LiveKit to the server", async () => {
-    if (!await ensureLivekitWebhook(paths.projectDir)) return;
-    if (!await waitForSettled()) return;
-    await restartService("livekit");
-  });
+  await step("Connecting LiveKit to the server", () =>
+    connectLivekit({
+      addWebhook: () => ensureLivekitWebhook(paths.projectDir),
+      pending: async () => await readState(target, LIVEKIT_RESTART_OWED) !== null,
+      setPending: (on) =>
+        on
+          ? writeState(target, LIVEKIT_RESTART_OWED, "webhook")
+          : clearState(target, LIVEKIT_RESTART_OWED),
+      settled: waitForSettled,
+      restart: async () => (await restartService("livekit")).ok,
+    }));
 
   const version = imageVersion();
   await step("Recording the version", () => writeState(target, APPLIED_VERSION, version));

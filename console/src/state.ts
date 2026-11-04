@@ -20,6 +20,12 @@ import { ensureConsoleSchema, SCHEMA } from "./console_schema.ts";
 /** The release that last finished applying itself here. */
 export const APPLIED_VERSION = "applied_version";
 
+/**
+ * Set while LiveKit has a webhook in its file it has not been restarted to
+ * read (`connectLivekit`).
+ */
+export const LIVEKIT_RESTART_OWED = "livekit_restart_owed";
+
 /** Read one value, or null if it has never been set. */
 export async function readState(
   target: PostgresTarget,

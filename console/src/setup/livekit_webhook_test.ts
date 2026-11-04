@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { placeholders, render } from "./config_files.ts";
-import { webhookBlock, withWebhook } from "./livekit_webhook.ts";
+import { connectLivekit, webhookBlock, withWebhook } from "./livekit_webhook.ts";
 import { defaults } from "./options.ts";
 import { generateSecrets } from "./secrets.ts";
 
@@ -42,4 +42,51 @@ Deno.test("a new stack's livekit.yaml carries the same block an old one is given
   const rendered = render(source, placeholders(ctx));
   assert(rendered.endsWith(webhookBlock(ctx.secrets.livekitApiKey)));
   assertEquals(withWebhook(rendered, ctx.secrets.livekitApiKey), null);
+});
+
+/** A stack for [connectLivekit]: what each step answers, and what was done. */
+function stack(opts: { adds: boolean; settled: boolean; restarts: boolean }) {
+  const done = { pending: false, restarts: 0 };
+  return {
+    done,
+    steps: {
+      addWebhook: () => Promise.resolve(opts.adds),
+      pending: () => Promise.resolve(done.pending),
+      setPending: (on: boolean) => {
+        done.pending = on;
+        return Promise.resolve();
+      },
+      settled: () => Promise.resolve(opts.settled),
+      restart: () => {
+        done.restarts++;
+        return Promise.resolve(opts.restarts);
+      },
+    },
+  };
+}
+
+Deno.test("a webhook added while compose is busy is restarted for at the next upgrade", async () => {
+  const busy = stack({ adds: true, settled: false, restarts: true });
+  assertEquals(await connectLivekit(busy.steps), false);
+  assertEquals(busy.done.restarts, 0);
+  assert(busy.done.pending, "still owed a restart");
+
+  // The next upgrade finds the block already there, and restarts anyway.
+  const next = stack({ adds: false, settled: true, restarts: true });
+  next.done.pending = busy.done.pending;
+  assertEquals(await connectLivekit(next.steps), true);
+  assertEquals(next.done.restarts, 1);
+  assert(!next.done.pending, "paid");
+});
+
+Deno.test("a failed restart is tried again at the next upgrade", async () => {
+  const failing = stack({ adds: true, settled: true, restarts: false });
+  assertEquals(await connectLivekit(failing.steps), false);
+  assert(failing.done.pending);
+});
+
+Deno.test("a stack with its webhook and nothing owed is not restarted", async () => {
+  const quiet = stack({ adds: false, settled: true, restarts: true });
+  assertEquals(await connectLivekit(quiet.steps), false);
+  assertEquals(quiet.done.restarts, 0);
 });

@@ -66,3 +66,34 @@ export async function ensureLivekitWebhook(projectDir: string): Promise<boolean>
   await Deno.writeTextFile(path, wanted);
   return true;
 }
+
+/** What [connectLivekit] needs of the stack, so it can be tested without one. */
+export interface LivekitSteps {
+  /** [ensureLivekitWebhook]: true when it wrote the block. */
+  addWebhook: () => Promise<boolean>;
+  /** Whether a block was written and LiveKit not yet restarted to read it. */
+  pending: () => Promise<boolean>;
+  setPending: (on: boolean) => Promise<void>;
+  /** Compose is not still working on this project. */
+  settled: () => Promise<boolean>;
+  /** Restart LiveKit, answering whether it did. */
+  restart: () => Promise<boolean>;
+}
+
+/**
+ * Add the webhook if the stack has none, and restart LiveKit to read it,
+ * answering whether it was restarted.
+ *
+ * The restart is owed until it happens, not only on the upgrade that wrote
+ * the block: when compose was busy or the restart failed, every later upgrade
+ * found the block already there and did nothing, and LiveKit sent no events
+ * until something else restarted it.
+ */
+export async function connectLivekit(steps: LivekitSteps): Promise<boolean> {
+  if (await steps.addWebhook()) await steps.setPending(true);
+  if (!await steps.pending()) return false;
+  if (!await steps.settled()) return false;
+  if (!await steps.restart()) return false;
+  await steps.setPending(false);
+  return true;
+}
