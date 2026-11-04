@@ -79,6 +79,11 @@ export function livePermissionsFor(
         canPublish: true,
         canPublishData: true,
         canPublishSources: permissionSources(isMuted, isDeafened),
+        // As minted. LiveKit replaces the whole set on an update, and a right
+        // left out is taken away: muted and unmuted, a member could no longer
+        // publish being deafened, push-to-talk or what they watch, until
+        // they rejoined.
+        canUpdateMetadata: true,
       };
     case "share":
       return {
@@ -86,6 +91,7 @@ export function livePermissionsFor(
         canPublish: true,
         canPublishData: true,
         canPublishSources: permissionSources(isMuted, isDeafened),
+        canUpdateMetadata: true,
       };
     case "watch":
       return {
@@ -93,6 +99,7 @@ export function livePermissionsFor(
         canPublish: false,
         canPublishData: false,
         canPublishSources: [],
+        canUpdateMetadata: false,
         // Visible, as minted (`watchGrant`): a hidden one would listen unseen.
         hidden: false,
       };

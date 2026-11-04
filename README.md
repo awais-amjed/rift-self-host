@@ -105,6 +105,11 @@ scripts/               the database test suites
 # (default name supabase-db).
 RIFT_PG_CONTAINER=<container> ./scripts/db_test.sh
 
+# The functions' tests (no server needed): the permissions a moderator
+# pushes onto a live connection against what its token was minted with.
+deno test --no-lock --allow-env=BUF_BIGINT_DISABLE \
+  --config supabase/functions/moderate_user/deno.json supabase/functions/_shared/
+
 # The console's own tests, and building its image.
 cd console && deno task test
 docker build -f console/Dockerfile -t ghcr.io/awais-amjed/rift-console:latest .
