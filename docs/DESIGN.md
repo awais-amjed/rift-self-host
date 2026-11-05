@@ -65,6 +65,14 @@ against the JWKS GoTrue publishes, and a stack configured with only
 `JWT_SECRET` signs HS256 and publishes an empty JWKS — so every authenticated
 call fails while every container reports healthy.
 
+The shared secret still signs two things: Storage's file links, and the tokens
+Realtime's admin API (`/api/tenants`) accepts, with no role asked. So a member
+who signs a link holds a token that admin API would take, and Kong refuses
+`/realtime/v1/api/tenants` and `/realtime/v1/api/openapi` itself, as upstream
+Supabase does. It matches paths after merging slashes, decoding and resolving
+dot segments, so no other spelling gets through; verified Nov 5 2026 against a
+local stack. The console reaches the admin API inside the Docker network.
+
 ## A server's address is permanent
 
 **Decided September 2026.** A Rift server is named once, and the name is what

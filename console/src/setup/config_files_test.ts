@@ -521,6 +521,23 @@ Deno.test("the gateway answers its own address and /healthz", async () => {
   assert(!kong.includes("name: request-termination"));
 });
 
+Deno.test("the gateway refuses Realtime's admin API and its description", async () => {
+  // Realtime's /api/tenants trusts any token signed with JWT_SECRET, and
+  // Storage signs every file link with that secret, so a member with a link
+  // could suspend, delete or rewire Realtime. Kong answers these itself.
+  const kong = render(
+    await Deno.readTextFile(new URL("../../templates/api/kong.yml", import.meta.url)),
+    placeholders(await context()),
+  );
+  for (const path of ["/realtime/v1/api/tenants", "/realtime/v1/api/openapi"]) {
+    const at = kong.indexOf(`          - ${path}\n`);
+    assert(at > 0, `no route for ${path}`);
+    const route = kong.slice(at, kong.indexOf("\n  - name:", at));
+    assertStringIncludes(route, "name: post-function");
+    assertStringIncludes(route, "kong.response.exit(403");
+  }
+});
+
 Deno.test("refreshing the gateway rewrites a stale kong.yml, and only then", async () => {
   const dir = await Deno.makeTempDir();
   try {
