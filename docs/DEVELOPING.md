@@ -189,6 +189,19 @@ new console, kept the edited line, and the original was kept as
 whole update. Using the new file instead, and the merge refusing a file whose
 changes meet the release's, are covered by the tests but were not driven live.
 
+**An upgrade across the watch token** (Nov 6 2026). A throwaway Docker-in-Docker
+machine, installed from release 1.4.1's own compose file in local-testing mode,
+was moved to a local build of the next release with `update 1.5.0 --yes`, so the
+release's download step used an image already there. The update replaced the
+compose file and moved the services, and the new console applied itself. At 1.4.1
+`/realtime/v1/api/tenants` and `/api/openapi` answered 401 and at 1.5.0 they answer
+403; `member_sidebar`, `livekit_webhook` and `watch.ts` appeared, `livekit.yaml`
+got its `webhook:` block and LiveKit restarted once; 8 containers were healthy.
+A two-person tone call heard 500 of 500 frames before and 502 after, and LiveKit
+delivered its events to `livekit_webhook` during it. Not driven: the dashboard's
+Update button on this release, an app's watch connection on the upgraded stack,
+and a stack with an edited `livekit.yaml`.
+
 Not yet proved, and worth doing before anyone else runs one:
 
 - **A real certificate.** The runs used a domain that does not exist, so Caddy
