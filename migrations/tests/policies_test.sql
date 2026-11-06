@@ -9922,5 +9922,57 @@ BEGIN
   RAISE NOTICE 'ok  a call is a bot''s to name';
 END $$;
 
+-- ── member_sidebar: the five requests, in one ───────────────
+RESET ROLE;
+SELECT pg_temp.as_member('88888888-dddd-4ddd-8ddd-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v JSONB := member_sidebar(51);
+  v_ids UUID[];
+BEGIN
+  IF (v -> 'people') IS DISTINCT FROM (
+       SELECT COALESCE(jsonb_agg(to_jsonb(m) - 'ordinality' ORDER BY m.ordinality), '[]')
+         FROM list_members(p_bots => FALSE, p_limit => 51) WITH ORDINALITY AS m) THEN
+    RAISE EXCEPTION 'FAIL: the sidebar''s people are not list_members''s';
+  END IF;
+  IF (v -> 'bots') IS DISTINCT FROM (
+       SELECT COALESCE(jsonb_agg(to_jsonb(m) - 'ordinality' ORDER BY m.ordinality), '[]')
+         FROM list_members(p_bots => TRUE, p_limit => 51) WITH ORDINALITY AS m) THEN
+    RAISE EXCEPTION 'FAIL: the sidebar''s bots are not list_members''s';
+  END IF;
+  IF jsonb_array_length(v -> 'people') = 0 THEN
+    RAISE EXCEPTION 'FAIL: the sidebar found nobody, so proved nothing';
+  END IF;
+  IF (v -> 'counts') IS DISTINCT FROM member_counts() THEN
+    RAISE EXCEPTION 'FAIL: the sidebar''s counts are not member_counts''s';
+  END IF;
+
+  SELECT array_agg((e ->> 'id')::UUID) INTO v_ids
+    FROM jsonb_array_elements((v -> 'bots') || (v -> 'people')) e;
+  IF (SELECT count(*) FROM jsonb_array_elements(v -> 'assignments'))
+     <> (SELECT count(*) FROM member_roles_for(v_ids)) THEN
+    RAISE EXCEPTION 'FAIL: the sidebar''s assignments are not member_roles_for''s';
+  END IF;
+  IF (SELECT count(*) FROM jsonb_array_elements(v -> 'roles') r
+       WHERE (r ->> 'server_id')::UUID IS DISTINCT FROM app.server_id()) > 0 THEN
+    RAISE EXCEPTION 'FAIL: the sidebar showed another server''s role';
+  END IF;
+  IF jsonb_array_length(v -> 'roles') <> (SELECT count(*) FROM roles) THEN
+    RAISE EXCEPTION 'FAIL: the sidebar''s roles are not what the member can read';
+  END IF;
+  RAISE NOTICE 'ok  the sidebar is the five requests it replaces';
+END $$;
+
+RESET ROLE;
+SET LOCAL ROLE anon;
+DO $$
+BEGIN
+  PERFORM member_sidebar();
+  RAISE EXCEPTION 'FAIL: anon read the member sidebar';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  anon cannot read the member sidebar';
+END $$;
+
 RESET ROLE;
 ROLLBACK;
