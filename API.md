@@ -352,7 +352,7 @@ silent re-login still triggers.
 | `toggle_reaction`, `list_reactions` | `insert`/`delete` keyed by `(message, user, emoji)`; a duplicate-key error *is* the "already reacted" answer |
 | `moderate_user`, `set_user_permissions` | RPCs — RLS is row-level, so a policy allowing an admin to write another member's flags would also let them rewrite that member's identity. `moderate_user` kept the RPC but regained an edge function in front of it, which is the only thing that can reach LiveKit (above) |
 | `list_dm_conversations` | `dm_conversations(p_limit, p_before)` — `DISTINCT ON` instead of a thousand rows grouped in TypeScript, and since 041 a page of them rather than every peer you have ever messaged |
-| the `notifications` table | `unread_counts()` + `mark_read()` over `read_state` |
+| the `notifications` table | `unread_counts()` + `mark_read()` over `read_state`. A cursor that moves forward rings `read` on its owner's user topic, once per statement: `{scope, scope_id, last_read_id}` when one cursor moved, `{}` when several did (`mark_all_read`). A write that moved nothing rings nothing. The reader's other devices count again where they still show something unread there |
 | *(new)* pins | `set_pinned(p_scope, p_message, p_pinned)` for channels and DMs alike, then a `select` on `message_pins` / `dm_message_pins` with the message embedded to list them. A function rather than an insert because of the cap — fifty per conversation, and the fifty-first raises `pin_limit` — and because a channel pin takes `PIN_MESSAGES` (or managing a private channel) while a DM pin takes only being one of the two, and not being banned or blocked by the other (`dm_not_accepted`). Nobody timed out pins or unpins (`timed_out`). It rings `pin` on the channel, or `dm_pin` on both sides' user topics, with the message id. A pin names a message and never its words |
 | *(new)* polls | posted as a message: the question and options in the sealed body (in the clear where the channel's encryption is off), and the rules the server enforces in `messages.poll` — `{options, multiple, closes_at}`, set once on insert and refused on an edit. Posting one takes `CREATE_POLLS`, which `@everyone` has by default. Then `vote_poll(p_message, p_options)` replaces the caller's ballot (an empty array takes it back), `poll_tallies(p_ids)` reads `{counts, voters, mine}`, and `close_poll(p_message)` lets the author end it early. **Members see counts, never ballots**: `poll_votes` shows each member only their own rows. The server can still read every row — it counts them |
 | *(new)* reports | `report_message(p_message, p_reason, p_note)` and `report_member(p_target, p_reason, p_note)` file one; reasons are `spam`, `harassment`, `explicit`, `other`, the note is up to 1,000 characters. **A message report copies the sealed envelope server-side** — ciphertext, nonce, signature, key version, author — so the reporter supplies nothing that could be forged, the report outlives the message, and the database still never holds the words; a reviewer's client opens it with the channel key it holds and checks the signature. One report per message per reporter, one open report per member per reporter (`already_reported`), twenty open per reporter (`too_many_reports`). Reviewers (`REVIEW_REPORTS`, on `Moderator` by default) `select` from `reports`, never one about themselves; `resolve_report(p_report, p_outcome)` records `dismissed`, `deleted`, `timed_out`, `banned` or `kicked` after **checking it happened** (`outcome_not_done`; a kicked member is not recorded as banned, nor the other way round), and closes every open report the action settles — all of a message's for a deletion, all of a person's for a ban or a kick. Rings `reports` on each reviewer's user topic. Closed reports are deleted after 90 days |
@@ -434,9 +434,19 @@ files, each run once after it, and the list below grows with them.
    (`server_icons_insert`, `server_icons_delete`); the bucket takes a PNG of up to 2 MB, holds
    `app.server_icons_per_server()` objects a server, and the sweep collects an icon no server
    names. `servers.icon_url` holds that path, never an address.
+20. **022_live_messages.sql** — what is live in a channel: its open polls and a bot's current
+   player, asked for directly, since one page of chat may not hold them.
+21. **023_call_players.sql** — a bot's player belongs to the call it plays to (`"call"` beside
+   the live mark), so everyone in that call can see and press it.
+22. **024_panels_are_bots.sql** — only a bot writes `blocks`, on an edit as well as an insert
+   (`messages_blocks_by_bot`).
+23. **025_member_sidebar.sql** — `member_sidebar`, the sidebar's first five requests in one.
+24. **026_read_announce.sql** — a read cursor that moves forward rings `read` on its owner's
+   user topic, so the reader's other devices clear the badge (`app.announce_read`).
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
-`send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. Two of those exist
+`send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
+moves rings `read` on `user:<id>` there too, in the same shape. Two of those exist
 purely because **a PostgREST upsert cannot be used against a column-granted table**: the generated
 `ON CONFLICT DO UPDATE` writes every payload column, conflict key included, and the privilege
 check happens at plan time — so it is refused whether or not the row exists. `claim_handle` and

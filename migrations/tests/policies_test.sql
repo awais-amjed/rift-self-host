@@ -595,6 +595,78 @@ BEGIN
   RAISE NOTICE 'ok  read cursors are private to their owner';
 END $$;
 
+-- ---------- 026: a read reaches the reader's other devices ----------
+-- A cursor that moves is told to its owner's own topic, once per statement;
+-- one that does not move says nothing, or every focus would ring every device.
+RESET ROLE;
+DO $$
+DECLARE
+  v_alice UUID := '11111111-aaaa-4aaa-8aaa-000000000001';
+  v_chan  UUID := 'aaaa1111-0000-4000-8000-000000000001';
+  v_n     INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+
+  PERFORM set_config('request.jwt.claims', '', true);
+  UPDATE read_state SET last_read_id = 0
+   WHERE user_id = v_alice AND scope = 'channel' AND scope_id = v_chan;
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+  VALUES (v_chan, '11111111-aaaa-4aaa-8aaa-000000000002', 'read-me', 'n', 's', 1);
+  IF EXISTS (SELECT 1 FROM pg_temp.said WHERE event = 'read') THEN
+    RAISE EXCEPTION 'FAIL: a cursor moved backwards was announced as a read';
+  END IF;
+
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  PERFORM mark_read('channel', v_chan);
+  SELECT count(*) INTO v_n FROM pg_temp.said WHERE event = 'read';
+  IF v_n <> 1 OR NOT EXISTS (
+       SELECT 1 FROM pg_temp.said
+        WHERE event = 'read' AND topic = 'user:' || v_alice
+          AND payload ->> 'scope' = 'channel'
+          AND payload ->> 'scope_id' = v_chan::TEXT
+          AND (payload ->> 'last_read_id')::BIGINT > 0) THEN
+    RAISE EXCEPTION 'FAIL: a read was told % times, not once to its reader with the cursor', v_n;
+  END IF;
+
+  PERFORM mark_read('channel', v_chan);
+  SELECT count(*) INTO v_n FROM pg_temp.said WHERE event = 'read';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: reading what was already read was announced again';
+  END IF;
+
+  -- Mark all as read: a broadcast per statement, never a broadcast per channel.
+  DELETE FROM pg_temp.said;
+  PERFORM set_config('request.jwt.claims', '', true);
+  UPDATE read_state SET last_read_id = 0 WHERE user_id = v_alice;
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  PERFORM mark_all_read();
+  SELECT count(*) INTO v_n FROM pg_temp.said WHERE event = 'read';
+  IF v_n = 0 OR v_n > 4 THEN
+    RAISE EXCEPTION 'FAIL: mark all as read was told % times', v_n;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_temp.said
+              WHERE event = 'read' AND topic <> 'user:' || v_alice) THEN
+    RAISE EXCEPTION 'FAIL: a read was told to somebody other than its reader';
+  END IF;
+
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  RAISE NOTICE 'ok  a read is told to the reader''s devices once; a non-read is not';
+END $$;
+
+SET LOCAL ROLE authenticated;
+
 -- ---------- 020: a badge that stops counting ----------
 -- The count is capped because the badge is: "99+" is what a member sees above
 -- ninety-nine either way, and an uncapped count is a walk of every message in
