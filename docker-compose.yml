@@ -396,6 +396,12 @@ services:
       FILE_SIZE_LIMIT: 52428800
       STORAGE_BACKEND: file
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      # A file's ETag from its modified time and size. The default, md5,
+      # reads and hashes the whole file on every download, ranged or not:
+      # about 1.7 s for a 650 MB video before its first byte, and again for
+      # each part the app fetches as it plays. Rift's attachments are sealed
+      # with AES-GCM, so the app checks them itself and never reads the ETag.
+      STORAGE_FILE_ETAG_ALGORITHM: mtime
       TENANT_ID: stub
       REGION: stub
       GLOBAL_S3_BUCKET: stub
