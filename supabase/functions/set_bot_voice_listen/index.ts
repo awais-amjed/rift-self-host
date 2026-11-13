@@ -5,6 +5,7 @@ import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
 import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
+import { permissionSources } from "../_shared/moderation.ts";
 
 /**
  * Let a bot hear a voice channel, or stop it hearing one.
@@ -132,6 +133,12 @@ async function applyToLiveRoom(
     const participants = await roomService.listParticipants(channelId);
     const mine = participants.filter((p) => p.identity.split("~")[0] === botId);
 
+    // A channel that does not let the bot speak (`channel_overrides`) keeps
+    // its microphone held back here too; every source would hand it back.
+    const { data: maySpeak } = await supabase.rpc("user_has_channel_permission", {
+      p_user: botId, p_channel: channelId, p_name: "SPEAK",
+    });
+
     for (const participant of mine) {
       await roomService.updateParticipant(channelId, participant.identity, {
         permission: {
@@ -140,7 +147,7 @@ async function applyToLiveRoom(
           canPublishData: true,
           // Empty list means every source, the opposite encoding to an
           // AccessToken grant's `undefined` — see `_shared/moderation.ts`.
-          canPublishSources: [],
+          canPublishSources: permissionSources(maySpeak !== true, false),
         },
       });
     }

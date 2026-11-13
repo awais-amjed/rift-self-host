@@ -106,6 +106,15 @@ export function livePermissionsFor(
   }
 }
 
+/**
+ * Whether a live connection is held without its microphone: sources that
+ * name some but not the microphone. An empty list is every source (see
+ * [permissionSources]), so it is not.
+ */
+export function micHeldBack(sources: TrackSource[] | undefined): boolean {
+  return (sources?.length ?? 0) > 0 && !sources!.includes(TrackSource.MICROPHONE);
+}
+
 /** The flags as every client reads them off participant metadata. */
 export function moderationMetadata(isMuted: boolean, isDeafened: boolean): string {
   return JSON.stringify({ muted: isMuted, deafened: isDeafened });

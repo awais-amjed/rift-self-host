@@ -1,6 +1,7 @@
 // Run: deno test --no-lock --allow-env=BUF_BIGINT_DISABLE --config supabase/functions/moderate_user/deno.json supabase/functions/_shared/
 import { assertEquals } from "jsr:@std/assert@1";
-import { livePermissionsFor } from "./moderation.ts";
+import { TrackSource } from "livekit-server-sdk";
+import { livePermissionsFor, micHeldBack } from "./moderation.ts";
 import { watchGrant } from "./watch.ts";
 
 // LiveKit replaces a connection's whole permission set on update, so a right
@@ -23,4 +24,15 @@ Deno.test("a moderated watch connection keeps what it was minted with", () => {
   assertEquals(live.hidden, minted.hidden);
   assertEquals(live.canPublish, minted.canPublish);
   assertEquals(live.canPublishData, minted.canPublishData);
+});
+
+// `set_channel_override` updates only the connections whose microphone is in
+// the wrong state, so it has to read the two encodings the same way the
+// pushes write them: empty is every source, the muted list holds it back.
+Deno.test("a connection's microphone is read the way it was pushed", () => {
+  assertEquals(micHeldBack([]), false);
+  assertEquals(micHeldBack(undefined), false);
+  assertEquals(micHeldBack(livePermissionsFor("voice", true, false).canPublishSources), true);
+  assertEquals(micHeldBack(livePermissionsFor("voice", false, false).canPublishSources), false);
+  assertEquals(micHeldBack([TrackSource.MICROPHONE, TrackSource.CAMERA]), false);
 });
