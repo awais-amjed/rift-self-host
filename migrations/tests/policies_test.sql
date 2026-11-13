@@ -10046,5 +10046,311 @@ EXCEPTION WHEN insufficient_privilege THEN
   RAISE NOTICE 'ok  anon cannot read the member sidebar';
 END $$;
 
+
+-- ============================================================
+-- 29. Permissions per channel (027)
+-- ============================================================
+-- In Foxtrot: fay (Admin), ivy (Moderator), jay (Keepers: manages channels and
+-- nothing else), gus (Writers, and Quiet), hal (no roles), kim (banned).
+-- #news is text, #stage voice.
 RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('99999999-f0f0-4f0f-8f0f-000000000001'),  -- fay
+  ('99999999-f0f0-4f0f-8f0f-000000000002'),  -- ivy
+  ('99999999-f0f0-4f0f-8f0f-000000000003'),  -- jay
+  ('99999999-f0f0-4f0f-8f0f-000000000004'),  -- gus
+  ('99999999-f0f0-4f0f-8f0f-000000000005'),  -- hal
+  ('99999999-f0f0-4f0f-8f0f-000000000006');  -- kim
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('f0f00000-0000-4000-8000-000000000001', 'Foxtrot', 'ws://lan:7880');
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('f0f01111-0000-4000-8000-000000000001', 'f0f00000-0000-4000-8000-000000000001', 'news',  'text'),
+  ('f0f01111-0000-4000-8000-000000000002', 'f0f00000-0000-4000-8000-000000000001', 'stage', 'voice');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key, is_banned)
+SELECT ('99999999-f0f0-4f0f-8f0f-00000000000' || n)::UUID,
+       'f0f00000-0000-4000-8000-000000000001', name, initcap(name),
+       'pk-' || name, 'sid-' || name, 'chat-' || name, name = 'kim'
+  FROM (VALUES (1, 'fay'), (2, 'ivy'), (3, 'jay'), (4, 'gus'), (5, 'hal'), (6, 'kim')) v(n, name);
+-- @everyone here cannot attach, so jay has a bit he does not hold.
+UPDATE roles SET permissions = permissions & ~app.perm('ATTACH_FILES')
+ WHERE server_id = 'f0f00000-0000-4000-8000-000000000001' AND is_everyone;
+INSERT INTO roles (id, server_id, name, position, permissions) VALUES
+  ('f0f02222-0000-4000-8000-000000000001', 'f0f00000-0000-4000-8000-000000000001', 'Writers', 10, 0),
+  ('f0f02222-0000-4000-8000-000000000002', 'f0f00000-0000-4000-8000-000000000001', 'Quiet',   11, 0),
+  ('f0f02222-0000-4000-8000-000000000003', 'f0f00000-0000-4000-8000-000000000001', 'Keepers', 100,
+   app.perm('MANAGE_CHANNELS')),
+  ('f0f02222-0000-4000-8000-000000000004', 'f0f00000-0000-4000-8000-000000000001', 'Higher',  250, 0);
+INSERT INTO member_roles (user_id, role_id)
+SELECT '99999999-f0f0-4f0f-8f0f-000000000001'::UUID, id FROM roles
+ WHERE server_id = 'f0f00000-0000-4000-8000-000000000001' AND name = 'Admin'
+UNION ALL
+SELECT '99999999-f0f0-4f0f-8f0f-000000000002'::UUID, id FROM roles
+ WHERE server_id = 'f0f00000-0000-4000-8000-000000000001' AND name = 'Moderator'
+UNION ALL
+SELECT '99999999-f0f0-4f0f-8f0f-000000000003'::UUID, 'f0f02222-0000-4000-8000-000000000003'::UUID
+UNION ALL
+SELECT '99999999-f0f0-4f0f-8f0f-000000000004'::UUID, 'f0f02222-0000-4000-8000-000000000001'::UUID
+UNION ALL
+SELECT '99999999-f0f0-4f0f-8f0f-000000000004'::UUID, 'f0f02222-0000-4000-8000-000000000002'::UUID
+UNION ALL
+SELECT '99999999-f0f0-4f0f-8f0f-000000000006'::UUID, 'f0f02222-0000-4000-8000-000000000001'::UUID;
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'f0f00000-0000-4000-8000-000000000001';
+
+-- ---------- nothing set: the channel is the server ----------
+DO $$
+BEGIN
+  IF app.channel_permissions_of('f0f01111-0000-4000-8000-000000000001',
+                                '99999999-f0f0-4f0f-8f0f-000000000005')
+     <> app.permissions_of('99999999-f0f0-4f0f-8f0f-000000000005') THEN
+    RAISE EXCEPTION 'FAIL: a channel with no overrides is not the server''s bits';
+  END IF;
+  IF app.channel_permissions_of('f0f01111-0000-4000-8000-000000000001',
+                                '11111111-aaaa-4aaa-8aaa-000000000002') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a member of another server has bits in this channel';
+  END IF;
+  RAISE NOTICE 'ok  with no overrides a channel answers as the server does';
+END $$;
+
+-- ---------- who may write them ----------
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000005');  -- hal
+DO $$
+DECLARE v_everyone UUID;
+BEGIN
+  SELECT id INTO v_everyone FROM roles WHERE is_everyone;
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                          0, app.perm('SEND_MESSAGES')) ->> 'reason' <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: a member who cannot manage the channel set an override';
+  END IF;
+  BEGIN
+    INSERT INTO channel_overrides (channel_id, role_id, deny)
+    VALUES ('f0f01111-0000-4000-8000-000000000001', v_everyone, app.perm('SEND_MESSAGES'));
+    RAISE EXCEPTION 'FAIL: a member wrote channel_overrides directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  an override is written by a channel''s managers, through the call';
+END $$;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000002');  -- ivy
+DO $$
+DECLARE v_everyone UUID;
+BEGIN
+  SELECT id INTO v_everyone FROM roles WHERE is_everyone;
+  -- #news: only Writers post.
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                          0, app.perm('SEND_MESSAGES') | app.perm('ADD_REACTIONS')
+                             | app.perm('MENTION_ALL')) ->> 'reason' <> 'ok'
+     OR set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                             'f0f02222-0000-4000-8000-000000000001',
+                             app.perm('SEND_MESSAGES'), 0) ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a moderator could not make #news read-only';
+  END IF;
+  -- #stage: nobody speaks.
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000002', v_everyone,
+                          0, app.perm('SPEAK')) ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a moderator could not take speaking off #stage';
+  END IF;
+
+  -- A role at or above her own.
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                          'f0f02222-0000-4000-8000-000000000004',
+                          0, app.perm('SEND_MESSAGES')) ->> 'reason' <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: a moderator shaped a role above her own';
+  END IF;
+  -- A bit a channel has no say in, one of the other kind, both answers at once.
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                          app.perm('VIEW_CHANNEL'), 0) ->> 'reason' <> 'invalid'
+     OR set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                             app.perm('BAN_MEMBERS'), 0) ->> 'reason' <> 'invalid'
+     OR set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                             app.perm('SPEAK'), 0) ->> 'reason' <> 'invalid'
+     OR set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                             app.perm('PIN_MESSAGES'), app.perm('PIN_MESSAGES'))
+          ->> 'reason' <> 'invalid' THEN
+    RAISE EXCEPTION 'FAIL: an override outside the channel''s own bits was accepted';
+  END IF;
+  RAISE NOTICE 'ok  a moderator overrides the channel''s bits on roles below her';
+END $$;
+
+RESET ROLE;
+DO $$
+BEGIN
+  PERFORM pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000002');
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                          (SELECT id FROM roles r
+                            WHERE r.server_id = 'aaaa0000-0000-4000-8000-000000000001'
+                              AND r.is_everyone),
+                          0, app.perm('SEND_MESSAGES')) ->> 'reason' <> 'no_such_role' THEN
+    RAISE EXCEPTION 'FAIL: an override named another server''s role';
+  END IF;
+  RAISE NOTICE 'ok  an override names a role of the channel''s own server';
+END $$;
+
+-- jay manages channels but cannot attach, so cannot give it either.
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000003');
+DO $$
+DECLARE v_everyone UUID;
+BEGIN
+  SELECT id INTO v_everyone FROM roles WHERE is_everyone;
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                          app.perm('ATTACH_FILES'),
+                          app.perm('SEND_MESSAGES') | app.perm('ADD_REACTIONS')
+                          | app.perm('MENTION_ALL')) ->> 'reason' <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: a manager allowed a bit he does not hold';
+  END IF;
+  -- ...but the bits he does hold are his to move, whatever else is on the row.
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001', v_everyone,
+                          0, app.perm('SEND_MESSAGES') | app.perm('ADD_REACTIONS')
+                             | app.perm('MENTION_ALL') | app.perm('CREATE_POLLS'))
+       ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a manager could not deny a bit he holds';
+  END IF;
+  RAISE NOTICE 'ok  a manager moves only the bits he holds himself';
+END $$;
+
+-- fay (an admin) gives #news's Writers the file they lack, and takes pinning
+-- off the Moderator role there.
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000001');
+DO $$
+BEGIN
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                          'f0f02222-0000-4000-8000-000000000001',
+                          app.perm('SEND_MESSAGES') | app.perm('ATTACH_FILES')
+                          | app.perm('CREATE_POLLS'), 0) ->> 'reason' <> 'ok'
+     OR set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                             'f0f02222-0000-4000-8000-000000000002',
+                             0, app.perm('SEND_MESSAGES')) ->> 'reason' <> 'ok'
+     OR set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                             (SELECT id FROM roles WHERE name = 'Moderator'),
+                             0, app.perm('PIN_MESSAGES')) ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin could not set an override';
+  END IF;
+  RAISE NOTICE 'ok  an admin sets any role''s override';
+END $$;
+
+-- ---------- what each of them may do now ----------
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000005');  -- hal
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+    VALUES ('f0f01111-0000-4000-8000-000000000001', 'hal-news', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a member posted in a channel that denies @everyone';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  IF app.can_attach('f0f01111-0000-4000-8000-000000000001/a.jpg')
+     OR app.can_attach('dm_x/a.jpg') THEN
+    RAISE EXCEPTION 'FAIL: hal may attach where nobody gave it him';
+  END IF;
+  IF (SELECT (c ->> 'my_permissions')::BIGINT & app.perm('SEND_MESSAGES')
+        FROM jsonb_array_elements(get_server_details() -> 'channels') c
+       WHERE c ->> 'id' = 'f0f01111-0000-4000-8000-000000000001') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: the server details offer hal the composer in #news';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM channel_overrides
+                  WHERE channel_id = 'f0f01111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a member cannot read the overrides of a channel he sees';
+  END IF;
+  RAISE NOTICE 'ok  a read-only channel refuses a member''s post and says so';
+END $$;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000004');  -- gus
+INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, mentions_all)
+VALUES ('f0f01111-0000-4000-8000-000000000001', 'gus-news', 'n', 's', 1, true);
+DO $$
+BEGIN
+  -- Writers allows and Quiet denies: between his own roles, allow wins.
+  IF NOT app.has_channel_perm('f0f01111-0000-4000-8000-000000000001', 'SEND_MESSAGES') THEN
+    RAISE EXCEPTION 'FAIL: a deny on one role beat an allow on another';
+  END IF;
+  IF (SELECT mentions_all FROM messages WHERE ciphertext = 'gus-news') THEN
+    RAISE EXCEPTION 'FAIL: @all rang a channel that does not give it him';
+  END IF;
+  IF NOT app.can_attach('f0f01111-0000-4000-8000-000000000001/a.jpg') THEN
+    RAISE EXCEPTION 'FAIL: a channel''s allow did not give a bit the server lacks';
+  END IF;
+  BEGIN
+    INSERT INTO message_reactions (message_id, user_id, emoji)
+    VALUES ((SELECT id FROM messages WHERE ciphertext = 'gus-news'), auth.uid(), '👍');
+    RAISE EXCEPTION 'FAIL: a reaction landed where @everyone may not react';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a role the channel allows posts, and only what it allows';
+END $$;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000002');  -- ivy
+DO $$
+BEGIN
+  IF app.can_pin_in('f0f01111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a role''s deny did not take pinning off it here';
+  END IF;
+  IF NOT app.has_channel_perm('f0f01111-0000-4000-8000-000000000001', 'MANAGE_MESSAGES') THEN
+    RAISE EXCEPTION 'FAIL: a deny of one bit took another';
+  END IF;
+  RAISE NOTICE 'ok  a role''s deny takes that bit in that channel alone';
+END $$;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000001');  -- fay
+INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+VALUES ('f0f01111-0000-4000-8000-000000000001', 'fay-news', 'n', 's', 1);
+
+RESET ROLE;
+DO $$
+BEGIN
+  IF user_has_channel_permission('99999999-f0f0-4f0f-8f0f-000000000005',
+                                 'f0f01111-0000-4000-8000-000000000002', 'SPEAK')
+     OR NOT user_has_channel_permission('99999999-f0f0-4f0f-8f0f-000000000005',
+                                        'f0f01111-0000-4000-8000-000000000002', 'CONNECT')
+     OR NOT user_has_channel_permission('99999999-f0f0-4f0f-8f0f-000000000001',
+                                        'f0f01111-0000-4000-8000-000000000002', 'SPEAK') THEN
+    RAISE EXCEPTION 'FAIL: #stage does not keep everyone but its admin quiet';
+  END IF;
+  -- kim is banned, and Writers allows posting: still nothing.
+  IF app.channel_permissions_of('f0f01111-0000-4000-8000-000000000001',
+                                '99999999-f0f0-4f0f-8f0f-000000000006') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: an override handed a banned member a bit';
+  END IF;
+  RAISE NOTICE 'ok  a call asks the channel, and a ban leaves nothing to allow';
+END $$;
+
+SET LOCAL ROLE anon;
+DO $$
+BEGIN
+  PERFORM set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                               'f0f02222-0000-4000-8000-000000000001', 0, 0);
+  RAISE EXCEPTION 'FAIL: anon reached set_channel_override';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  anon cannot set an override';
+END $$;
+RESET ROLE;
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  PERFORM user_has_channel_permission('99999999-f0f0-4f0f-8f0f-000000000005',
+                                      'f0f01111-0000-4000-8000-000000000002', 'SPEAK');
+  RAISE EXCEPTION 'FAIL: a member asked about somebody else''s channel bits';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  only the service role asks about another member';
+END $$;
+
+-- Both zero is "inherit": the row goes.
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000001');
+DO $$
+BEGIN
+  -- Called first, on its own: Postgres would run the EXISTS beside it before
+  -- the call, and find the row the call was about to remove.
+  IF set_channel_override('f0f01111-0000-4000-8000-000000000001',
+                          'f0f02222-0000-4000-8000-000000000002', 0, 0) ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin could not clear an override';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_overrides
+              WHERE role_id = 'f0f02222-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: clearing an override left its row';
+  END IF;
+  RAISE NOTICE 'ok  an override set back to inherit is gone';
+END $$;
+RESET ROLE;
+
 ROLLBACK;

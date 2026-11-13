@@ -233,6 +233,20 @@ async function applyToLiveRooms(
           .map((participant) => ({ room, participant, service }))
     );
 
+    // An unmute gives the microphone back only where the channel lets them
+    // speak (`channel_overrides`); a stage that keeps them quiet keeps them
+    // quiet. A DM call is not a channel, and only a ban reaches one.
+    const roomNames = [...new Set(mine.map(({ room }) => room))];
+    const mayNotSpeak = new Set<string>();
+    if (!isBanned && !micDenied(isMuted, isDeafened)) {
+      await Promise.all(roomNames.filter((name) => !name.startsWith("dm-")).map(async (name) => {
+        const { data } = await supabase.rpc("user_has_channel_permission", {
+          p_user: targetUserId, p_channel: name, p_name: "SPEAK",
+        });
+        if (data !== true) mayNotSpeak.add(name);
+      }));
+    }
+
     // Across connections at once — they are different rooms or different
     // devices, and a moderator is waiting on this. *Within* one connection the
     // order still holds: the permission change has to land before the mute,
@@ -250,7 +264,7 @@ async function applyToLiveRooms(
           metadata,
           permission: livePermissionsFor(
             connectionKind(participant.identity),
-            isMuted,
+            isMuted || mayNotSpeak.has(room),
             isDeafened,
             !isBot || botListensIn.has(room),
           ),

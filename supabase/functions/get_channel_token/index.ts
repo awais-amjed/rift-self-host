@@ -99,15 +99,26 @@ Deno.serve(async (req) => {
       { data: visible, error: visibleError },
       { data: mayConnect },
       { data: mayShare },
+      { data: maySpeak },
       { data: userData, error: userError },
       credentials,
       { data: limitsRow },
     ] = await Promise.all([
       supabase.rpc("channel_joinable_by", { p_channel: channel_id, p_user: auth.userId }),
-      supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "CONNECT" }),
+      // The channel's bits, not the server's: a channel can override a
+      // role's (`channel_overrides`), so a stage can keep everyone but its
+      // speakers quiet.
+      supabase.rpc("user_has_channel_permission", {
+        p_user: auth.userId, p_channel: channel_id, p_name: "CONNECT",
+      }),
       wantsShare
-        ? supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "SCREEN_SHARE" })
+        ? supabase.rpc("user_has_channel_permission", {
+          p_user: auth.userId, p_channel: channel_id, p_name: "SCREEN_SHARE",
+        })
         : Promise.resolve({ data: null }),
+      supabase.rpc("user_has_channel_permission", {
+        p_user: auth.userId, p_channel: channel_id, p_name: "SPEAK",
+      }),
       supabase
         .from(DBSchema.users.tableName)
         .select(
@@ -446,7 +457,10 @@ Deno.serve(async (req) => {
       room,
       canPublish: true,
       // undefined = all sources. Deafened denies the mic as well as the ears.
-      canPublishSources: grantSources(isMuted, isDeafened),
+      // Without `SPEAK` here the microphone goes as it does for a muted
+      // member, though the metadata says nothing: nobody muted them, and the
+      // badge would say somebody had. Unreadable is not allowed, failing closed.
+      canPublishSources: grantSources(isMuted || maySpeak !== true, isDeafened),
       // Never on a share connection. A share only publishes — the desktop's
       // is a Rust session that listens for nothing — and the roster skips
       // `_screenshare` / `_soundshare` identities, because they are the same
