@@ -147,7 +147,7 @@ Deno.serve(async (req) => {
     // flags below decide what a token may carry once you are in the room; these
     // decide whether there is a token at all.
     if (mayConnect !== true) {
-      return CustomResponse.error("You cannot join voice channels", EC.PERMISSION_DENIED);
+      return CustomResponse.error("You cannot join this voice channel", EC.PERMISSION_DENIED);
     }
     // Sharing sound is the same capability as sharing a screen — a screen
     // share already carries the app's audio, so a separate permission would
