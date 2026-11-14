@@ -10292,6 +10292,58 @@ BEGIN
   RAISE NOTICE 'ok  a role''s deny takes that bit in that channel alone';
 END $$;
 
+-- ---------- an old message, where you can no longer post (028) ----------
+-- hal's from before #news went read-only, and a bot's panel there. Written as
+-- the owner of the table; the sender trigger takes each from the claims.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES ('99999999-f0f0-4f0f-8f0f-000000000007');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES ('99999999-f0f0-4f0f-8f0f-000000000007', 'f0f00000-0000-4000-8000-000000000001',
+        'newsbot', 'NewsBot', 'pk-newsbot', 'sid-newsbot', 'chat-newsbot', true);
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000005');  -- hal
+INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+VALUES ('f0f01111-0000-4000-8000-000000000001', 'hal-old', 'n', 's', 1);
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000007');  -- newsbot
+INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+VALUES ('f0f01111-0000-4000-8000-000000000001', 'bot-panel', 'n', 's', 1);
+SET LOCAL ROLE authenticated;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000005');  -- hal
+DO $$
+BEGIN
+  BEGIN
+    UPDATE messages SET nonce = 'n2' WHERE ciphertext = 'hal-old';
+    RAISE EXCEPTION 'FAIL: a member rewrote an old message where he cannot post';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  read-only stops edits as well as posts';
+END $$;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000004');  -- gus
+DO $$
+DECLARE v_n INT;
+BEGIN
+  UPDATE messages SET nonce = 'n2' WHERE ciphertext = 'gus-news';
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a member the channel lets post could not edit there';
+  END IF;
+  RAISE NOTICE 'ok  whoever may post in a channel may edit there';
+END $$;
+
+SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000007');  -- newsbot
+DO $$
+DECLARE v_n INT;
+BEGIN
+  UPDATE messages SET nonce = 'n2' WHERE ciphertext = 'bot-panel';
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a bot could not redraw its panel in a read-only channel';
+  END IF;
+  RAISE NOTICE 'ok  a bot still redraws its own panel in a read-only channel';
+END $$;
+
 SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000001');  -- fay
 INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
 VALUES ('f0f01111-0000-4000-8000-000000000001', 'fay-news', 'n', 's', 1);
