@@ -1,14 +1,12 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import { TrackSource } from "livekit-server-sdk";
 import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { connectionKind, livekitRoomServiceForChannel } from "../_shared/livekit.ts";
-import { livePermissionsFor, micDenied, micHeldBack } from "../_shared/moderation.ts";
-import { mayUseSoundboard } from "../_shared/soundboard.ts";
+import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
+import { reconcileConnections } from "../_shared/call_rights.ts";
 
 /**
  * Change what one role may do in one channel, and make a voice channel's
@@ -29,7 +27,7 @@ import { mayUseSoundboard } from "../_shared/soundboard.ts";
  *
  * The soundboard moves with it, the same way: a press is a data packet no
  * server sees, so what stops one is the connection's `canPublishData`
- * (`_shared/soundboard.ts`), and that too was minted at the join.
+ * (`_shared/call_rights.ts`), and that too was minted at the join.
  *
  * Only those two. Connect, sharing and summoning are asked on the next join,
  * share or summon, and nobody is put out of a call they are in.
@@ -93,14 +91,11 @@ Deno.serve(async (req) => {
 });
 
 /**
- * Give or take the microphone on every connection in [channelId]'s call whose
- * microphone no longer matches `SPEAK` and the moderation flags, and the
- * soundboard on every one whose `canPublishData` no longer matches it.
+ * Give or take the microphone and the soundboard on every connection in
+ * [channelId]'s call that no longer matches (`reconcileConnections`).
  *
  * One room: rooms are named by channel id, and the RPC already said the
- * channel is this server's. A connection already right is left alone, since
- * `updateParticipant` replaces the whole permission set and there is no reason
- * to touch one that did not move.
+ * channel is this server's.
  */
 async function applyToLiveCall(
   serverId: string,
@@ -123,84 +118,8 @@ async function applyToLiveCall(
     const rooms = await service.listRooms([channelId]);
     if (rooms.length === 0) return { updated: 0, error: null };
 
-    // A watch connection publishes nothing, so it has no microphone to move.
-    const connections = (await service.listParticipants(channelId))
-      .filter((p) => connectionKind(p.identity) !== "watch");
-    const userIds = [...new Set(connections.map((p) => p.identity.split("~")[0]))];
-    if (userIds.length === 0) return { updated: 0, error: null };
-
-    const [{ data: users }, { data: grants }, speaks, presses] = await Promise.all([
-      supabase
-        .from(DBSchema.users.tableName)
-        .select(
-          `${DBSchema.users.id}, ${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ` +
-            `${DBSchema.users.isBot}`,
-        )
-        .in(DBSchema.users.id, userIds),
-      supabase
-        .from("bot_voice_grants")
-        .select("bot_id")
-        .eq("channel_id", channelId)
-        .in("bot_id", userIds),
-      Promise.all(userIds.map(async (id) => {
-        const { data } = await supabase.rpc("user_has_channel_permission", {
-          p_user: id, p_channel: channelId, p_name: "SPEAK",
-        });
-        return [id, data === true] as const;
-      })),
-      Promise.all(userIds.map(async (id) =>
-        [id, await mayUseSoundboard(supabase, id, channelId)] as const
-      )),
-    ]);
-
-    const byId = new Map(
-      (users ?? []).map((u) => [(u as Record<string, any>)[DBSchema.users.id] as string, u as Record<string, any>]),
-    );
-    const botListens = new Set((grants ?? []).map((g) => (g as Record<string, any>).bot_id as string));
-    const maySpeak = new Map(speaks);
-    const mayPress = new Map(presses);
-
-    let updated = 0;
-    await Promise.all(connections.map(async (participant) => {
-      const userId = participant.identity.split("~")[0];
-      const user = byId.get(userId);
-      if (!user) return;
-
-      const isMuted = user[DBSchema.users.isMuted] === true;
-      const isDeafened = user[DBSchema.users.isDeafened] === true;
-      const isBot = user[DBSchema.users.isBot] === true;
-      const quiet = isMuted || maySpeak.get(userId) !== true;
-      // Unreadable SPEAK is no SPEAK, failing closed as `get_channel_token` does.
-      const permission = livePermissionsFor(
-        connectionKind(participant.identity),
-        quiet,
-        isDeafened,
-        !isBot || botListens.has(userId),
-        mayPress.get(userId) === true,
-      );
-      if (
-        micHeldBack(participant.permission?.canPublishSources) === micDenied(quiet, isDeafened) &&
-        (participant.permission?.canPublishData ?? false) === permission.canPublishData
-      ) {
-        return;
-      }
-
-      // The permission before the mute, as in `moderate_user`: the first stops
-      // the next publish, the second the audio already flowing.
-      await service.updateParticipant(channelId, participant.identity, { permission });
-      updated++;
-
-      if (micDenied(quiet, isDeafened)) {
-        await Promise.all(
-          (participant.tracks ?? [])
-            .filter((track) => track.source === TrackSource.MICROPHONE && !track.muted)
-            .map((track) =>
-              service.mutePublishedTrack(channelId, participant.identity, track.sid, true)
-            ),
-        );
-      }
-    }));
-
+    const connections = await service.listParticipants(channelId);
+    const updated = await reconcileConnections(supabase, service, channelId, connections);
     return { updated, error: null };
   } catch (err) {
     return { updated: 0, error: String(err) };

@@ -71,7 +71,7 @@ export function livePermissionsFor(
   // False for a bot without a `bot_voice_grants` row for this room: a mute
   // must not hand a bot the ears it was never granted (BOTS.md §6b).
   mayListen = true,
-  // `mayUseSoundboard` in this room (`_shared/soundboard.ts`): a press is
+  // `channelRights` in this room (`_shared/call_rights.ts`): a press is
   // the only data packet a member sends. False unless said, so a caller
   // that forgets takes the soundboard rather than handing it out.
   soundboard = false,
@@ -119,6 +119,24 @@ export function livePermissionsFor(
  */
 export function micHeldBack(sources: TrackSource[] | undefined): boolean {
   return (sources?.length ?? 0) > 0 && !sources!.includes(TrackSource.MICROPHONE);
+}
+
+/**
+ * Whether a live connection of [kind] already holds [wanted] in everything a
+ * push moves: its ears, its packets and its microphone. A watch connection
+ * publishes nothing, so its microphone is not asked.
+ */
+export function holdsAlready(
+  kind: ConnectionKind,
+  held:
+    | { canSubscribe?: boolean; canPublishData?: boolean; canPublishSources?: TrackSource[] }
+    | undefined,
+  wanted: ReturnType<typeof livePermissionsFor>,
+): boolean {
+  return (held?.canSubscribe ?? false) === wanted.canSubscribe &&
+    (held?.canPublishData ?? false) === wanted.canPublishData &&
+    (kind === "watch" ||
+      micHeldBack(held?.canPublishSources) === micHeldBack(wanted.canPublishSources));
 }
 
 /** The flags as every client reads them off participant metadata. */

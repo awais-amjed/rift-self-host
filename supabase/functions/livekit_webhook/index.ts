@@ -1,9 +1,10 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import { RoomServiceClient, WebhookReceiver } from "livekit-server-sdk";
+import { ParticipantInfo, RoomServiceClient, WebhookReceiver } from "livekit-server-sdk";
 import DBSchema from "../_shared/schema.ts";
 import { connectionKind, normaliseHost } from "../_shared/livekit.ts";
 import { sweepOrphanedWatchers } from "../_shared/watch.ts";
+import { reconcileConnections } from "../_shared/call_rights.ts";
 
 /**
  * LiveKit's webhook: tells this server who joined and left its calls.
@@ -16,12 +17,22 @@ import { sweepOrphanedWatchers } from "../_shared/watch.ts";
  * `server_secrets` or `livekit_node_secrets`, which is how a node of this
  * server is told apart from anybody else.
  *
- * Used for one thing: removing a watch connection the moment its device's
- * voice connection leaves (`_shared/watch.ts`). Without it, a watcher whose
- * app had crashed went on receiving until somebody's roster read swept it.
- * A voice connection leaving and a watcher joining both prompt a sweep of the
- * room, decided from the room as it is now, so an event repeated, replayed or
- * delivered late can remove nothing that should stay.
+ * Used for two things:
+ *
+ *   * Removing a watch connection the moment its device's voice connection
+ *     leaves (`_shared/watch.ts`). Without it, a watcher whose app had crashed
+ *     went on receiving until somebody's roster read swept it. A voice
+ *     connection leaving and a watcher joining both prompt a sweep of the
+ *     room, decided from the room as it is now, so an event repeated,
+ *     replayed or delivered late can remove nothing that should stay.
+ *   * Checking everyone who joins a channel's call against the rules as they
+ *     are now (`checkJoin`). A token is good for an hour and says what was
+ *     true when it was minted, and the pushes that take a microphone or the
+ *     soundboard mid-call (`moderate_user`, `set_channel_override`) reach
+ *     only the connection that is there. An app that kept its first token
+ *     could leave and come back with it, unmuted; or banned, back in the
+ *     call. So a join the token gate would refuse now is removed, and one it
+ *     would mint differently is pushed what it would mint.
  *
  * Every other event is answered at once and changes nothing.
  */
@@ -45,6 +56,48 @@ function prompted(event: string, identity: string): boolean {
     default:
       return false;
   }
+}
+
+/** A channel's call: rooms are named by channel id, a DM call `dm-<callId>`. */
+const CHANNEL_ROOM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Joins worth checking: any connection to a channel's call. */
+function checked(event: string, room: string): boolean {
+  return event === "participant_joined" && CHANNEL_ROOM.test(room);
+}
+
+/**
+ * [identity], just joined [room], held to what `get_channel_token` would
+ * answer now: removed if it would refuse (the channel unseen, no `CONNECT`, a
+ * share without `SCREEN_SHARE`; a ban or another server's member has no bits
+ * at all), and otherwise given the microphone, soundboard, ears and flags it
+ * would mint (`reconcileConnections`). A token minted a moment ago already
+ * agrees, so for everybody honest this reads and changes nothing.
+ *
+ * Unreadable leaves it as it is: the token was minted from these same rules,
+ * and a database hiccup must not empty a call.
+ */
+async function checkJoin(service: RoomServiceClient, room: string, identity: string) {
+  let participant: ParticipantInfo;
+  try {
+    participant = await service.getParticipant(room, identity);
+  } catch {
+    return; // Gone again already.
+  }
+  const userId = identity.split("~")[0];
+  const ask = (name: string) =>
+    supabase.rpc("user_has_channel_permission", { p_user: userId, p_channel: room, p_name: name });
+  const answers = await Promise.all([
+    supabase.rpc("channel_joinable_by", { p_channel: room, p_user: userId }),
+    ask("CONNECT"),
+    ...(connectionKind(identity) === "share" ? [ask("SCREEN_SHARE")] : []),
+  ]);
+  if (answers.some((a) => a.error)) return;
+  if (answers.some((a) => a.data !== true)) {
+    await service.removeParticipant(room, identity);
+    return;
+  }
+  await reconcileConnections(supabase, service, room, [participant], { leaveUnreadable: true });
 }
 
 /** The `iss` of a token, unverified: only which key to verify it with. */
@@ -101,7 +154,7 @@ Deno.serve(async (req) => {
   const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
 
   // Cheap to throw away first: most events (tracks, rooms opening and
-  // closing, a voice connection joining) ask nothing of this server.
+  // closing) ask nothing of this server.
   let event: string;
   let room: string;
   let identity: string;
@@ -113,7 +166,9 @@ Deno.serve(async (req) => {
   } catch {
     return new Response(null, { status: 400 });
   }
-  if (!room || !prompted(event, identity)) return new Response(null, { status: 200 });
+  const sweeps = prompted(event, identity);
+  const checks = checked(event, room);
+  if (!room || !identity || !(sweeps || checks)) return new Response(null, { status: 200 });
 
   const apiKey = issuerOf(token);
   if (!apiKey) return new Response(null, { status: 401 });
@@ -125,7 +180,9 @@ Deno.serve(async (req) => {
       continue;
     }
     const service = new RoomServiceClient(normaliseHost(node.url), apiKey, node.secret);
-    await sweepOrphanedWatchers(service, room);
+    // The join first: a watcher refused here has nothing left to sweep.
+    if (checks) await checkJoin(service, room, identity);
+    if (sweeps) await sweepOrphanedWatchers(service, room);
     return new Response(null, { status: 200 });
   }
   return new Response(null, { status: 401 });

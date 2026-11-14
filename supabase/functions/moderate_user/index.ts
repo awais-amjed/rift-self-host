@@ -12,7 +12,7 @@ import {
   roomParticipantsAcross,
 } from "../_shared/livekit.ts";
 import { livePermissionsFor, micDenied, moderationMetadata } from "../_shared/moderation.ts";
-import { mayUseSoundboard } from "../_shared/soundboard.ts";
+import { CallRights, channelRights, NO_CALL_RIGHTS } from "../_shared/call_rights.ts";
 
 /**
  * Server-side mute / deafen / ban / kick.
@@ -236,24 +236,16 @@ async function applyToLiveRooms(
 
     // An unmute gives the microphone back only where the channel lets them
     // speak (`channel_overrides`); a stage that keeps them quiet keeps them
-    // quiet. A DM call is not a channel, and only a ban reaches one.
+    // quiet. And the whole permission set is replaced, so the soundboard is
+    // stated as the channel has it (`_shared/call_rights.ts`) — left as
+    // minted, a mute would hand it to someone the channel takes it from. A
+    // DM call is not a channel, and only a ban reaches one. Unreadable is
+    // neither, failing closed as the join does.
     const roomNames = [...new Set(mine.map(({ room }) => room))];
-    const mayNotSpeak = new Set<string>();
-    if (!isBanned && !micDenied(isMuted, isDeafened)) {
-      await Promise.all(roomNames.filter((name) => !name.startsWith("dm-")).map(async (name) => {
-        const { data } = await supabase.rpc("user_has_channel_permission", {
-          p_user: targetUserId, p_channel: name, p_name: "SPEAK",
-        });
-        if (data !== true) mayNotSpeak.add(name);
-      }));
-    }
-    // The whole permission set is replaced, so the soundboard is stated as the
-    // channel has it (`_shared/soundboard.ts`) — left as minted, a mute would
-    // otherwise hand it to someone the channel takes it from.
-    const mayPress = new Set<string>();
+    const rightsIn = new Map<string, CallRights>();
     if (!isBanned) {
       await Promise.all(roomNames.filter((name) => !name.startsWith("dm-")).map(async (name) => {
-        if (await mayUseSoundboard(supabase, targetUserId, name)) mayPress.add(name);
+        rightsIn.set(name, (await channelRights(supabase, targetUserId, name)) ?? NO_CALL_RIGHTS);
       }));
     }
 
@@ -274,10 +266,10 @@ async function applyToLiveRooms(
           metadata,
           permission: livePermissionsFor(
             connectionKind(participant.identity),
-            isMuted || mayNotSpeak.has(room),
+            isMuted || !(rightsIn.get(room) ?? NO_CALL_RIGHTS).speak,
             isDeafened,
             !isBot || botListensIn.has(room),
-            mayPress.has(room),
+            (rightsIn.get(room) ?? NO_CALL_RIGHTS).soundboard,
           ),
         });
 
