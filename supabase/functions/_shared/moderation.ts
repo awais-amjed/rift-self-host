@@ -71,13 +71,17 @@ export function livePermissionsFor(
   // False for a bot without a `bot_voice_grants` row for this room: a mute
   // must not hand a bot the ears it was never granted (BOTS.md §6b).
   mayListen = true,
+  // `mayUseSoundboard` in this room (`_shared/soundboard.ts`): a press is
+  // the only data packet a member sends. False unless said, so a caller
+  // that forgets takes the soundboard rather than handing it out.
+  soundboard = false,
 ) {
   switch (kind) {
     case "voice":
       return {
         canSubscribe: !isDeafened && mayListen,
         canPublish: true,
-        canPublishData: true,
+        canPublishData: soundboard,
         canPublishSources: permissionSources(isMuted, isDeafened),
         // As minted. LiveKit replaces the whole set on an update, and a right
         // left out is taken away: muted and unmuted, a member could no longer
@@ -89,7 +93,9 @@ export function livePermissionsFor(
       return {
         canSubscribe: false,
         canPublish: true,
-        canPublishData: true,
+        // As minted: a share sends no packets, and one that could would be
+        // a second way to press a clip.
+        canPublishData: false,
         canPublishSources: permissionSources(isMuted, isDeafened),
         canUpdateMetadata: true,
       };

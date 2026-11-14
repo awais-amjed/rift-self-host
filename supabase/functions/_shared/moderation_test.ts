@@ -36,3 +36,16 @@ Deno.test("a connection's microphone is read the way it was pushed", () => {
   assertEquals(micHeldBack(livePermissionsFor("voice", false, false).canPublishSources), false);
   assertEquals(micHeldBack([TrackSource.MICROPHONE, TrackSource.CAMERA]), false);
 });
+
+// A soundboard press is the only data packet a member sends, so
+// `canPublishData` is the soundboard (`_shared/soundboard.ts`). A push states
+// it as the channel has it; one that forgot would take it, never give it.
+Deno.test("a pushed connection sends packets only with the soundboard", () => {
+  for (const [muted, deafened] of [[true, false], [false, true], [false, false]]) {
+    assertEquals(livePermissionsFor("voice", muted, deafened, true, true).canPublishData, true);
+    assertEquals(livePermissionsFor("voice", muted, deafened, true, false).canPublishData, false);
+    assertEquals(livePermissionsFor("voice", muted, deafened).canPublishData, false);
+    // A share sends none, as minted, whatever the channel says.
+    assertEquals(livePermissionsFor("share", muted, deafened, true, true).canPublishData, false);
+  }
+});

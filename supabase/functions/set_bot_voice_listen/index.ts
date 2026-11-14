@@ -6,6 +6,7 @@ import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
 import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
 import { permissionSources } from "../_shared/moderation.ts";
+import { mayUseSoundboard } from "../_shared/soundboard.ts";
 
 /**
  * Let a bot hear a voice channel, or stop it hearing one.
@@ -138,13 +139,15 @@ async function applyToLiveRoom(
     const { data: maySpeak } = await supabase.rpc("user_has_channel_permission", {
       p_user: botId, p_channel: channelId, p_name: "SPEAK",
     });
+    // Its soundboard as the channel has it, as minted (`_shared/soundboard.ts`).
+    const mayPress = await mayUseSoundboard(supabase, botId, channelId);
 
     for (const participant of mine) {
       await roomService.updateParticipant(channelId, participant.identity, {
         permission: {
           canSubscribe: listen,
           canPublish: true,
-          canPublishData: true,
+          canPublishData: mayPress,
           // Empty list means every source, the opposite encoding to an
           // AccessToken grant's `undefined` — see `_shared/moderation.ts`.
           canPublishSources: permissionSources(maySpeak !== true, false),

@@ -100,6 +100,7 @@ Deno.serve(async (req) => {
       { data: mayConnect },
       { data: mayShare },
       { data: maySpeak },
+      { data: maySoundboard },
       { data: userData, error: userError },
       credentials,
       { data: limitsRow },
@@ -119,6 +120,12 @@ Deno.serve(async (req) => {
       supabase.rpc("user_has_channel_permission", {
         p_user: auth.userId, p_channel: channel_id, p_name: "SPEAK",
       }),
+      // Only the voice connection presses clips (`_shared/soundboard.ts`).
+      wantsShare || wantsWatch
+        ? Promise.resolve({ data: null })
+        : supabase.rpc("user_has_channel_permission", {
+          p_user: auth.userId, p_channel: channel_id, p_name: "USE_SOUNDBOARD",
+        }),
       supabase
         .from(DBSchema.users.tableName)
         .select(
@@ -468,6 +475,14 @@ Deno.serve(async (req) => {
       // was a way to sit in a call hearing everything while appearing
       // nowhere: ask for a screen share, publish nothing.
       canSubscribe: !isDeafened && mayListen && !wantsShare,
+      // A soundboard press is a data packet that every listener plays for
+      // itself, and the only one a member sends, so this is what keeps the
+      // soundboard from someone the channel takes it from: LiveKit drops
+      // their packets before anyone hears them. Both bits, as the app asks
+      // (`mayUseSoundboard`), and never on a share connection, which sends
+      // none. Left out, a grant means "may", which is how a member whose
+      // own app was told otherwise could still press.
+      canPublishData: !wantsShare && maySoundboard === true && maySpeak === true,
       // Lets a client publish its own state as participant attributes — today
       // just "deafened", which nothing else broadcasts: a muted microphone is
       // visible as an unpublished track, but deafening is a decision made

@@ -233,6 +233,9 @@ Deno.serve(async (req) => {
       // A share connection only publishes, as in a channel: one that could
       // subscribe would be a second pair of ears nobody sees in the call.
       canSubscribe: !wantsShare,
+      // Nor does it send packets (`_shared/moderation.ts`). The call's own
+      // connection keeps the default: a DM call has no channel to ask.
+      canPublishData: !wantsShare,
       canUpdateOwnMetadata: true,
       roomAdmin: false,
     });

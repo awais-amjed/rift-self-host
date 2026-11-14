@@ -8,6 +8,7 @@ import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
 import { connectionKind, livekitRoomServiceForChannel } from "../_shared/livekit.ts";
 import { livePermissionsFor, micDenied, micHeldBack } from "../_shared/moderation.ts";
+import { mayUseSoundboard } from "../_shared/soundboard.ts";
 
 /**
  * Change what one role may do in one channel, and make a voice channel's
@@ -26,9 +27,12 @@ import { livePermissionsFor, micDenied, micHeldBack } from "../_shared/moderatio
  * does. Given back, the client publishes it again itself, if its own toggle
  * says so.
  *
- * Only the microphone. Connect, sharing, the soundboard and summoning are
- * asked on the next join, share, press or summon, and nobody is put out of a
- * call they are in.
+ * The soundboard moves with it, the same way: a press is a data packet no
+ * server sees, so what stops one is the connection's `canPublishData`
+ * (`_shared/soundboard.ts`), and that too was minted at the join.
+ *
+ * Only those two. Connect, sharing and summoning are asked on the next join,
+ * share or summon, and nobody is put out of a call they are in.
  */
 
 const supabase = createClient(
@@ -90,7 +94,8 @@ Deno.serve(async (req) => {
 
 /**
  * Give or take the microphone on every connection in [channelId]'s call whose
- * microphone no longer matches `SPEAK` and the moderation flags.
+ * microphone no longer matches `SPEAK` and the moderation flags, and the
+ * soundboard on every one whose `canPublishData` no longer matches it.
  *
  * One room: rooms are named by channel id, and the RPC already said the
  * channel is this server's. A connection already right is left alone, since
@@ -124,7 +129,7 @@ async function applyToLiveCall(
     const userIds = [...new Set(connections.map((p) => p.identity.split("~")[0]))];
     if (userIds.length === 0) return { updated: 0, error: null };
 
-    const [{ data: users }, { data: grants }, speaks] = await Promise.all([
+    const [{ data: users }, { data: grants }, speaks, presses] = await Promise.all([
       supabase
         .from(DBSchema.users.tableName)
         .select(
@@ -143,6 +148,9 @@ async function applyToLiveCall(
         });
         return [id, data === true] as const;
       })),
+      Promise.all(userIds.map(async (id) =>
+        [id, await mayUseSoundboard(supabase, id, channelId)] as const
+      )),
     ]);
 
     const byId = new Map(
@@ -150,6 +158,7 @@ async function applyToLiveCall(
     );
     const botListens = new Set((grants ?? []).map((g) => (g as Record<string, any>).bot_id as string));
     const maySpeak = new Map(speaks);
+    const mayPress = new Map(presses);
 
     let updated = 0;
     await Promise.all(connections.map(async (participant) => {
@@ -162,20 +171,23 @@ async function applyToLiveCall(
       const isBot = user[DBSchema.users.isBot] === true;
       const quiet = isMuted || maySpeak.get(userId) !== true;
       // Unreadable SPEAK is no SPEAK, failing closed as `get_channel_token` does.
-      if (micHeldBack(participant.permission?.canPublishSources) === micDenied(quiet, isDeafened)) {
+      const permission = livePermissionsFor(
+        connectionKind(participant.identity),
+        quiet,
+        isDeafened,
+        !isBot || botListens.has(userId),
+        mayPress.get(userId) === true,
+      );
+      if (
+        micHeldBack(participant.permission?.canPublishSources) === micDenied(quiet, isDeafened) &&
+        (participant.permission?.canPublishData ?? false) === permission.canPublishData
+      ) {
         return;
       }
 
       // The permission before the mute, as in `moderate_user`: the first stops
       // the next publish, the second the audio already flowing.
-      await service.updateParticipant(channelId, participant.identity, {
-        permission: livePermissionsFor(
-          connectionKind(participant.identity),
-          quiet,
-          isDeafened,
-          !isBot || botListens.has(userId),
-        ),
-      });
+      await service.updateParticipant(channelId, participant.identity, { permission });
       updated++;
 
       if (micDenied(quiet, isDeafened)) {

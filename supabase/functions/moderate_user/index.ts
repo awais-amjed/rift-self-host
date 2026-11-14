@@ -12,6 +12,7 @@ import {
   roomParticipantsAcross,
 } from "../_shared/livekit.ts";
 import { livePermissionsFor, micDenied, moderationMetadata } from "../_shared/moderation.ts";
+import { mayUseSoundboard } from "../_shared/soundboard.ts";
 
 /**
  * Server-side mute / deafen / ban / kick.
@@ -246,6 +247,15 @@ async function applyToLiveRooms(
         if (data !== true) mayNotSpeak.add(name);
       }));
     }
+    // The whole permission set is replaced, so the soundboard is stated as the
+    // channel has it (`_shared/soundboard.ts`) — left as minted, a mute would
+    // otherwise hand it to someone the channel takes it from.
+    const mayPress = new Set<string>();
+    if (!isBanned) {
+      await Promise.all(roomNames.filter((name) => !name.startsWith("dm-")).map(async (name) => {
+        if (await mayUseSoundboard(supabase, targetUserId, name)) mayPress.add(name);
+      }));
+    }
 
     // Across connections at once — they are different rooms or different
     // devices, and a moderator is waiting on this. *Within* one connection the
@@ -267,6 +277,7 @@ async function applyToLiveRooms(
             isMuted || mayNotSpeak.has(room),
             isDeafened,
             !isBot || botListensIn.has(room),
+            mayPress.has(room),
           ),
         });
 
