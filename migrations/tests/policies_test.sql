@@ -2757,6 +2757,86 @@ BEGIN
   RAISE NOTICE 'ok  and answers nothing at all to somebody with no row here';
 END $$;
 
+-- ── 029: a console update, told to admins only ───────────────────
+-- The scratch database never had a console, so there is no rift_console
+-- schema yet: the details still answer, with nothing to tell.
+-- Alice is an admin here; Bob is made a plain member for it and put back.
+RESET ROLE;
+CREATE TEMP TABLE console_bob AS
+  SELECT is_server_admin FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+UPDATE users SET is_server_admin = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := get_server_details();
+  IF v IS NULL THEN
+    RAISE EXCEPTION 'FAIL: the details did not answer the admin';
+  END IF;
+  IF NOT (v ? 'console_update') OR v->'console_update' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: with no console the details should say null: %', v->'console_update';
+  END IF;
+  RAISE NOTICE 'ok  no console schema: console_update is null';
+END $$;
+RESET ROLE;
+
+-- What the console keeps (console_schema.ts), made here as it would be.
+CREATE SCHEMA IF NOT EXISTS rift_console;
+REVOKE ALL ON SCHEMA rift_console FROM PUBLIC, anon, authenticated;
+CREATE TABLE IF NOT EXISTS rift_console.state (
+  key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+REVOKE ALL ON rift_console.state FROM PUBLIC, anon, authenticated;
+INSERT INTO rift_console.state (key, value) VALUES ('update_available',
+  '{"version":"9.9.9","url":"https://example.test/9.9.9","notes":"new things"}')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := get_server_details();
+  IF v->'console_update'->>'version' IS DISTINCT FROM '9.9.9'
+     OR v->'console_update'->>'notes' IS DISTINCT FROM 'new things' THEN
+    RAISE EXCEPTION 'FAIL: an admin was not told of the console update: %', v->'console_update';
+  END IF;
+  RAISE NOTICE 'ok  an admin is told of the console update';
+END $$;
+RESET ROLE;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := get_server_details();
+  IF v IS NULL OR NOT (v ? 'console_update') OR v->'console_update' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a member who is not an admin was told: %', v->'console_update';
+  END IF;
+  IF app.console_update() IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: app.console_update answered a member who is not an admin';
+  END IF;
+  RAISE NOTICE 'ok  a member who is not an admin is told nothing';
+END $$;
+DO $$
+BEGIN
+  PERFORM value FROM rift_console.state;
+  RAISE EXCEPTION 'FAIL: a member read the console''s own table';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  the console''s table stays out of reach';
+END $$;
+RESET ROLE;
+UPDATE users SET is_server_admin = (SELECT is_server_admin FROM console_bob)
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+DROP TABLE console_bob;
+DELETE FROM rift_console.state WHERE key = 'update_available';
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
 DO $$
 DECLARE v_result JSONB;
 BEGIN
@@ -10404,5 +10484,6 @@ BEGIN
   RAISE NOTICE 'ok  an override set back to inherit is gone';
 END $$;
 RESET ROLE;
+
 
 ROLLBACK;
