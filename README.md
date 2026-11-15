@@ -43,6 +43,10 @@ a stranger. Move the machine, never the name.
 
 ## Updating
 
+The console checks for a newer release every six hours and the server's admins
+see it in the app, under the server's name, with the notes and the command
+below (from the release after 1.6.0; nothing updates until you do).
+
 Press **Update** on the console's Overview tab, or from a terminal in that
 folder:
 
