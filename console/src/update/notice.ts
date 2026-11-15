@@ -15,8 +15,14 @@
  * Recording a new version after an update clears it as well (`upgrade.ts`),
  * so the notice goes when the update lands rather than at the next check.
  */
-import { targetFromEnv } from "../postgres.ts";
-import { clearState, imageVersion, UPDATE_AVAILABLE, writeState } from "../state.ts";
+import { type PostgresTarget, runSql, targetFromEnv } from "../postgres.ts";
+import {
+  clearState,
+  imageVersion,
+  readState,
+  UPDATE_AVAILABLE,
+  writeState,
+} from "../state.ts";
 import { knownReleases, newerReleases, type Release } from "./releases.ts";
 
 /** How much of a release's notes is kept: they ride in every admin's server details. */
@@ -53,8 +59,39 @@ function capped(notes: string): string {
   return `${lineEnd > 0 ? head.slice(0, lineEnd) : head}\n…`;
 }
 
-/** The last thing written, so the log says when the notice changes and not every check. */
-let last: string | null | undefined;
+/**
+ * What to change, given what is stored now: `{write: value}`, `{write: null}`
+ * to clear, or null for nothing. Read from the row rather than remembered,
+ * because an update clears it from the same process (`upgrade.ts`), and a
+ * remembered answer then kept the release from being written back.
+ */
+export function changeFor(
+  notice: Notice,
+  stored: string | null,
+): { write: string | null } | null {
+  if (notice.kind === "keep") return null;
+  const wanted = notice.kind === "set" ? notice.value : null;
+  return wanted === stored ? null : { write: wanted };
+}
+
+/**
+ * Rings each admin's own topic, so an app that is open reads the server's
+ * details again and the notice comes or goes at once
+ * (`app.announce_console_update`, 029). A database without it — 029 not
+ * applied yet — is left alone: the next read will carry it.
+ */
+export async function announceToAdmins(target: PostgresTarget): Promise<void> {
+  const result = await runSql(
+    target,
+    `DO $$ BEGIN
+       IF to_regprocedure('app.announce_console_update()') IS NOT NULL THEN
+         PERFORM app.announce_console_update();
+       END IF;
+     END $$;`,
+    { singleTransaction: true },
+  );
+  if (!result.ok) throw new Error(`Could not tell the admins: ${result.error}`);
+}
 
 /** Check now and then every six hours, from a few minutes after start, while [isReady]. */
 export function startUpdateNotice(isReady: () => boolean): void {
@@ -72,13 +109,13 @@ async function checkOnce(isReady: () => boolean): Promise<void> {
   const notice = noticeFor(releases, imageVersion());
   if (notice.kind === "keep") return;
   const target = targetFromEnv();
-  if (notice.kind === "clear") {
-    if (last !== null) await clearState(target, UPDATE_AVAILABLE);
-    last = null;
-    return;
+  const change = changeFor(notice, await readState(target, UPDATE_AVAILABLE));
+  if (change === null) return;
+  if (change.write === null) {
+    await clearState(target, UPDATE_AVAILABLE);
+  } else {
+    await writeState(target, UPDATE_AVAILABLE, change.write);
+    console.log(`[update] a newer release is out: ${JSON.parse(change.write).version}`);
   }
-  if (notice.value === last) return;
-  await writeState(target, UPDATE_AVAILABLE, notice.value);
-  last = notice.value;
-  console.log(`[update] a newer release is out: ${JSON.parse(notice.value).version}`);
+  await announceToAdmins(target);
 }

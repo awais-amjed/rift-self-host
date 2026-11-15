@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { MAX_NOTES, noticeFor } from "./notice.ts";
+import { changeFor, MAX_NOTES, noticeFor } from "./notice.ts";
 import type { Release } from "./releases.ts";
 
 function release(version: string, prerelease = false, notes = "n"): Release {
@@ -46,4 +46,15 @@ Deno.test("long notes are cut at a line break", () => {
   const stored = JSON.parse(notice.value).notes as string;
   assert(stored.length <= MAX_NOTES + 1, `${stored.length}`);
   assert(stored.endsWith("\n…"), stored.slice(-20));
+});
+
+Deno.test("what is stored decides the write, not what this process last wrote", () => {
+  // An update cleared the row since this console wrote it: write it again.
+  assertEquals(changeFor({ kind: "set", value: "x" }, null), { write: "x" });
+  assertEquals(changeFor({ kind: "set", value: "x" }, "x"), null);
+  assertEquals(changeFor({ kind: "set", value: "y" }, "x"), { write: "y" });
+  // Somebody else wrote it: clear it all the same.
+  assertEquals(changeFor({ kind: "clear" }, "x"), { write: null });
+  assertEquals(changeFor({ kind: "clear" }, null), null);
+  assertEquals(changeFor({ kind: "keep" }, "x"), null);
 });

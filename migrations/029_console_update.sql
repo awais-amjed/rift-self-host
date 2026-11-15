@@ -16,7 +16,8 @@
 -- `rift_console` is the console's, made by it rather than by a migration, and
 -- out of reach of every API role. So the helper is SECURITY DEFINER, and
 -- answers null where the schema is not there at all (a database the console
--- never ran on).
+-- never ran on), or anything else about it is wrong. The console rings each
+-- admin's own topic (`app.announce_console_update`) when the row changes.
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION app.console_update() RETURNS JSONB
@@ -31,8 +32,25 @@ BEGIN
     INTO v_value;
   RETURN v_value::jsonb;
 EXCEPTION
-  WHEN undefined_table OR invalid_schema_name OR invalid_text_representation THEN
+  -- Optional by nature: whatever is wrong here (no console schema, a value
+  -- that is not JSON, a restore that changed owners), the rest of the
+  -- details still answer, and an admin's server still loads.
+  WHEN OTHERS THEN
     RETURN NULL;
+END;
+$$;
+
+-- The console calls this after it writes or clears the row, so admins with
+-- the app open hear it at once rather than at their next re-read: their own
+-- topic's `me` makes the app read the details again. Only the console's own
+-- role may call it; nobody is granted it.
+CREATE OR REPLACE FUNCTION app.announce_console_update() RETURNS VOID
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_admin UUID;
+BEGIN
+  FOR v_admin IN SELECT id FROM users WHERE is_server_admin AND NOT is_banned LOOP
+    PERFORM app.announce_to_member(v_admin, 'me');
+  END LOOP;
 END;
 $$;
 
@@ -150,6 +168,7 @@ $$;
 -- ── Grants ──────────────────────────────────────────────────
 
 REVOKE ALL ON FUNCTION app.console_update() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION app.announce_console_update() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION app.console_update() TO authenticated;
 REVOKE ALL ON FUNCTION get_server_details() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION get_server_details() TO authenticated;

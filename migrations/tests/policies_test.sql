@@ -2763,7 +2763,7 @@ END $$;
 -- Alice is an admin here; Bob is made a plain member for it and put back.
 RESET ROLE;
 CREATE TEMP TABLE console_bob AS
-  SELECT is_server_admin FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+  SELECT is_server_admin, is_banned FROM users WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
 UPDATE users SET is_server_admin = false WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
@@ -2828,8 +2828,52 @@ BEGIN
 EXCEPTION WHEN insufficient_privilege THEN
   RAISE NOTICE 'ok  the console''s table stays out of reach';
 END $$;
+DO $$
+BEGIN
+  PERFORM app.announce_console_update();
+  RAISE EXCEPTION 'FAIL: a member could ring the admins about a console update';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  only the console rings the admins';
+END $$;
 RESET ROLE;
-UPDATE users SET is_server_admin = (SELECT is_server_admin FROM console_bob)
+
+-- A banned admin is told nothing.
+UPDATE users SET is_server_admin = true, is_banned = true
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  IF app.console_update() IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a banned admin was told of the console update';
+  END IF;
+  RAISE NOTICE 'ok  a banned admin is told nothing';
+END $$;
+RESET ROLE;
+
+-- Whatever is wrong with what is stored, the details still answer: a value
+-- Postgres will not hold as jsonb (a NUL escape) reads as nothing to tell.
+UPDATE rift_console.state SET value = '{"version":"9.9.9","notes":"\u0000"}'
+ WHERE key = 'update_available';
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := get_server_details();
+  IF v IS NULL OR v->'console_update' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: an unreadable stored value broke the details: %', v->'console_update';
+  END IF;
+  RAISE NOTICE 'ok  an unreadable stored value reads as nothing to tell';
+END $$;
+RESET ROLE;
+
+-- The console rings the admins after it writes; with no Realtime here it
+-- simply has nobody to tell.
+DO $$ BEGIN PERFORM app.announce_console_update(); RAISE NOTICE 'ok  the console can ring the admins'; END $$;
+
+UPDATE users SET is_server_admin = (SELECT is_server_admin FROM console_bob),
+                 is_banned = (SELECT is_banned FROM console_bob)
  WHERE id = '11111111-aaaa-4aaa-8aaa-000000000002';
 DROP TABLE console_bob;
 DELETE FROM rift_console.state WHERE key = 'update_available';

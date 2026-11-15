@@ -43,6 +43,7 @@ import {
 } from "./setup/functions.ts";
 import { connectLivekit, ensureLivekitWebhook } from "./setup/livekit_webhook.ts";
 import { type Paths } from "./setup/run.ts";
+import { announceToAdmins } from "./update/notice.ts";
 import {
   APPLIED_VERSION,
   clearState,
@@ -190,12 +191,13 @@ export async function applyUpgrade(
     }));
 
   const version = imageVersion();
-  await step("Recording the version", async () => {
-    await writeState(target, APPLIED_VERSION, version);
-    // What it said was newer is this, or older: the next check says again
-    // if something newer still is out (`update/notice.ts`).
-    await clearState(target, UPDATE_AVAILABLE);
-  });
+  await step("Recording the version", () => writeState(target, APPLIED_VERSION, version));
+  // What was said to be newer is this, or older: the next check says again
+  // if something newer still is out (`update/notice.ts`). Not a step: a
+  // notice left behind is no reason to call a finished update failed.
+  await clearState(target, UPDATE_AVAILABLE)
+    .then(() => announceToAdmins(target))
+    .catch((error) => console.error("[update] clearing the update notice:", error));
 
   return {
     installed: installed.installed.length,
