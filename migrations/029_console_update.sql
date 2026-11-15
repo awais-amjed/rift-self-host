@@ -48,8 +48,14 @@ CREATE OR REPLACE FUNCTION app.announce_console_update() RETURNS VOID
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_admin UUID;
 BEGIN
+  IF NOT app.realtime_ready() THEN
+    RETURN;
+  END IF;
+  -- `realtime.send` directly, not `app.announce_to_member`: a stack whose
+  -- earlier files ran under another role holds that one where the
+  -- console's role may not call it.
   FOR v_admin IN SELECT id FROM users WHERE is_server_admin AND NOT is_banned LOOP
-    PERFORM app.announce_to_member(v_admin, 'me');
+    PERFORM realtime.send('{}'::jsonb, 'me', 'user:' || v_admin, true);
   END LOOP;
 END;
 $$;

@@ -2869,8 +2869,12 @@ END $$;
 RESET ROLE;
 
 -- The console rings the admins after it writes; with no Realtime here it
--- simply has nobody to tell.
+-- simply has nobody to tell. It must not lean on `announce_to_member`,
+-- which a stack set up by hand can hold under another owner than the
+-- console's role (the laptop's did, Nov 16 2026): taken away here.
+REVOKE EXECUTE ON FUNCTION app.announce_to_member(UUID, TEXT) FROM postgres;
 DO $$ BEGIN PERFORM app.announce_console_update(); RAISE NOTICE 'ok  the console can ring the admins'; END $$;
+GRANT EXECUTE ON FUNCTION app.announce_to_member(UUID, TEXT) TO postgres;
 
 UPDATE users SET is_server_admin = (SELECT is_server_admin FROM console_bob),
                  is_banned = (SELECT is_banned FROM console_bob)
