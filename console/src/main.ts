@@ -8,6 +8,7 @@
 import { announce, LISTEN_PORT } from "./banner.ts";
 import { startScheduler } from "./backup/scheduler.ts";
 import { startTopicRuleWatch } from "./setup/topic_rules.ts";
+import { startUpdateNotice } from "./update/notice.ts";
 import { isDockerReachable } from "./docker.ts";
 import { storedPasswordHash } from "./console_password.ts";
 import { prepareStack, preparingState } from "./boot.ts";
@@ -55,6 +56,8 @@ async function main(): Promise<void> {
     () => isConfigured() && !preparingState().running,
   );
   startTopicRuleWatch(isConfigured);
+  // The same guard: the database has to be there and settled to keep it in.
+  startUpdateNotice(() => isConfigured() && !preparingState().running);
 
   Deno.serve({
     port: PORT,

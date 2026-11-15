@@ -49,6 +49,7 @@ import {
   imageVersion,
   LIVEKIT_RESTART_OWED,
   readState,
+  UPDATE_AVAILABLE,
   writeState,
 } from "./state.ts";
 
@@ -189,7 +190,12 @@ export async function applyUpgrade(
     }));
 
   const version = imageVersion();
-  await step("Recording the version", () => writeState(target, APPLIED_VERSION, version));
+  await step("Recording the version", async () => {
+    await writeState(target, APPLIED_VERSION, version);
+    // What it said was newer is this, or older: the next check says again
+    // if something newer still is out (`update/notice.ts`).
+    await clearState(target, UPDATE_AVAILABLE);
+  });
 
   return {
     installed: installed.installed.length,

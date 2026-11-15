@@ -26,6 +26,13 @@ export const APPLIED_VERSION = "applied_version";
  */
 export const LIVEKIT_RESTART_OWED = "livekit_restart_owed";
 
+/**
+ * The newest release this console would be offered, as JSON `{version, url,
+ * notes}`, for the server's admins to hear of (`update/notice.ts`). Absent when
+ * there is none, or none known yet.
+ */
+export const UPDATE_AVAILABLE = "update_available";
+
 /** Read one value, or null if it has never been set. */
 export async function readState(
   target: PostgresTarget,
