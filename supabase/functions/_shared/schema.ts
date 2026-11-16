@@ -121,6 +121,7 @@ const DBSchema = {
     maxUses: "max_uses",
     uses: "uses",
     expiresAt: "expires_at",
+    needsAccount: "needs_account",
   },
 };
 

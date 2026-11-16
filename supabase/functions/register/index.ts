@@ -7,6 +7,7 @@ import * as EC from "../_shared/error_codes.ts";
 import { extractBearerToken } from "../_shared/auth.ts";
 import { verifyJwt } from "../_shared/jwt.ts";
 import { fetchServerContext } from "../_shared/server_context.ts";
+import { verifyServerPass } from "../_shared/server_pass.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -40,7 +41,7 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
     }
 
-    const { invite_code, public_key, stable_id, username, display_name } =
+    const { invite_code, public_key, stable_id, username, display_name, pass } =
       await req.json();
 
     if (!invite_code || !public_key || !stable_id || !username || !display_name) {
@@ -78,6 +79,34 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Central's pass, for a link that needs a Rift account (see
+    // `_shared/server_pass.ts`). Checked against the server the invite is
+    // for and the identity signing in, and only its tag goes on: whether
+    // the link needed one is `register_user`'s to say, so an unknown code
+    // still gets the ordinary answer.
+    let accountTag: string | null = null;
+    if (pass) {
+      const { data: invite } = await supabase
+        .from(DBSchema.invites.tableName)
+        .select(DBSchema.invites.serverId)
+        .eq(DBSchema.invites.code, invite_code)
+        .maybeSingle();
+      const inviteServer = (invite as Record<string, any> | null)?.[DBSchema.invites.serverId];
+      if (inviteServer) {
+        const verified = await verifyServerPass(String(pass), {
+          serverId: inviteServer as string,
+          publicKey: public_key,
+        });
+        if (!verified) {
+          return CustomResponse.error(
+            "Rift couldn't vouch for your account. Try joining again.",
+            EC.PASS_INVALID,
+          );
+        }
+        accountTag = verified.tag;
+      }
+    }
+
     // Claim the invite + create the profile atomically. The
     // invite is only consumed once every check passes, so a rejected register
     // (e.g. username taken) never burns an invite use.
@@ -88,6 +117,7 @@ Deno.serve(async (req) => {
       p_stable_id:    stable_id,
       p_username:     username,
       p_display_name: display_name,
+      p_account_tag:  accountTag,
     });
 
     if (regError) {
@@ -114,6 +144,19 @@ Deno.serve(async (req) => {
       // the kick and spent a use). From here it is a rejoin like any other.
       case "readmitted":
         return await rejoin(invite_code, authUid, reg[DBSchema.invites.serverId] as string);
+      case "account_required":
+        return CustomResponse.error(
+          "This link needs a Rift account. Sign in to Rift, or ask a member for another link.",
+          EC.ACCOUNT_REQUIRED,
+        );
+      // The account's ban, whichever identity it came back as.
+      case "user_banned":
+        return CustomResponse.error("You are banned from this server", EC.USER_BANNED);
+      case "account_in_use":
+        return CustomResponse.error(
+          "This account is already a member here under another identity. Restore that identity from your backup.",
+          EC.ACCOUNT_IN_USE,
+        );
       case "identity_taken":
         return CustomResponse.error("This identity is already registered on this server", EC.IDENTITY_TAKEN);
       case "username_taken":

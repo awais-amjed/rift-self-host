@@ -69,3 +69,8 @@ export const MISSING_FIELDS    = "missing_fields";
 export const DB_ERROR          = "db_error";       // unexpected database error
 export const UNEXPECTED_ERROR  = "unexpected_error";
 
+// A link that needs a Rift account (030): none came with the join, central's
+// pass did not check out, or the account is the owner's under another identity.
+export const ACCOUNT_REQUIRED = "account_required";
+export const PASS_INVALID     = "pass_invalid";
+export const ACCOUNT_IN_USE   = "account_in_use";

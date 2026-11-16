@@ -36,7 +36,8 @@ Deno.serve(async (req) => {
       .from(DBSchema.invites.tableName)
       .select(
         `${DBSchema.invites.serverId}, ${DBSchema.invites.expiresAt},` +
-          ` ${DBSchema.invites.uses}, ${DBSchema.invites.maxUses}`,
+          ` ${DBSchema.invites.uses}, ${DBSchema.invites.maxUses},` +
+          ` ${DBSchema.invites.needsAccount}`,
       )
       .eq(DBSchema.invites.code, invite_code)
       .maybeSingle();
@@ -91,6 +92,9 @@ Deno.serve(async (req) => {
       server_id: serverId,
       server_name: server?.[DBSchema.servers.name] ?? null,
       server_icon: server?.[DBSchema.servers.iconUrl] ?? null,
+      // Whether joining through this link needs a Rift account, so the app
+      // can say so before anybody signs in (030).
+      needs_account: invite[DBSchema.invites.needsAccount] === true,
     });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
