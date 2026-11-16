@@ -5,6 +5,7 @@
  * on. These fail when the two differ.
  */
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
+import { parse } from "jsr:@std/yaml@1";
 import { LIVEKIT_AUDIO_FLAGS } from "./config_files.ts";
 
 const read = (path: string) => Deno.readTextFile(new URL(path, import.meta.url));
@@ -50,6 +51,28 @@ Deno.test("a region's room settings are the main server's", async () => {
   assertStringIncludes(livekit, "port: 7880");
   assertStringIncludes(livekit, "udp_port: 7882");
   assertStringIncludes(livekit, "tcp_port: 7881");
+});
+
+/** [yaml] parsed with every placeholder made one value, less what is a region's own. */
+function settings(yaml: string, placeholder: RegExp): Record<string, unknown> {
+  // deno-lint-ignore no-explicit-any
+  const config = parse(yaml.replace(placeholder, "X")) as any;
+  delete config.keys;
+  delete config.webhook.urls;
+  delete config.rtc.udp_port;
+  delete config.rtc.tcp_port;
+  return config;
+}
+
+Deno.test("every LiveKit setting of a region is the main server's", async () => {
+  // A list of lines to look for missed a setting added to the template, and
+  // found one in a comment. This compares the whole parsed config: only the
+  // key pair, where the webhook goes and the port numbers may differ.
+  const livekit = service(await region(), "livekit");
+  const block = livekit.split("LIVEKIT_CONFIG: |\n")[1].split(/\n(?! {8}| *$)/)[0];
+  const inline = block.split("\n").map((line) => line.slice(8)).join("\n");
+  const template = await read("../../templates/livekit/livekit.yaml");
+  assertEquals(settings(inline, /\$\{[^}]*\}/g), settings(template, /\{\{[A-Z_]+\}\}/g));
 });
 
 Deno.test("a region publishes the ports LiveKit advertises", async () => {

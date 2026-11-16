@@ -66,11 +66,12 @@ disagree — and rewrites `console/known-compose.sha256` and
 `console/known-compose/` with `scripts/known_compose.sh`: every version of the
 compose file this repository has held, by hash, which is how an update tells a
 downloaded file from an edited one and finds where an edited one began, to
-merge it. A test fails if the list and the folder disagree. The workflow attaches the compose file to the GitHub release
-once the image is published, and `joinrift.app/self-host/docker-compose.yml`
-redirects to the newest full release's copy
-(`releases/latest/download/docker-compose.yml`), so new servers get it with
-nothing more to do: never before its image exists, and never a pre-release's.
+merge it. A test fails if the list and the folder disagree. The workflow attaches the compose file, and
+`region-compose.yml` for a call region, to the GitHub release once the image is
+published, and `joinrift.app/self-host/docker-compose.yml` and
+`…/region-compose.yml` redirect to the newest full release's copies
+(`releases/latest/download/…`), so new servers and regions get them with
+nothing more to do: never before the image exists, and never a pre-release's.
 
 The tag reaches the GitHub mirror, where `.github/workflows/release.yml`
 builds the image for amd64 and arm64 and pushes it to GitHub's registry as
