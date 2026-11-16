@@ -18,15 +18,20 @@
 --   * `invites.needs_account` marks a link. Only an admin marks or unmarks
 --     one (the insert policy, `set_invite_needs_account`): the public link is
 --     the server's. Links made by members still let anybody in.
---   * `member_account_tags` holds each member's tag, and `banned_tags` each
---     banned one. Members can read every column of `users`, so tags live
---     apart, granted to nobody. A ban keeps the tag (`users_ban_keeps_tag`);
---     a kick, which the next invite lifts, does not. `banned_tags` names no
---     member row, so a ban outlives the member it was made against.
+--   * `member_account_tags` holds the tag of every identity an account has
+--     joined as here, the ones it left behind included, and `banned_tags`
+--     each banned one. Members can read every column of `users`, so tags live
+--     apart, granted to nobody. A ban of any of an account's identities keeps
+--     the tag and bans the others still in (`users_ban_keeps_tag`): the one a
+--     moderator sees misbehave may be the one the account already left. A
+--     kick, which the next invite lifts, keeps nothing. `banned_tags` names
+--     no member row, so a ban outlives the member it was made against.
 --   * `register_user` takes the tag. A banned tag is refused through any
 --     link. The same account arriving with a new identity takes its old
 --     membership over (the old one leaves), except the owner's
---     (`account_in_use`).
+--     (`account_in_use`). Somebody already a member — one who left, on their
+--     device — is let back as before, account or not: the switch is about
+--     who arrives, and members already in are not touched.
 --
 -- `register_user` is replaced whole, as 018 left it plus the lines above; the
 -- six-argument one is dropped, since the edge function is its only caller.
@@ -55,13 +60,17 @@ CREATE POLICY invites_insert ON invites FOR INSERT TO authenticated
 CREATE TABLE IF NOT EXISTS member_account_tags (
   user_id    UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   server_id  UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-  tag        TEXT NOT NULL,
-  UNIQUE (server_id, tag)
+  tag        TEXT NOT NULL
 );
 
+-- Not unique: an account that came back as a new identity keeps the old
+-- one's row, so a ban of either reaches both.
+CREATE INDEX IF NOT EXISTS member_account_tags_tag
+  ON member_account_tags (server_id, tag);
+
 COMMENT ON TABLE member_account_tags IS
-  'The tag central vouched for when this member joined with a Rift account. '
-  'Read and written only by the service role.';
+  'The tag central vouched for when each identity joined with a Rift '
+  'account. Read and written only by the service role.';
 
 CREATE TABLE IF NOT EXISTS banned_tags (
   server_id  UUID        NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -102,6 +111,11 @@ COMMENT ON FUNCTION set_invite_needs_account(TEXT, BOOLEAN) IS
 
 -- Banned and not kicked is a ban; anything else is not. One rule for every
 -- way the two columns move (a ban, an unban, a kick turned into a ban).
+--
+-- A ban reaches the account: its tag is kept, and every other identity of it
+-- still here is banned too (the owner's never, as nobody bans an owner). An
+-- unban frees the tag only when no other identity of the account is still
+-- banned, and lets nobody else back by itself.
 CREATE OR REPLACE FUNCTION app.ban_keeps_tag() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_tag TEXT;
@@ -113,7 +127,17 @@ BEGIN
   IF NEW.is_banned AND NEW.kicked_at IS NULL THEN
     INSERT INTO banned_tags (server_id, tag) VALUES (NEW.server_id, v_tag)
     ON CONFLICT DO NOTHING;
-  ELSE
+    UPDATE users u SET is_banned = true, kicked_at = NULL, left_at = NULL
+      FROM member_account_tags t
+     WHERE t.user_id = u.id AND t.server_id = NEW.server_id AND t.tag = v_tag
+       AND u.id <> NEW.id
+       AND NOT (u.is_banned AND u.kicked_at IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM member_roles mr JOIN roles r ON r.id = mr.role_id
+                        WHERE mr.user_id = u.id AND r.is_owner);
+  ELSIF NOT EXISTS (
+          SELECT 1 FROM member_account_tags t JOIN users u ON u.id = t.user_id
+           WHERE t.server_id = NEW.server_id AND t.tag = v_tag
+             AND u.is_banned AND u.kicked_at IS NULL) THEN
     DELETE FROM banned_tags WHERE server_id = NEW.server_id AND tag = v_tag;
   END IF;
   RETURN NULL;
@@ -145,6 +169,7 @@ DECLARE
   v_max     INTEGER;
   v_members INTEGER;
   v_holder  users%ROWTYPE;
+  v_taking  UUID[] := '{}';
 BEGIN
   SELECT * INTO v_invite FROM invites WHERE code = p_invite_code FOR UPDATE;
 
@@ -159,13 +184,6 @@ BEGIN
     RETURN jsonb_build_object('reason', 'exhausted');
   END IF;
 
-  -- A link that needs a Rift account lets in only somebody central vouched
-  -- for (`register` checked the pass and hands over its tag). Asked before
-  -- anything about the caller, like the invite's own checks: without an
-  -- account there is nothing else to say.
-  IF v_invite.needs_account AND p_account_tag IS NULL THEN
-    RETURN jsonb_build_object('reason', 'account_required');
-  END IF;
   -- A banned account stays banned whichever identity it comes back as, and
   -- through whichever link: the tag is the account, not the link.
   IF p_account_tag IS NOT NULL AND EXISTS (
@@ -202,9 +220,7 @@ BEGIN
       END IF;
 
       UPDATE users SET is_banned = false, kicked_at = NULL WHERE id = p_user_id;
-      -- Coming back with an account: keep its tag, unless another member
-      -- already holds it (then that one is the account's membership, and
-      -- this one stays as it was before there were tags).
+      -- Coming back with an account: keep its tag.
       IF p_account_tag IS NOT NULL THEN
         INSERT INTO member_account_tags (user_id, server_id, tag)
         VALUES (p_user_id, v_invite.server_id, p_account_tag)
@@ -227,6 +243,14 @@ BEGIN
                                 'server_id', v_invite.server_id);
     END IF;
     RETURN jsonb_build_object('reason', 'already_registered');
+  END IF;
+
+  -- A link that needs a Rift account lets in only somebody central vouched
+  -- for (`register` checked the pass and hands over its tag). After the
+  -- members coming back, above: the switch is about who arrives, and
+  -- somebody who left on their device is still a member.
+  IF v_invite.needs_account AND p_account_tag IS NULL THEN
+    RETURN jsonb_build_object('reason', 'account_required');
   END IF;
   IF EXISTS (SELECT 1 FROM users
               WHERE server_id = v_invite.server_id
@@ -271,14 +295,24 @@ BEGIN
   -- here and acted on below, after every refusal, so a join refused for
   -- any other reason leaves the old membership exactly as it was.
   IF p_account_tag IS NOT NULL THEN
-    SELECT u.* INTO v_holder
-      FROM member_account_tags t JOIN users u ON u.id = t.user_id
-     WHERE t.server_id = v_invite.server_id AND t.tag = p_account_tag
-     FOR UPDATE OF u;
-    IF FOUND AND EXISTS (
-         SELECT 1 FROM member_roles mr JOIN roles r ON r.id = mr.role_id
-          WHERE mr.user_id = v_holder.id AND r.is_owner) THEN
-      RETURN jsonb_build_object('reason', 'account_in_use');
+    FOR v_holder IN
+      SELECT u.* FROM member_account_tags t JOIN users u ON u.id = t.user_id
+       WHERE t.server_id = v_invite.server_id AND t.tag = p_account_tag
+         AND NOT u.is_banned
+       FOR UPDATE OF u
+    LOOP
+      IF EXISTS (
+           SELECT 1 FROM member_roles mr JOIN roles r ON r.id = mr.role_id
+            WHERE mr.user_id = v_holder.id AND r.is_owner) THEN
+        RETURN jsonb_build_object('reason', 'account_in_use');
+      END IF;
+      v_taking := v_taking || v_holder.id;
+    END LOOP;
+    -- Asked again under the lock: a ban of the old identity that landed
+    -- while this waited for it has banned the tag since the check above.
+    IF EXISTS (SELECT 1 FROM banned_tags
+                WHERE server_id = v_invite.server_id AND tag = p_account_tag) THEN
+      RETURN jsonb_build_object('reason', 'user_banned');
     END IF;
   END IF;
 
@@ -289,25 +323,20 @@ BEGIN
       FROM users u
      WHERE u.server_id = v_invite.server_id AND NOT u.is_banned;
     -- A take-over gives the old membership's seat to the new one.
-    IF v_holder.id IS NOT NULL AND NOT v_holder.is_banned THEN
-      v_members := v_members - 1;
-    END IF;
+    v_members := v_members - cardinality(v_taking);
     IF v_members >= v_max THEN
       RETURN jsonb_build_object('reason', 'server_full');
     END IF;
   END IF;
 
-  IF v_holder.id IS NOT NULL THEN
-    -- Leaving, as `leave_server` does it: a kick by their own hand. One
-    -- already out (kicked, or left) is left as it is; a banned one never
-    -- gets this far (`banned_tags`).
-    IF NOT v_holder.is_banned THEN
-      DELETE FROM member_roles    WHERE user_id = v_holder.id;
-      DELETE FROM channel_members WHERE user_id = v_holder.id;
-      UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
-       WHERE id = v_holder.id;
-    END IF;
-    DELETE FROM member_account_tags WHERE user_id = v_holder.id;
+  -- Leaving, as `leave_server` does it: a kick by their own hand. The old
+  -- identity keeps its tag row, so banning it later still reaches the
+  -- account.
+  IF cardinality(v_taking) > 0 THEN
+    DELETE FROM member_roles    WHERE user_id = ANY (v_taking);
+    DELETE FROM channel_members WHERE user_id = ANY (v_taking);
+    UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+     WHERE id = ANY (v_taking);
   END IF;
 
   INSERT INTO users (

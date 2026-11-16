@@ -7,7 +7,7 @@ import * as EC from "../_shared/error_codes.ts";
 import { extractBearerToken } from "../_shared/auth.ts";
 import { verifyJwt } from "../_shared/jwt.ts";
 import { fetchServerContext } from "../_shared/server_context.ts";
-import { verifyServerPass } from "../_shared/server_pass.ts";
+import { verifyServerPass, web3KeyMatches } from "../_shared/server_pass.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -96,8 +96,13 @@ Deno.serve(async (req) => {
         const verified = await verifyServerPass(String(pass), {
           serverId: inviteServer as string,
           publicKey: public_key,
+          publicUrl: Deno.env.get("SUPABASE_PUBLIC_URL") ?? "",
         });
-        if (!verified) {
+        // The key the pass names has to be the one this caller signed in
+        // with, not just the one they typed into the request: otherwise a
+        // pass seen anywhere could bring somebody else in under its tag.
+        const signedInAs = verified ? await web3Subject(authUid) : null;
+        if (!verified || !signedInAs || !web3KeyMatches(signedInAs, public_key)) {
           return CustomResponse.error(
             "Rift couldn't vouch for your account. Try joining again.",
             EC.PASS_INVALID,
@@ -192,6 +197,17 @@ Deno.serve(async (req) => {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
   }
 });
+
+/** The caller's Sign-in-with-Solana subject, `web3:solana:<address>`. */
+async function web3Subject(authUid: string): Promise<string | null> {
+  const { data, error } = await supabase.auth.admin.getUserById(authUid);
+  if (error || !data.user) return null;
+  for (const identity of data.user.identities ?? []) {
+    const sub = identity.identity_data?.sub;
+    if (identity.provider === "web3" && typeof sub === "string") return sub;
+  }
+  return null;
+}
 
 /**
  * Sign a returning member back in to the membership they already have.

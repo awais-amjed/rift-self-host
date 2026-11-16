@@ -10731,9 +10731,10 @@ BEGIN
               WHERE user_id = '33330000-0000-4000-8000-000000000002') THEN
     RAISE EXCEPTION 'FAIL: the old membership kept its roles';
   END IF;
-  IF (SELECT user_id FROM member_account_tags WHERE tag = 'tag-m')
-       IS DISTINCT FROM '33330000-0000-4000-8000-000000000004' THEN
-    RAISE EXCEPTION 'FAIL: the tag did not move to the new identity';
+  IF NOT EXISTS (SELECT 1 FROM member_account_tags
+                  WHERE tag = 'tag-m'
+                    AND user_id = '33330000-0000-4000-8000-000000000004') THEN
+    RAISE EXCEPTION 'FAIL: the new identity does not hold the tag';
   END IF;
   RAISE NOTICE 'ok  the same account with a new identity takes its membership over';
 
@@ -10746,6 +10747,39 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a refused take-over touched the owner';
   END IF;
   RAISE NOTICE 'ok  the owner''s membership is never taken over';
+END $$;
+
+-- ── banning the identity that was taken over bans the account ──────────
+-- The old identity is the one whose messages a moderator sees, so it is the
+-- one they ban. The account, now under the new identity, goes with it.
+DO $$
+BEGIN
+  UPDATE users SET is_banned = true, kicked_at = NULL, left_at = NULL
+   WHERE id = '33330000-0000-4000-8000-000000000002';
+  IF NOT EXISTS (SELECT 1 FROM banned_tags WHERE tag = 'tag-m') THEN
+    RAISE EXCEPTION 'FAIL: banning the old identity did not ban the account';
+  END IF;
+  IF NOT (SELECT is_banned FROM users WHERE id = '33330000-0000-4000-8000-000000000004') THEN
+    RAISE EXCEPTION 'FAIL: the account stayed in under its new identity';
+  END IF;
+  RAISE NOTICE 'ok  banning an identity the account left bans the account';
+END $$;
+
+-- ── a member who left, in privacy mode, comes back through the link ─────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  INSERT INTO auth.users (id) VALUES ('33330000-0000-4000-8000-000000000007');
+  v := register_user('gam-open', '33330000-0000-4000-8000-000000000007',
+                     'pk-g7', 'sid-g7', 'gprivate', 'G7');
+  UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+   WHERE id = '33330000-0000-4000-8000-000000000007';
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000007',
+                     'pk-g7', 'sid-g7', 'gprivate', 'G7');
+  IF v ->> 'reason' IS DISTINCT FROM 'readmitted' THEN
+    RAISE EXCEPTION 'FAIL: a member who left could not come back without an account: %', v;
+  END IF;
+  RAISE NOTICE 'ok  somebody already a member is not asked for an account';
 END $$;
 
 -- ── coming back after leaving, and a banned member who is deleted ──────

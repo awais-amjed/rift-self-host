@@ -95,6 +95,9 @@ Deno.serve(async (req) => {
       // Whether joining through this link needs a Rift account, so the app
       // can say so before anybody signs in (030).
       needs_account: invite[DBSchema.invites.needsAccount] === true,
+      // The address a pass for this server must name: central makes the tag
+      // from it, and `register` accepts no other (`_shared/server_pass.ts`).
+      public_url: Deno.env.get("SUPABASE_PUBLIC_URL") || null,
     });
   } catch (err) {
     return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
