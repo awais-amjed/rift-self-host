@@ -10830,4 +10830,183 @@ END $$;
 RESET ROLE;
 
 
+-- ============================================================
+-- One account, one live identity (031)
+-- ============================================================
+-- A ban of one identity bans the account's others (`users_ban_keeps_tag`),
+-- and so it must never reach somebody `moderate_user` refuses: an admin, or
+-- a holder of BAN_MEMBERS. Found Nov 16 2026: an identity of the account
+-- coming back (the kicked path) left the account's live one in, so the two
+-- were in at once, and a moderator banning the plain one banned an admin.
+-- Now coming back takes the live one over, as a new identity does, and the
+-- trigger leaves alone whoever the caller could not have banned.
+
+INSERT INTO servers (id, name, livekit_url)
+VALUES ('e5e50000-0000-4000-8000-000000000001', 'Epsilon', 'ws://lan:7880');
+INSERT INTO invites (server_id, code, max_uses, needs_account) VALUES
+  ('e5e50000-0000-4000-8000-000000000001', 'eps-acct', NULL, true),
+  ('e5e50000-0000-4000-8000-000000000001', 'eps-open', NULL, false);
+INSERT INTO auth.users (id)
+SELECT ('e5e51111-0000-4000-8000-0000000000' || n)::uuid
+  FROM unnest(ARRAY['01','02','03','04','05','06','07','a1','a2','a3','a4']) n;
+
+-- ── coming back takes the account's live identity over ─────────────────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  -- The owner first (the first person through a link), with an account.
+  v := register_user('eps-acct', 'e5e51111-0000-4000-8000-000000000001',
+                     'pk-e1', 'sid-e1', 'eowner', 'E1', 'tag-eo');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: setup, the owner could not join: %', v;
+  END IF;
+
+  -- An identity without an account, which then leaves...
+  v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000002',
+                     'pk-e2', 'sid-e2', 'eold', 'E2');
+  UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+   WHERE id = 'e5e51111-0000-4000-8000-000000000002';
+  -- ...a new one of the same person, with an account...
+  v := register_user('eps-acct', 'e5e51111-0000-4000-8000-000000000003',
+                     'pk-e3', 'sid-e3', 'enew', 'E3', 'tag-er');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: setup, the new identity could not join: %', v;
+  END IF;
+  -- ...and the old one back, vouched for by the same account.
+  v := register_user('eps-acct', 'e5e51111-0000-4000-8000-000000000002',
+                     'pk-e2', 'sid-e2', 'eold', 'E2', 'tag-er');
+  IF v ->> 'reason' IS DISTINCT FROM 'readmitted' THEN
+    RAISE EXCEPTION 'FAIL: the old identity could not come back: %', v;
+  END IF;
+  IF NOT (SELECT is_banned AND kicked_at IS NOT NULL AND left_at IS NOT NULL
+            FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000003') THEN
+    RAISE EXCEPTION 'FAIL: an identity came back and the account''s live one stayed in';
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: the identity that came back is not in';
+  END IF;
+  RAISE NOTICE 'ok  an identity coming back with its account takes the live one over';
+END $$;
+
+-- ── ...also when it comes back without a pass, by the tag it kept ──────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := register_user('eps-acct', 'e5e51111-0000-4000-8000-000000000004',
+                     'pk-e4', 'sid-e4', 'eq1', 'E4', 'tag-eq');
+  UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+   WHERE id = 'e5e51111-0000-4000-8000-000000000004';
+  v := register_user('eps-acct', 'e5e51111-0000-4000-8000-000000000005',
+                     'pk-e5', 'sid-e5', 'eq2', 'E5', 'tag-eq');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: setup, the second identity could not join: %', v;
+  END IF;
+  -- Back through a link that asks nothing, so no pass: its kept tag says
+  -- whose it is.
+  v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000004',
+                     'pk-e4', 'sid-e4', 'eq1', 'E4');
+  IF v ->> 'reason' IS DISTINCT FROM 'readmitted' THEN
+    RAISE EXCEPTION 'FAIL: the first identity could not come back: %', v;
+  END IF;
+  IF NOT (SELECT is_banned AND kicked_at IS NOT NULL
+            FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000005') THEN
+    RAISE EXCEPTION 'FAIL: an identity came back by its kept tag and the live one stayed in';
+  END IF;
+  RAISE NOTICE 'ok  an identity coming back by its kept tag takes the live one over';
+END $$;
+
+-- ── ...but never the owner's ───────────────────────────────────────────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000006',
+                     'pk-e6', 'sid-e6', 'eownold', 'E6');
+  UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+   WHERE id = 'e5e51111-0000-4000-8000-000000000006';
+  v := register_user('eps-acct', 'e5e51111-0000-4000-8000-000000000006',
+                     'pk-e6', 'sid-e6', 'eownold', 'E6', 'tag-eo');
+  IF v ->> 'reason' IS DISTINCT FROM 'account_in_use' THEN
+    RAISE EXCEPTION 'FAIL: coming back took the owner''s membership over: %', v;
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000001')
+     OR (SELECT kicked_at IS NULL FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000006') THEN
+    RAISE EXCEPTION 'FAIL: a refused return changed either membership';
+  END IF;
+  RAISE NOTICE 'ok  coming back never takes the owner''s membership over';
+END $$;
+
+-- ── a banned account's identity does not come back by its kept tag ─────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000007',
+                     'pk-e7', 'sid-e7', 'ekick', 'E7');
+  INSERT INTO member_account_tags (user_id, server_id, tag)
+  VALUES ('e5e51111-0000-4000-8000-000000000007',
+          'e5e50000-0000-4000-8000-000000000001', 'tag-eb');
+  UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+   WHERE id = 'e5e51111-0000-4000-8000-000000000007';
+  INSERT INTO banned_tags (server_id, tag)
+  VALUES ('e5e50000-0000-4000-8000-000000000001', 'tag-eb');
+  v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000007',
+                     'pk-e7', 'sid-e7', 'ekick', 'E7');
+  IF v ->> 'reason' IS DISTINCT FROM 'user_banned' THEN
+    RAISE EXCEPTION 'FAIL: an identity of a banned account came back: %', v;
+  END IF;
+  RAISE NOTICE 'ok  an identity of a banned account does not come back';
+END $$;
+
+-- ── the ban reaches nobody moderate_user would refuse ──────────────────
+-- Put in by hand: an admin, a peer holding BAN_MEMBERS and a plain member,
+-- all one account (as a server could hold them from before 031), and a
+-- moderator who bans the plain one.
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, is_server_admin)
+VALUES
+  ('e5e51111-0000-4000-8000-0000000000a1', 'e5e50000-0000-4000-8000-000000000001',
+   'emod', 'EMod', 'pk-ea1', 'sid-ea1', false),
+  ('e5e51111-0000-4000-8000-0000000000a2', 'e5e50000-0000-4000-8000-000000000001',
+   'eadmin', 'EAdmin', 'pk-ea2', 'sid-ea2', true),
+  ('e5e51111-0000-4000-8000-0000000000a3', 'e5e50000-0000-4000-8000-000000000001',
+   'epeer', 'EPeer', 'pk-ea3', 'sid-ea3', false),
+  ('e5e51111-0000-4000-8000-0000000000a4', 'e5e50000-0000-4000-8000-000000000001',
+   'ealt', 'EAlt', 'pk-ea4', 'sid-ea4', false);
+UPDATE roles SET permissions = permissions | app.perm('BAN_MEMBERS')
+ WHERE server_id = 'e5e50000-0000-4000-8000-000000000001' AND name = 'Moderator';
+INSERT INTO member_roles (user_id, role_id)
+SELECT u.id, r.id FROM roles r
+  JOIN (VALUES ('e5e51111-0000-4000-8000-0000000000a1'::uuid, 'Moderator'),
+               ('e5e51111-0000-4000-8000-0000000000a2'::uuid, 'Admin'),
+               ('e5e51111-0000-4000-8000-0000000000a3'::uuid, 'Moderator')) u(id, role)
+    ON r.name = u.role
+ WHERE r.server_id = 'e5e50000-0000-4000-8000-000000000001';
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'e5e50000-0000-4000-8000-000000000001';
+INSERT INTO member_account_tags (user_id, server_id, tag)
+SELECT id, 'e5e50000-0000-4000-8000-000000000001', 'tag-ez' FROM users
+ WHERE id IN ('e5e51111-0000-4000-8000-0000000000a2',
+              'e5e51111-0000-4000-8000-0000000000a3',
+              'e5e51111-0000-4000-8000-0000000000a4');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('e5e51111-0000-4000-8000-0000000000a1');  -- emod
+DO $$
+BEGIN
+  PERFORM moderate_user('e5e51111-0000-4000-8000-0000000000a4', NULL, NULL, true);
+END $$;
+RESET ROLE;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM banned_tags WHERE tag = 'tag-ez') THEN
+    RAISE EXCEPTION 'FAIL: setup, the ban did not keep the tag';
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = 'e5e51111-0000-4000-8000-0000000000a2') THEN
+    RAISE EXCEPTION 'FAIL: banning a plain identity banned an admin of the same account';
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = 'e5e51111-0000-4000-8000-0000000000a3') THEN
+    RAISE EXCEPTION 'FAIL: banning a plain identity banned a holder of BAN_MEMBERS';
+  END IF;
+  RAISE NOTICE 'ok  an account''s ban reaches nobody a moderator could not ban';
+END $$;
+
+
 ROLLBACK;
