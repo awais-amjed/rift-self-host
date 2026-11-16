@@ -1,0 +1,87 @@
+# A call region for a Rift server: a second LiveKit near members who are far
+# from the main one. Chat stays on the main server; only calls run here.
+# https://docs.joinrift.app/regions/
+#
+# One file and an .env beside it; no console runs here. Its LiveKit is the main
+# server's, with the same version and the same settings, and a test in
+# rift-self-host fails when the two differ. Download it as docker-compose.yml
+# into an empty folder, with an .env beside it like this:
+#
+#   REGION_DOMAIN=sg.example.com          # this machine's domain name
+#   LIVEKIT_API_KEY=API...                # this region's own key pair:
+#   LIVEKIT_API_SECRET=...                #   never the main server's
+#   MAIN_SERVER=chat.example.com          # the main server's address, for its webhook
+#   COMPOSE_PROFILES=caddy                # Caddy gets the certificate; empty: your own proxy
+#   # LIVEKIT_SIGNAL_BIND=192.168.1.20    # with your own proxy: where LiveKit's 7880 listens
+#
+# Then `docker compose up -d`. The same key pair goes into the app, under
+# Manage server → Regions. To update, download this file again and run
+# `docker compose pull && docker compose up -d`.
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13
+    restart: unless-stopped
+    # Who counts as speaking, as on the main server (its docker-compose.yml
+    # says what these do and why). Its config file is the variable below.
+    command: [
+      "--audio.active_level", "45", "--audio.min_percentile", "25",
+      "--audio.update_interval", "200", "--audio.smooth_intervals", "1",
+    ]
+    environment:
+      # LiveKit reads the whole of its config from this variable, so there is
+      # no livekit.yaml to write. The values come from .env, and compose stops
+      # with the name of any that is missing rather than start LiveKit without it.
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          # One UDP port, and TCP for networks that block UDP. LiveKit tells
+          # callers the port it listens on, so each is published under the
+          # same number below.
+          udp_port: 7882
+          tcp_port: 7881
+          use_external_ip: true
+        keys:
+          "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY in .env}": "${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}"
+        room:
+          auto_create: true
+          empty_timeout: 300
+        logging:
+          level: info
+          json: false
+        # Tells the main server who leaves a call here, so it tidies up at once.
+        webhook:
+          api_key: "${LIVEKIT_API_KEY}"
+          urls:
+            - https://${MAIN_SERVER:?set MAIN_SERVER in .env}/functions/v1/livekit_webhook
+    # LiveKit offers callers every address it can see, and a private IPv6 one
+    # inside Docker is one none of them can reach.
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+    ports:
+      - "7882:7882/udp"
+      - "7881:7881"
+      # Signalling, for Caddy below. Loopback unless .env says otherwise: with
+      # your own proxy on another machine, the address it reaches this one on.
+      - "${LIVEKIT_SIGNAL_BIND:-127.0.0.1}:7880:7880"
+
+  # Gets this domain a certificate and passes apps through to LiveKit. On when
+  # .env has COMPOSE_PROFILES=caddy; leave that empty to use your own proxy,
+  # pointed at port 7880 (websockets on).
+  caddy:
+    image: caddy:2.11-alpine
+    profiles: [caddy]
+    restart: unless-stopped
+    command: [
+      "caddy", "reverse-proxy",
+      "--from", "${REGION_DOMAIN:?set REGION_DOMAIN in .env}",
+      "--to", "livekit:7880",
+    ]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+
+volumes:
+  caddy_data:
