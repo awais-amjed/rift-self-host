@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert@1";
-import { verifyServerPass, web3KeyMatches } from "./server_pass.ts";
+import { CENTRAL_PASS_PUBLIC_KEY, verifyServerPass, web3KeyMatches } from "./server_pass.ts";
 
 // A pass as central makes one (`server_pass` in rift-central): the payload's
 // JSON bytes, signed with Ed25519, each half base64url.
@@ -120,3 +120,9 @@ Deno.test("another identity's key, or no web3 sign-in, does not match", () => {
 });
 
 function key32() { return new Uint8Array(32).fill(7); }
+
+Deno.test("central's key is built in: 32 bytes an Ed25519 key can be made from", async () => {
+  const raw = Uint8Array.from(atob(CENTRAL_PASS_PUBLIC_KEY), (c) => c.charCodeAt(0));
+  assertEquals(raw.length, 32);
+  await crypto.subtle.importKey("raw", raw, "Ed25519", false, ["verify"]);
+});

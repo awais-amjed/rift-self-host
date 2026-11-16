@@ -21,10 +21,10 @@
  * asks central with the address `resolve_invite` names for that reason.
  */
 
-/** Central's public key for passes: 32 raw bytes, base64. Empty until the
- *  key exists; with none, every pass is refused. `RIFT_CENTRAL_PASS_KEY`
- *  overrides it, for a test stack or a key change. */
-export const CENTRAL_PASS_PUBLIC_KEY = "";
+/** Central's public key for passes: 32 raw bytes, base64 (made Nov 16 2026;
+ *  its private half is `SERVER_PASS_SIGNING_KEY` in central's env).
+ *  `RIFT_CENTRAL_PASS_KEY` overrides it, for a test stack or a key change. */
+export const CENTRAL_PASS_PUBLIC_KEY = "MyXabLlL71zo1a+3M3AjkO322Bv1By0EUikL/q+1wFY=";
 
 function centralKeyFromEnv(): string {
   try {
