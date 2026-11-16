@@ -10534,4 +10534,266 @@ END $$;
 RESET ROLE;
 
 
+-- ============================================================
+-- An invite that needs a Rift account (030)
+-- ============================================================
+-- Only an admin marks a link "needs a Rift account"; joining through one
+-- needs a tag, which central vouches for and `register` checks before it
+-- gets here. A ban keeps the tag, a kick does not, and the same account
+-- arriving with a new identity takes its old membership over — unless that
+-- membership is the owner's. Nobody but the service role reads a tag.
+
+-- ── joining with a tag ──────────────────────────────────────────────────
+-- Gamma is new and empty, so the first person through becomes its owner.
+INSERT INTO servers (id, name, livekit_url)
+VALUES ('cccc0000-0000-4000-8000-000000000001', 'Gamma', 'ws://lan:7880');
+INSERT INTO invites (server_id, code, max_uses, needs_account) VALUES
+  ('cccc0000-0000-4000-8000-000000000001', 'gam-acct', NULL, true),
+  ('cccc0000-0000-4000-8000-000000000001', 'gam-open', NULL, false);
+INSERT INTO auth.users (id) VALUES
+  ('33330000-0000-4000-8000-000000000001'),
+  ('33330000-0000-4000-8000-000000000002'),
+  ('33330000-0000-4000-8000-000000000003'),
+  ('33330000-0000-4000-8000-000000000004'),
+  ('33330000-0000-4000-8000-000000000005'),
+  ('33330000-0000-4000-8000-000000000006');
+
+-- An admin and a plain member who are not people joining: put in by hand,
+-- as the fixtures at the top are, so the first person *through a link* is
+-- still the one who becomes the owner.
+INSERT INTO auth.users (id) VALUES
+  ('33330000-0000-4000-8000-0000000000a1'),
+  ('33330000-0000-4000-8000-0000000000b2');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, is_server_admin)
+VALUES
+  ('33330000-0000-4000-8000-0000000000a1', 'cccc0000-0000-4000-8000-000000000001',
+   'gadmin', 'GAdmin', 'pk-ga', 'sid-ga', true),
+  ('33330000-0000-4000-8000-0000000000b2', 'cccc0000-0000-4000-8000-000000000001',
+   'gplain', 'GPlain', 'pk-gp', 'sid-gp', false);
+INSERT INTO member_roles (user_id, role_id)
+SELECT '33330000-0000-4000-8000-0000000000a1', r.id FROM roles r
+ WHERE r.server_id = 'cccc0000-0000-4000-8000-000000000001' AND r.name = 'Admin';
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'cccc0000-0000-4000-8000-000000000001';
+
+-- ── who may mark a link ─────────────────────────────────────────────────
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('33330000-0000-4000-8000-0000000000b2');  -- gplain
+DO $$
+BEGIN
+  INSERT INTO invites (server_id, created_by, needs_account)
+  VALUES ('cccc0000-0000-4000-8000-000000000001',
+          '33330000-0000-4000-8000-0000000000b2', true);
+  RAISE EXCEPTION 'FAIL: a member who is not an admin marked a link';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  only an admin makes a link that needs an account';
+END $$;
+-- ...while the same member may still make an ordinary one, so the refusal
+-- above is about the mark and nothing else.
+INSERT INTO invites (server_id, created_by)
+VALUES ('cccc0000-0000-4000-8000-000000000001',
+        '33330000-0000-4000-8000-0000000000b2');
+
+SELECT pg_temp.as_member('33330000-0000-4000-8000-0000000000a1');  -- gadmin
+INSERT INTO invites (server_id, created_by, needs_account)
+VALUES ('cccc0000-0000-4000-8000-000000000001',
+        '33330000-0000-4000-8000-0000000000a1', true);
+RESET ROLE;
+UPDATE invites SET code = 'acct-alpha'
+ WHERE created_by = '33330000-0000-4000-8000-0000000000a1' AND needs_account;
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('33330000-0000-4000-8000-0000000000b2');  -- gplain
+DO $$
+BEGIN
+  IF set_invite_needs_account('acct-alpha', false) ->> 'reason' <> 'not_admin' THEN
+    RAISE EXCEPTION 'FAIL: a member who is not an admin unmarked a link';
+  END IF;
+  RAISE NOTICE 'ok  only an admin changes whether a link needs an account';
+END $$;
+SELECT pg_temp.as_member('33330000-0000-4000-8000-0000000000a1');  -- gadmin
+DO $$
+BEGIN
+  IF set_invite_needs_account('acct-alpha', false) ->> 'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin could not unmark a link';
+  END IF;
+  RAISE NOTICE 'ok  an admin unmarks a link';
+END $$;
+RESET ROLE;
+DO $$
+BEGIN
+  IF (SELECT needs_account FROM invites WHERE code = 'acct-alpha') THEN
+    RAISE EXCEPTION 'FAIL: unmarking a link left it marked';
+  END IF;
+END $$;
+DELETE FROM invites WHERE code = 'acct-alpha';
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000001',
+                     'pk-g1', 'sid-g1', 'gowner', 'G1');
+  IF v ->> 'reason' IS DISTINCT FROM 'account_required' THEN
+    RAISE EXCEPTION 'FAIL: a link that needs an account let a bare identity in: %', v;
+  END IF;
+  IF (SELECT uses FROM invites WHERE code = 'gam-acct') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a refused join used the link up';
+  END IF;
+  RAISE NOTICE 'ok  a link that needs an account refuses an identity without one';
+
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000001',
+                     'pk-g1', 'sid-g1', 'gowner', 'G1', 'tag-owner');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an account with a tag could not join: %', v;
+  END IF;
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000002',
+                     'pk-g2', 'sid-g2', 'gmember', 'G2', 'tag-m');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a second account could not join: %', v;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM member_account_tags
+                  WHERE user_id = '33330000-0000-4000-8000-000000000002'
+                    AND server_id = 'cccc0000-0000-4000-8000-000000000001'
+                    AND tag = 'tag-m') THEN
+    RAISE EXCEPTION 'FAIL: a member who joined with a tag has none';
+  END IF;
+  RAISE NOTICE 'ok  an account joins and its tag is kept';
+END $$;
+
+-- ── a ban keeps the tag, a kick does not ────────────────────────────────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  UPDATE users SET is_banned = true WHERE id = '33330000-0000-4000-8000-000000000002';
+  IF NOT EXISTS (SELECT 1 FROM banned_tags
+                  WHERE server_id = 'cccc0000-0000-4000-8000-000000000001'
+                    AND tag = 'tag-m') THEN
+    RAISE EXCEPTION 'FAIL: a ban did not keep the tag';
+  END IF;
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000003',
+                     'pk-g3', 'sid-g3', 'gnew', 'G3', 'tag-m');
+  IF v ->> 'reason' IS DISTINCT FROM 'user_banned' THEN
+    RAISE EXCEPTION 'FAIL: a banned account came back with a new identity: %', v;
+  END IF;
+  -- The same tag on a link that does not need an account is still that account.
+  v := register_user('gam-open', '33330000-0000-4000-8000-000000000003',
+                     'pk-g3', 'sid-g3', 'gnew', 'G3', 'tag-m');
+  IF v ->> 'reason' IS DISTINCT FROM 'user_banned' THEN
+    RAISE EXCEPTION 'FAIL: a banned tag got in through an open link: %', v;
+  END IF;
+  RAISE NOTICE 'ok  a ban holds against the account, not the identity';
+
+  UPDATE users SET is_banned = false WHERE id = '33330000-0000-4000-8000-000000000002';
+  IF EXISTS (SELECT 1 FROM banned_tags WHERE tag = 'tag-m') THEN
+    RAISE EXCEPTION 'FAIL: an unban left the tag banned';
+  END IF;
+  UPDATE users SET is_banned = true, kicked_at = now()
+   WHERE id = '33330000-0000-4000-8000-000000000002';
+  IF EXISTS (SELECT 1 FROM banned_tags WHERE tag = 'tag-m') THEN
+    RAISE EXCEPTION 'FAIL: a kick banned the tag';
+  END IF;
+  UPDATE users SET is_banned = false, kicked_at = NULL
+   WHERE id = '33330000-0000-4000-8000-000000000002';
+  RAISE NOTICE 'ok  an unban or a kick leaves the tag free';
+END $$;
+
+-- ── the same account with a new identity ───────────────────────────────
+INSERT INTO member_roles (user_id, role_id)
+SELECT '33330000-0000-4000-8000-000000000002', r.id FROM roles r
+ WHERE r.server_id = 'cccc0000-0000-4000-8000-000000000001' AND r.name = 'Moderator';
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  -- Refused for another reason: nothing is taken over.
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000004',
+                     'pk-g4', 'sid-g4', 'gowner', 'G4', 'tag-m');
+  IF v ->> 'reason' IS DISTINCT FROM 'username_taken' THEN
+    RAISE EXCEPTION 'FAIL: expected username_taken, got %', v;
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = '33330000-0000-4000-8000-000000000002')
+     OR NOT EXISTS (SELECT 1 FROM member_account_tags
+                     WHERE user_id = '33330000-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: a refused join took the old membership over';
+  END IF;
+  RAISE NOTICE 'ok  a refused join leaves the old membership alone';
+
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000004',
+                     'pk-g4', 'sid-g4', 'gtaker', 'G4', 'tag-m');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: the same account with a new identity was refused: %', v;
+  END IF;
+  IF NOT (SELECT is_banned AND kicked_at IS NOT NULL AND left_at IS NOT NULL
+            FROM users WHERE id = '33330000-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: the old membership was not left';
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles
+              WHERE user_id = '33330000-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: the old membership kept its roles';
+  END IF;
+  IF (SELECT user_id FROM member_account_tags WHERE tag = 'tag-m')
+       IS DISTINCT FROM '33330000-0000-4000-8000-000000000004' THEN
+    RAISE EXCEPTION 'FAIL: the tag did not move to the new identity';
+  END IF;
+  RAISE NOTICE 'ok  the same account with a new identity takes its membership over';
+
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000005',
+                     'pk-g5', 'sid-g5', 'gsteal', 'G5', 'tag-owner');
+  IF v ->> 'reason' IS DISTINCT FROM 'account_in_use' THEN
+    RAISE EXCEPTION 'FAIL: the owner''s membership was taken over: %', v;
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = '33330000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a refused take-over touched the owner';
+  END IF;
+  RAISE NOTICE 'ok  the owner''s membership is never taken over';
+END $$;
+
+-- ── coming back after leaving, and a banned member who is deleted ──────
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := register_user('gam-open', '33330000-0000-4000-8000-000000000006',
+                     'pk-g6', 'sid-g6', 'greturn', 'G6');
+  UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+   WHERE id = '33330000-0000-4000-8000-000000000006';
+  v := register_user('gam-acct', '33330000-0000-4000-8000-000000000006',
+                     'pk-g6', 'sid-g6', 'greturn', 'G6', 'tag-r');
+  IF v ->> 'reason' IS DISTINCT FROM 'readmitted' THEN
+    RAISE EXCEPTION 'FAIL: somebody who left could not come back: %', v;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM member_account_tags
+                  WHERE user_id = '33330000-0000-4000-8000-000000000006'
+                    AND tag = 'tag-r') THEN
+    RAISE EXCEPTION 'FAIL: coming back with a tag did not keep it';
+  END IF;
+  RAISE NOTICE 'ok  somebody coming back with an account keeps its tag';
+
+  UPDATE users SET is_banned = true WHERE id = '33330000-0000-4000-8000-000000000004';
+  DELETE FROM users WHERE id = '33330000-0000-4000-8000-000000000004';
+  IF NOT EXISTS (SELECT 1 FROM banned_tags WHERE tag = 'tag-m') THEN
+    RAISE EXCEPTION 'FAIL: a ban went with the member row';
+  END IF;
+  RAISE NOTICE 'ok  a ban outlives the member it was made against';
+END $$;
+
+-- ── nobody reads a tag ──────────────────────────────────────────────────
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000001');  -- alice, an admin
+DO $$
+BEGIN
+  PERFORM 1 FROM member_account_tags;
+  RAISE EXCEPTION 'FAIL: a member read the account tags';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  no member reads an account tag';
+END $$;
+DO $$
+BEGIN
+  PERFORM 1 FROM banned_tags;
+  RAISE EXCEPTION 'FAIL: a member read the banned tags';
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ok  no member reads a banned tag';
+END $$;
+RESET ROLE;
+
+
 ROLLBACK;
