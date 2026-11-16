@@ -12,9 +12,10 @@
 # brings a stack up to date, so every image that changes anything needs a new
 # one.
 #
-# The release workflow attaches docker-compose.yml to the GitHub release, and
-# the website's install link redirects to the newest full release's copy, so a
-# new server gets this one as soon as its image is published.
+# The release workflow attaches docker-compose.yml and region-compose.yml to
+# the GitHub release, and the website's links redirect to the newest full
+# release's copies, so a new server or region gets them as soon as the image
+# is published.
 #
 # Nothing is pushed. When the commit and the tag look right:
 #

@@ -65,8 +65,9 @@ what is missing, leaving the rest as it is. The first update after Nov 2 2026
 adds LiveKit's `webhook:` block and restarts LiveKit, so calls drop for a
 moment and reconnect; if the restart could not happen then, the next update
 does it. A file that no longer lists the key in `.env` is left
-alone; add the block from `console/templates/livekit/livekit.yaml` by hand. An
-extra region needs it too ([call regions](https://docs.joinrift.app/regions/)).
+alone; add the block from `console/templates/livekit/livekit.yaml` by hand. A
+call region set up from its own `livekit.yaml` needs it too; one run from
+`region-compose.yml` has it ([call regions](https://docs.joinrift.app/regions/)).
 
 The console image is [`ghcr.io/awais-amjed/rift-console`](https://github.com/awais-amjed/rift-self-host/pkgs/container/rift-console),
 for amd64 and arm64, tagged with each release's version. The compose file names
@@ -96,6 +97,7 @@ the console by version, so a bare `docker compose pull` changes nothing.
 
 ```
 docker-compose.yml     what an operator downloads
+region-compose.yml     the same, for a call region on another machine
 console/               the setup and management console — the one image this repo builds
 migrations/            the database schema, policies and functions, split by kind
 supabase/functions/    the server's edge functions
