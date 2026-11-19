@@ -151,6 +151,15 @@ services:
       KONG_ROUTER_FLAVOR: expressions
       KONG_DNS_ORDER: LAST,A,CNAME
       KONG_DNS_NOT_FOUND_TTL: 1
+      # Look the services up again every few seconds, and never use an old
+      # answer while asking. Docker gives a name 600 s, each of Kong's workers
+      # keeps its own copy, and a container recreated by an update often comes
+      # back on a new address: without these, the workers holding the old one
+      # answered 502 for about ten minutes (measured Nov 19, a functions move
+      # failed one call in eight until then; with them, one call in the first
+      # second).
+      KONG_DNS_VALID_TTL: 5
+      KONG_DNS_STALE_TTL: 0
       # post-function is what clears the empty Authorization header on a
       # presigned storage URL; without it every such download is a 400.
       KONG_PLUGINS: request-transformer,cors,key-auth,acl,post-function
