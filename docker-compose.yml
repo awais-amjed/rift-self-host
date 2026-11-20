@@ -160,6 +160,13 @@ services:
       # second).
       KONG_DNS_VALID_TTL: 5
       KONG_DNS_STALE_TTL: 0
+      # Two workers, not Kong's one per core: each holds about 120 MB, and a
+      # server for a group of friends never keeps two busy. On a 6-core machine
+      # six held 690 MB, and the rest of the stack ran short whenever something
+      # else needed memory for a moment. Two answered over 3000 requests a
+      # second and held 400 Realtime connections (Nov 21 2026). A busy server
+      # sets KONG_WORKERS in .env: a number, or `auto` for one per core.
+      KONG_NGINX_WORKER_PROCESSES: ${KONG_WORKERS:-2}
       # post-function is what clears the empty Authorization header on a
       # presigned storage URL; without it every such download is a 400.
       KONG_PLUGINS: request-transformer,cors,key-auth,acl,post-function
