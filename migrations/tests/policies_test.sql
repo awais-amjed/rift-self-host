@@ -11009,4 +11009,190 @@ BEGIN
 END $$;
 
 
+-- ============================================================
+-- 032: rank on assigning, webhooks by their bit, admins' invites
+-- ============================================================
+-- A server of its own, since Alpha is gone by now: zoe (Admin, 300), zed
+-- (given Admin as well, so the two are equals) and zia (a plain member, who
+-- may invite). And three roles of the test's own: one above Admin, and two a
+-- channel manager could hold, with and without the webhook bit.
+RESET ROLE;
+INSERT INTO servers (id, name, livekit_url)
+VALUES ('a0320000-0000-4000-8000-000000000001', 'Zeta', 'ws://lan:7880');
+INSERT INTO channels (id, server_id, name, channel_type)
+VALUES ('a0321111-0000-4000-8000-000000000001', 'a0320000-0000-4000-8000-000000000001',
+        'general', 'text');
+INSERT INTO auth.users (id) VALUES
+  ('a0322222-0000-4000-8000-000000000001'),
+  ('a0322222-0000-4000-8000-000000000002'),
+  ('a0322222-0000-4000-8000-000000000003');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id)
+VALUES
+  ('a0322222-0000-4000-8000-000000000001', 'a0320000-0000-4000-8000-000000000001',
+   'zoe', 'Zoe', 'pk-zoe', 'sid-zoe'),
+  ('a0322222-0000-4000-8000-000000000002', 'a0320000-0000-4000-8000-000000000001',
+   'zed', 'Zed', 'pk-zed', 'sid-zed'),
+  ('a0322222-0000-4000-8000-000000000003', 'a0320000-0000-4000-8000-000000000001',
+   'zia', 'Zia', 'pk-zia', 'sid-zia');
+INSERT INTO member_roles (user_id, role_id)
+SELECT 'a0322222-0000-4000-8000-000000000001', id FROM roles
+ WHERE server_id = 'a0320000-0000-4000-8000-000000000001' AND name = 'Admin';
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'a0320000-0000-4000-8000-000000000001';
+INSERT INTO roles (id, server_id, name, position, permissions) VALUES
+  ('aaaa3232-0000-4000-8000-000000000001', 'a0320000-0000-4000-8000-000000000001',
+   'R032 High', 350, 0),
+  ('aaaa3232-0000-4000-8000-000000000002', 'a0320000-0000-4000-8000-000000000001',
+   'R032 Channels', 150, app.perm('MANAGE_CHANNELS')),
+  ('aaaa3232-0000-4000-8000-000000000003', 'a0320000-0000-4000-8000-000000000001',
+   'R032 Hooks', 160, app.perm('MANAGE_CHANNELS') | app.perm('MANAGE_WEBHOOKS'));
+INSERT INTO member_roles (user_id, role_id)
+SELECT 'a0322222-0000-4000-8000-000000000002', id FROM roles
+ WHERE server_id = 'a0320000-0000-4000-8000-000000000001'
+   AND name IN ('Admin', 'Moderator')
+ON CONFLICT DO NOTHING;
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0322222-0000-4000-8000-000000000001');  -- zoe
+DO $$
+DECLARE
+  v_admin UUID;
+  v_n     INTEGER;
+BEGIN
+  SELECT id INTO v_admin FROM roles
+   WHERE server_id = 'a0320000-0000-4000-8000-000000000001' AND name = 'Admin';
+
+  DELETE FROM member_roles
+   WHERE user_id = 'a0322222-0000-4000-8000-000000000002' AND role_id = v_admin;
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: one admin took Admin off another';
+  END IF;
+
+  DELETE FROM member_roles
+   WHERE user_id = 'a0322222-0000-4000-8000-000000000002'
+     AND role_id IN (SELECT id FROM roles
+                      WHERE server_id = 'a0320000-0000-4000-8000-000000000001'
+                        AND name = 'Moderator');
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: an admin could not take a role below her off a fellow admin';
+  END IF;
+
+  BEGIN
+    INSERT INTO member_roles (user_id, role_id)
+    VALUES ('a0322222-0000-4000-8000-000000000003',
+            'aaaa3232-0000-4000-8000-000000000001');
+    RAISE EXCEPTION 'FAIL: an admin handed out a role above her own';
+  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+
+  -- Her own rank is still hers to give, or a server's only admin could never
+  -- make a second.
+  INSERT INTO member_roles (user_id, role_id)
+  VALUES ('a0322222-0000-4000-8000-000000000003', v_admin);
+  RAISE NOTICE 'ok  an admin gives roles up to her rank and takes off only those below it';
+END $$;
+RESET ROLE;
+-- zia back to a plain member, zed to one with channels alone.
+DELETE FROM member_roles
+ WHERE user_id IN ('a0322222-0000-4000-8000-000000000002',
+                   'a0322222-0000-4000-8000-000000000003')
+   AND role_id IN (SELECT id FROM roles
+                    WHERE server_id = 'a0320000-0000-4000-8000-000000000001'
+                      AND name = 'Admin');
+INSERT INTO member_roles (user_id, role_id)
+VALUES ('a0322222-0000-4000-8000-000000000002', 'aaaa3232-0000-4000-8000-000000000002');
+INSERT INTO webhooks (id, server_id, channel_id, created_by, name, secret_hash)
+VALUES ('aaaa3232-0000-4000-8000-0000000000a1', 'a0320000-0000-4000-8000-000000000001',
+        'a0321111-0000-4000-8000-000000000001', 'a0322222-0000-4000-8000-000000000001',
+        'R032 deploys', 'r032-hash');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0322222-0000-4000-8000-000000000002');  -- zed
+DO $$
+DECLARE v_n INTEGER;
+BEGIN
+  IF NOT (SELECT app.can_manage_channels()) THEN
+    RAISE EXCEPTION 'FAIL: setup, zed does not manage channels';
+  END IF;
+  IF create_webhook('a0321111-0000-4000-8000-000000000001', 'sneaky') ->> 'reason'
+     <> 'forbidden' THEN
+    RAISE EXCEPTION 'FAIL: a channel manager without MANAGE_WEBHOOKS made a webhook';
+  END IF;
+  IF EXISTS (SELECT 1 FROM webhooks) THEN
+    RAISE EXCEPTION 'FAIL: a channel manager without MANAGE_WEBHOOKS listed webhooks';
+  END IF;
+  DELETE FROM webhooks WHERE id = 'aaaa3232-0000-4000-8000-0000000000a1';
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a channel manager without MANAGE_WEBHOOKS revoked a webhook';
+  END IF;
+END $$;
+RESET ROLE;
+INSERT INTO member_roles (user_id, role_id)
+VALUES ('a0322222-0000-4000-8000-000000000002', 'aaaa3232-0000-4000-8000-000000000003');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0322222-0000-4000-8000-000000000002');  -- zed
+DO $$
+BEGIN
+  IF create_webhook('a0321111-0000-4000-8000-000000000001', 'allowed') ->> 'reason'
+     <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a channel manager with MANAGE_WEBHOOKS could not make one';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM webhooks
+                  WHERE id = 'aaaa3232-0000-4000-8000-0000000000a1') THEN
+    RAISE EXCEPTION 'FAIL: a channel manager with MANAGE_WEBHOOKS could not list them';
+  END IF;
+  RAISE NOTICE 'ok  webhooks ask MANAGE_WEBHOOKS as well as channels';
+END $$;
+RESET ROLE;
+
+-- One link zed made, and one left behind by somebody since kicked.
+INSERT INTO invites (server_id, created_by, code) VALUES
+  ('a0320000-0000-4000-8000-000000000001', 'a0322222-0000-4000-8000-000000000002',
+   'r032-zeds'),
+  ('a0320000-0000-4000-8000-000000000001', NULL, 'r032-orphan');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0322222-0000-4000-8000-000000000003');  -- zia
+DO $$
+DECLARE v_n INTEGER;
+BEGIN
+  IF EXISTS (SELECT 1 FROM invites WHERE code LIKE 'r032-%') THEN
+    RAISE EXCEPTION 'FAIL: a member saw invites she did not make';
+  END IF;
+  DELETE FROM invites WHERE code LIKE 'r032-%';
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a member revoked invites she did not make';
+  END IF;
+END $$;
+SELECT pg_temp.as_member('22222222-bbbb-4bbb-8bbb-000000000001');  -- mallory
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM invites WHERE code LIKE 'r032-%') THEN
+    RAISE EXCEPTION 'FAIL: another server saw this one''s invites';
+  END IF;
+END $$;
+SELECT pg_temp.as_member('a0322222-0000-4000-8000-000000000001');  -- zoe
+DO $$
+DECLARE v_n INTEGER;
+BEGIN
+  SELECT count(*) INTO v_n FROM invites WHERE code LIKE 'r032-%';
+  IF v_n <> 2 THEN
+    RAISE EXCEPTION 'FAIL: an admin saw % of the server''s 2 test invites', v_n;
+  END IF;
+  DELETE FROM invites WHERE code LIKE 'r032-%';
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 2 THEN
+    RAISE EXCEPTION 'FAIL: an admin revoked % of 2 invites', v_n;
+  END IF;
+  RAISE NOTICE 'ok  an admin sees and revokes every invite; a member only her own';
+END $$;
+RESET ROLE;
+
+
 ROLLBACK;
