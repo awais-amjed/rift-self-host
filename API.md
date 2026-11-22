@@ -291,11 +291,11 @@ isolate. It reads the master seed from secure storage, and from that alone:
 * **central** — the session the app already persisted, used **inertly**: the
   stored access token if it has not expired, never refreshed and never written
   back. Refreshing would rotate a refresh token the still-running app is holding.
-  Past an hour central simply contributes nothing. The doorbell is the same
-  empty `wake` for central and for every server, so a wake cannot tell that it
-  was about central: a Rift DM that arrives while the stored session is expired
-  posts nothing (found by review, Nov 23; telling the two doorbells apart
-  needs central's relay to say which it is).
+  Past an hour central contributes nothing to a ring a server forwarded
+  (`kind: wake`). Central's own ring says so (`kind: central`), and there an
+  expired session is a Rift DM the phone cannot read, so the wake falls back to
+  saying that something arrived. Before central's relay said which ring it was,
+  that DM posted nothing (review, Nov 23).
 
 Which servers this device is on comes from a small `push_wake.json` the app
 writes beside its hydrated state — the isolate cannot ask the app, and reading
