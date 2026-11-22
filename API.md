@@ -288,15 +288,22 @@ isolate. It reads the master seed from secure storage, and from that alone:
 * **central** — the session the app already persisted, used **inertly**: the
   stored access token if it has not expired, never refreshed and never written
   back. Refreshing would rotate a refresh token the still-running app is holding.
-  Past an hour central simply contributes nothing, and the doorbell falls back to
-  saying that something arrived.
+  Past an hour central simply contributes nothing. The doorbell is the same
+  empty `wake` for central and for every server, so a wake cannot tell that it
+  was about central: a Rift DM that arrives while the stored session is expired
+  posts nothing (found by review, Nov 23; telling the two doorbells apart
+  needs central's relay to say which it is).
 
 Which servers this device is on comes from a small `push_wake.json` the app
 writes beside its hydrated state — the isolate cannot ask the app, and reading
 the app's own Hive box from a second isolate is a lock, not a read. A second
 file remembers the newest message already announced per conversation, so a later
 doorbell does not repeat it. One notification per conversation, posted under a
-stable id derived from the scope, so it updates in place rather than stacking.
+stable id derived from the scope, so it updates in place rather than stacking —
+the same id the running app posts that conversation's notification under, and
+the app writes the same marks when it announces something, so an app alive in
+the background and a wake for the same message say it once. A press on one opens
+its conversation, from a cold start too.
 
 `push_send` is central's, not a server's, and deploying it is documented in the
 `rift-central` repository beside the function itself.
