@@ -11297,4 +11297,56 @@ END $$;
 RESET ROLE;
 
 
+-- ============================================================
+-- Unread mentions are counted (034)
+-- ============================================================
+-- The same channel as above: 93301 "hi" and 93303 from ben, 93302 naming cal,
+-- 93304 (ben) and 93305 (ada) naming everyone. A chip for a mentions-only
+-- channel counts these, not every message, and the app can only draw it if
+-- the server says which unread messages named you.
+
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000003');  -- cal
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_c CONSTANT TEXT := 'aaaa1111-0000-4000-8000-0000000000f3';
+  v_counts JSONB := unread_counts();
+BEGIN
+  IF (v_counts->'channels'->>v_c)::INT <> 5 THEN
+    RAISE EXCEPTION 'FAIL: cal has % unread, expected 5', v_counts->'channels'->>v_c;
+  END IF;
+  IF (v_counts->'mentions'->>v_c)::INT IS DISTINCT FROM 3 THEN
+    RAISE EXCEPTION 'FAIL: cal has % unread mentions, expected 3 (his and two "everyone")',
+      v_counts->'mentions'->>v_c;
+  END IF;
+  RAISE NOTICE 'ok  unread mentions count what names you and what names everyone';
+END $$;
+RESET ROLE;
+
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000001');  -- ada
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_c CONSTANT TEXT := 'aaaa1111-0000-4000-8000-0000000000f3';
+  v_counts JSONB := unread_counts();
+BEGIN
+  -- Her own "everyone" is not unread for her, so only ben's names her.
+  IF (v_counts->'mentions'->>v_c)::INT IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION 'FAIL: ada has % unread mentions, expected 1',
+      v_counts->'mentions'->>v_c;
+  END IF;
+
+  PERFORM mark_read('channel', v_c::UUID);
+  v_counts := unread_counts();
+  IF v_counts->'mentions' ? v_c OR v_counts->'channels' ? v_c THEN
+    RAISE EXCEPTION 'FAIL: a read channel still counts mentions (%)', v_counts;
+  END IF;
+  IF jsonb_typeof(v_counts->'mentions') <> 'object' THEN
+    RAISE EXCEPTION 'FAIL: mentions should be an empty object, not %', v_counts->'mentions';
+  END IF;
+  RAISE NOTICE 'ok  your own mentions and a read channel count none';
+END $$;
+RESET ROLE;
+
+
 ROLLBACK;
