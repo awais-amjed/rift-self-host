@@ -11195,4 +11195,106 @@ END $$;
 RESET ROLE;
 
 
+-- ============================================================
+-- A mention rings the phone it names (033)
+-- ============================================================
+-- Only members caught up in a channel are rung for an ordinary message: one
+-- with something unread there reads it all when it wakes. A mention is rung
+-- whatever is unread, or "@you urgent" after somebody's "hi" reached nobody.
+
+-- A server of its own, since Alpha is gone by now: ada (Admin, so she may
+-- name everyone), ben and cal (plain members).
+RESET ROLE;
+INSERT INTO servers (id, name, livekit_url)
+VALUES ('a0330000-0000-4000-8000-000000000001', 'Eta', 'ws://lan:7880');
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000f3',
+   'a0330000-0000-4000-8000-000000000001', 'rings', 'text');
+INSERT INTO auth.users (id) VALUES
+  ('a0332222-0000-4000-8000-000000000001'),
+  ('a0332222-0000-4000-8000-000000000002'),
+  ('a0332222-0000-4000-8000-000000000003');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id)
+VALUES
+  ('a0332222-0000-4000-8000-000000000001', 'a0330000-0000-4000-8000-000000000001',
+   'ada', 'Ada', 'pk-ada', 'sid-ada'),
+  ('a0332222-0000-4000-8000-000000000002', 'a0330000-0000-4000-8000-000000000001',
+   'ben', 'Ben', 'pk-ben', 'sid-ben'),
+  ('a0332222-0000-4000-8000-000000000003', 'a0330000-0000-4000-8000-000000000001',
+   'cal', 'Cal', 'pk-cal', 'sid-cal');
+INSERT INTO member_roles (user_id, role_id)
+SELECT 'a0332222-0000-4000-8000-000000000001', id FROM roles
+ WHERE server_id = 'a0330000-0000-4000-8000-000000000001' AND name = 'Admin';
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'a0330000-0000-4000-8000-000000000001';
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"a0332222-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (93301, 'aaaa1111-0000-4000-8000-0000000000f3', 'hi', 'n', 's', 1);
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, mentions) VALUES
+  (93302, 'aaaa1111-0000-4000-8000-0000000000f3', '@cal urgent', 'n', 's', 1,
+   ARRAY['a0332222-0000-4000-8000-000000000003']::uuid[]);
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (93303, 'aaaa1111-0000-4000-8000-0000000000f3', 'still here', 'n', 's', 1);
+-- Members may name everyone by default (MENTION_ALL); who may is
+-- `validate_message_mentions`'s to decide, and tested with it.
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, mentions_all) VALUES
+  (93304, 'aaaa1111-0000-4000-8000-0000000000f3', '@everyone', 'n', 's', 1, true);
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"a0332222-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, mentions_all) VALUES
+  (93305, 'aaaa1111-0000-4000-8000-0000000000f3', '@everyone', 'n', 's', 1, true);
+
+DO $$
+DECLARE
+  v_cal CONSTANT UUID := 'a0332222-0000-4000-8000-000000000003';
+  v_ada CONSTANT UUID := 'a0332222-0000-4000-8000-000000000001';
+  v_ben   CONSTANT UUID := 'a0332222-0000-4000-8000-000000000002';
+  v_rung  UUID[];
+BEGIN
+  -- Ada and Cal have unread here since 93301, so neither is caught up.
+  SELECT app.channel_ring_targets(m) INTO v_rung FROM messages m WHERE m.id = 93302;
+  IF v_rung IS NULL OR NOT v_cal = ANY (v_rung) THEN
+    RAISE EXCEPTION 'FAIL: a mention did not ring the member it named (%)', v_rung;
+  END IF;
+  IF v_ada = ANY (v_rung) THEN
+    RAISE EXCEPTION 'FAIL: a mention rang a member it did not name';
+  END IF;
+
+  SELECT app.channel_ring_targets(m) INTO v_rung FROM messages m WHERE m.id = 93303;
+  IF cardinality(COALESCE(v_rung, '{}')) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: an ordinary message rang members with unread (%)', v_rung;
+  END IF;
+
+  SELECT app.channel_ring_targets(m) INTO v_rung FROM messages m WHERE m.id = 93304;
+  IF v_rung IS NULL OR NOT (v_ada = ANY (v_rung) AND v_cal = ANY (v_rung))
+     OR v_ben = ANY (v_rung) THEN
+    RAISE EXCEPTION 'FAIL: a member''s "everyone" did not ring the others (%)', v_rung;
+  END IF;
+
+  SELECT app.channel_ring_targets(m) INTO v_rung FROM messages m WHERE m.id = 93305;
+  IF v_rung IS NULL OR NOT (v_ben = ANY (v_rung) AND v_cal = ANY (v_rung))
+     OR v_ada = ANY (v_rung) THEN
+    RAISE EXCEPTION 'FAIL: "everyone" did not ring everybody but its sender (%)', v_rung;
+  END IF;
+  RAISE NOTICE 'ok  a mention rings the members it names, caught up or not';
+END $$;
+
+-- Only the trigger asks it.
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM app.channel_ring_targets(m) FROM messages m WHERE m.id = 93302;
+    RAISE EXCEPTION 'FAIL: a member can ask whom a message rings';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  who a message rings is the trigger''s to ask';
+END $$;
+RESET ROLE;
+
+
 ROLLBACK;

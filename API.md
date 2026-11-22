@@ -274,7 +274,10 @@ conversation had nothing unread before it — per conversation, so a first messa
 from someone new still rings while an unread thread with somebody else sits
 there. The consequence worth knowing: a member who has never opened a channel
 that already had messages is permanently in the "unread" state there, and is
-never rung for it.
+never rung for it — except by a mention. A channel message rings the members it
+names whatever they have read, and everybody who can see the channel when it
+names everyone (`app.channel_ring_targets`); before that, "@you" after somebody's
+"hi" rang nobody.
 
 ### What the phone does with an empty doorbell
 
