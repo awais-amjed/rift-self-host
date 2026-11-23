@@ -8578,6 +8578,110 @@ DO $$ BEGIN EXECUTE (SELECT def FROM real_ring); END $$;
 DELETE FROM push_config WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
 
 -- ============================================================
+-- 035: stopping a ring never ends an answered call
+-- ============================================================
+-- amy (301) rings cal (303). Rows written directly: the spam cap and the
+-- conversation rule are start_dm_call's, tested above.
+
+RESET ROLE;
+
+UPDATE dm_calls SET ended_at = now(), outcome = 'cancelled'
+ WHERE ended_at IS NULL AND answered_at IS NULL
+   AND '11111111-aaaa-4aaa-8aaa-000000000301' IN (caller_id, callee_id);
+UPDATE dm_calls SET ended_at = now(), outcome = 'completed'
+ WHERE ended_at IS NULL
+   AND '11111111-aaaa-4aaa-8aaa-000000000301' IN (caller_id, callee_id);
+CREATE TEMP TABLE ring35 (id UUID);
+WITH made AS (
+  INSERT INTO dm_calls (caller_id, callee_id, answered_at)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301',
+          '11111111-aaaa-4aaa-8aaa-000000000303', now())
+  RETURNING id)
+INSERT INTO ring35 SELECT id FROM made;
+GRANT SELECT ON ring35 TO authenticated;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v JSONB;
+BEGIN
+  -- Decline pressed on one device after another answered.
+  v := end_dm_ring((SELECT id FROM ring35));
+  IF v->>'ended_at' IS NOT NULL OR v->>'answered_at' IS NULL THEN
+    RAISE EXCEPTION 'FAIL: stopping the ring ended an answered call: %', v;
+  END IF;
+  RAISE NOTICE 'ok  stopping a ring leaves an answered call going';
+END $$;
+RESET ROLE;
+
+UPDATE dm_calls SET ended_at = now(), outcome = 'completed'
+ WHERE id = (SELECT id FROM ring35);
+TRUNCATE ring35;
+WITH made AS (
+  INSERT INTO dm_calls (caller_id, callee_id)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301',
+          '11111111-aaaa-4aaa-8aaa-000000000303')
+  RETURNING id)
+INSERT INTO ring35 SELECT id FROM made;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000303');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v JSONB;
+BEGIN
+  v := end_dm_ring((SELECT id FROM ring35));
+  IF v->>'outcome' IS DISTINCT FROM 'declined' THEN
+    RAISE EXCEPTION 'FAIL: the callee stopping a ring is not a decline: %', v;
+  END IF;
+  -- Already over: answered as it is, not rewritten.
+  IF end_dm_ring((SELECT id FROM ring35))->>'outcome' IS DISTINCT FROM 'declined' THEN
+    RAISE EXCEPTION 'FAIL: a second stop rewrote the call';
+  END IF;
+  BEGIN
+    PERFORM answer_dm_call((SELECT id FROM ring35));
+    RAISE EXCEPTION 'FAIL: a declined call was answered';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_ended' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  stopping an unanswered ring declines it, once';
+END $$;
+RESET ROLE;
+
+TRUNCATE ring35;
+WITH made AS (
+  INSERT INTO dm_calls (caller_id, callee_id, started_at)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000301',
+          '11111111-aaaa-4aaa-8aaa-000000000303', now() - interval '20 seconds')
+  RETURNING id)
+INSERT INTO ring35 SELECT id FROM made;
+
+-- Neither end of it: nobody else learns the call exists.
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000302');
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM end_dm_ring((SELECT id FROM ring35));
+    RAISE EXCEPTION 'FAIL: a stranger stopped somebody''s ring';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'call_not_found' THEN RAISE; END IF;
+  END;
+END $$;
+RESET ROLE;
+
+SELECT pg_temp.as_member('11111111-aaaa-4aaa-8aaa-000000000301');
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  IF end_dm_ring((SELECT id FROM ring35))->>'outcome' IS DISTINCT FROM 'missed' THEN
+    RAISE EXCEPTION 'FAIL: the caller giving up after a real ring is not missed';
+  END IF;
+  RAISE NOTICE 'ok  the caller giving up is missed, and only the two ends may stop it';
+END $$;
+RESET ROLE;
+
+
+-- ============================================================
 -- 31. Channel order (010)
 -- ============================================================
 -- A new channel goes last in its section, and `reorder_channels` deals the
