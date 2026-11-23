@@ -653,7 +653,10 @@ does not answer must not be *recorded* as holding anything.
   leave a claim naming it, and a claim outranks both the pin and the probe.
   Released, an automatic channel is free to land on a region that is up; a
   pinned one claims it again and fails again, which is correct, because the
-  operator said where those calls go.
+  operator said where those calls go. Either token function then refuses
+  `voice_server_unreachable`, which says the voice server is down and nothing
+  about the caller's access (before 1.9.0 it was `unexpected_error`, which the
+  app read as "you may have lost access").
 - **`move_call` opens the room before it writes anything.** Opening it is how
   the region is asked whether it is there. A failed move changes nothing.
 - **`voice_roster` answers without it.** A node that is down contributes an

@@ -209,7 +209,7 @@ Deno.serve(async (req) => {
       return CustomResponse.error(
         node ? `${node.label} is not answering, so this call could not be opened`
              : "Failed to ensure LiveKit room exists",
-        EC.UNEXPECTED_ERROR,
+        EC.VOICE_SERVER_UNREACHABLE,
       );
     }
 
