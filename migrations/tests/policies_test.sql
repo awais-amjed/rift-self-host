@@ -8075,6 +8075,29 @@ BEGIN
   RAISE NOTICE 'ok  a kick closes every open report about the person, as a kick';
 END $$;
 
+-- Somebody who left has kicked_at too, by their own hand, with left_at beside
+-- it (020). That is not a kick to record (038). Put back after.
+RESET ROLE;
+UPDATE users SET is_banned = true, kicked_at = now(), left_at = now()
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000301';
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM resolve_report((SELECT min(id) FROM reports
+                             WHERE target_id = '11111111-aaaa-4aaa-8aaa-000000000301'
+                               AND outcome IS NULL), 'kicked');
+    RAISE EXCEPTION 'FAIL: somebody who left was recorded as kicked';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'outcome_not_done' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a report about somebody who left is never closed as a kick';
+END $$;
+RESET ROLE;
+UPDATE users SET is_banned = false, kicked_at = NULL
+ WHERE id = '11111111-aaaa-4aaa-8aaa-000000000301';
+SET LOCAL ROLE authenticated;
+
 -- A ban answers every open report about the person, whoever filed it.
 
 DO $$
