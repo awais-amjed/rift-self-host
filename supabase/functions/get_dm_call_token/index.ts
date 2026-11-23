@@ -90,6 +90,8 @@ Deno.serve(async (req) => {
       { data: claim, error: claimError },
       { data: mayConnect },
       { data: mayShare },
+      { data: maySpeak },
+      { data: maySoundboard },
       { data: userData, error: userError },
       credentials,
       { data: limitsRow },
@@ -103,6 +105,12 @@ Deno.serve(async (req) => {
       wantsShare
         ? supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "SCREEN_SHARE" })
         : Promise.resolve({ data: null }),
+      // The soundboard right, as a channel's (`_shared/call_rights.ts`): a
+      // clip is sound in the call, so it takes Speak as well. A DM call has
+      // no channel to override them, so these are the server's bits — the
+      // ones the app's own button asks.
+      supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "SPEAK" }),
+      supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "USE_SOUNDBOARD" }),
       supabase
         .from(DBSchema.users.tableName)
         .select(DBSchema.users.displayName)
@@ -234,8 +242,11 @@ Deno.serve(async (req) => {
       // subscribe would be a second pair of ears nobody sees in the call.
       canSubscribe: !wantsShare,
       // Nor does it send packets (`_shared/moderation.ts`). The call's own
-      // connection keeps the default: a DM call has no channel to ask.
-      canPublishData: !wantsShare,
+      // connection sends one only to press a soundboard clip, so it may only
+      // with that right; the clip notice comes from the server (`note_clip`).
+      // Read once, at minting: a role change mid-call takes effect at the next
+      // join, as a channel's does.
+      canPublishData: !wantsShare && maySpeak === true && maySoundboard === true,
       canUpdateOwnMetadata: true,
       roomAdmin: false,
     });
