@@ -5741,6 +5741,41 @@ BEGIN
   RAISE NOTICE 'ok  a clip can be renamed and cannot be repointed';
 END $$;
 
+-- ---------- a plain name (036) ----------
+-- Alice (admin of Alpha) may add clips; the folder rule is tested above, and
+-- this is the rest of the name.
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE
+  v_bad TEXT;
+BEGIN
+  FOREACH v_bad IN ARRAY ARRAY[
+    'aaaa0000-0000-4000-8000-000000000001/..\..\evil.audio',
+    'aaaa0000-0000-4000-8000-000000000001/a..b.audio',
+    'aaaa0000-0000-4000-8000-000000000001/.hidden',
+    'aaaa0000-0000-4000-8000-000000000001/sub/dir.audio',
+    'aaaa0000-0000-4000-8000-000000000001/',
+    'aaaa0000-0000-4000-8000-000000000001/sp ace.audio',
+    'aaaa0000-0000-4000-8000-000000000001/' || repeat('a', 129)
+  ] LOOP
+    BEGIN
+      INSERT INTO soundboard_sounds (name, object_path, duration_ms, bytes)
+      VALUES ('odd-' || left(md5(v_bad), 8), v_bad, 500, 400);
+      RAISE EXCEPTION 'FAIL: a clip named % was taken', v_bad;
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+  END LOOP;
+
+  INSERT INTO soundboard_sounds (name, object_path, duration_ms, bytes)
+  VALUES ('plain-36', 'aaaa0000-0000-4000-8000-000000000001/0123456789abcdef01234567.audio',
+          500, 400);
+  -- Out again, so the ceiling below counts what it always did.
+  DELETE FROM soundboard_sounds WHERE name = 'plain-36';
+  RAISE NOTICE 'ok  a clip''s name is one plain name, and the app''s own names pass';
+END $$;
+
 -- ---------- another server's library ----------
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
