@@ -132,17 +132,21 @@ Deno.serve(async (req) => {
     // Which is why what goes back is a level and not a count: see summarise.
     //
     // `listRooms` carries `numParticipants` and `numPublishers` per room, so
-    // the load costs no request of its own — and skipping `listParticipants`
-    // for rooms that are empty or not visible makes this *cheaper* than it
-    // was, not dearer.
+    // the load costs no request of its own, and `listParticipants` is asked
+    // only for the rooms this caller can see.
+    //
+    // Every visible room, empty-looking or not. LiveKit refreshes a room's
+    // `numParticipants` every few seconds (about 5 s on v1.13), so a room
+    // somebody has just opened reads 0 and was skipped: whoever looked at the
+    // server right then saw the call empty (found Nov 21, review 1). A room
+    // that is really empty lingers only until LiveKit's empty timeout, and
+    // asking it costs one request that answers nobody.
     const perNode = await Promise.all(
       services.map(async ({ node, service }) => {
         try {
           const rooms = await service.listRooms();
 
-          const visible = rooms.filter(
-            (room) => channelIds.includes(room.name) && room.numParticipants > 0,
-          );
+          const visible = rooms.filter((room) => channelIds.includes(room.name));
           const rosters = await Promise.all(
             visible.map(async (room) => {
               // When LiveKit created the room: the call's start, for the
