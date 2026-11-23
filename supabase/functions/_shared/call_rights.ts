@@ -23,8 +23,11 @@ import {
  * minted from this (`get_channel_token`) and pushed when a channel's
  * permissions change (`set_channel_override`), a moderator acts
  * (`moderate_user`), a bot's ears are granted (`set_bot_voice_listen`) or
- * somebody joins (`livekit_webhook`). It is the only packet a member sends: a
- * move or a rejoin comes from the LiveKit API, which no permission stops.
+ * somebody joins (`livekit_webhook`). The only other packet a member sends is
+ * the app's "clipped the last minute" notice (`rift.clip`), which this stops
+ * too, so a member without both rights clips with no notice (the mark is an
+ * attribute and still shows). A move or a rejoin comes from the LiveKit API,
+ * which no permission stops.
  */
 export interface CallRights {
   speak: boolean;
