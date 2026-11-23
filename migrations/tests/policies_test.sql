@@ -1385,20 +1385,184 @@ END $$;
 SET LOCAL ROLE authenticated;
 SET LOCAL storage.allow_delete_query = 'true';
 
--- Alice manages channels, so she may remove the files of a message she is
--- allowed to remove.
+-- Alice manages channels. Since 040 that no longer lets her delete another
+-- member's file directly: deleting the message frees its files instead.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
 DO $$
 BEGIN
   DELETE FROM storage.objects
    WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin';
-  IF EXISTS (SELECT 1 FROM storage.objects
-              WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin') THEN
-    RAISE EXCEPTION 'FAIL: a channel manager cannot remove an attachment';
+  IF NOT EXISTS (SELECT 1 FROM storage.objects
+                  WHERE name = 'aaaa1111-0000-4000-8000-000000000003/gone.bin') THEN
+    RAISE EXCEPTION 'FAIL: a channel manager deleted another member''s file (040)';
   END IF;
-  RAISE NOTICE 'ok  a moderator can remove the files of a message they delete';
+  RAISE NOTICE 'ok  only its uploader deletes a file directly (040)';
 END $$;
+
+-- ── A message names its own files (040) ─────────────────────
+-- Bob uploads two files to #general and one to #forever; Alice one to
+-- #general; Bob one to his conversation with Alice.
+RESET ROLE;
+INSERT INTO storage.objects (bucket_id, name, owner) VALUES
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000001/f40a.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002'),
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000001/f40b.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002'),
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000004/f40c.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002'),
+  ('chat-aaaa0000-0000-4000-8000-000000000001', 'aaaa1111-0000-4000-8000-000000000001/alice40.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000001'),
+  ('chat-aaaa0000-0000-4000-8000-000000000001',
+   'dm_11111111-aaaa-4aaa-8aaa-000000000001_11111111-aaaa-4aaa-8aaa-000000000002/d40.bin',
+   '11111111-aaaa-4aaa-8aaa-000000000002');
+CREATE TEMP TABLE sent40 (tag TEXT, id BIGINT);
+GRANT SELECT, INSERT ON sent40 TO authenticated;
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE v_id BIGINT;
+BEGIN
+  -- His own files, in the channel they were uploaded to: taken. Twice for
+  -- f40a, as a retried send can.
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+  VALUES ('aaaa1111-0000-4000-8000-000000000001', 'with-a', 'n', 's', 1,
+          ARRAY['aaaa1111-0000-4000-8000-000000000001/f40a.bin'])
+  RETURNING id INTO v_id;
+  INSERT INTO sent40 VALUES ('a1', v_id);
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+  VALUES ('aaaa1111-0000-4000-8000-000000000001', 'with-a-again', 'n', 's', 1,
+          ARRAY['aaaa1111-0000-4000-8000-000000000001/f40a.bin'])
+  RETURNING id INTO v_id;
+  INSERT INTO sent40 VALUES ('a2', v_id);
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+  VALUES ('aaaa1111-0000-4000-8000-000000000001', 'with-b', 'n', 's', 1,
+          ARRAY['aaaa1111-0000-4000-8000-000000000001/f40b.bin'])
+  RETURNING id INTO v_id;
+  INSERT INTO sent40 VALUES ('b', v_id);
+  INSERT INTO dm_messages (recipient_id, ciphertext, nonce, signature, key_version, attachment_paths)
+  VALUES ('11111111-aaaa-4aaa-8aaa-000000000001', 'dm-with-d', 'n', 's', 1,
+          ARRAY['dm_11111111-aaaa-4aaa-8aaa-000000000001_11111111-aaaa-4aaa-8aaa-000000000002/d40.bin'])
+  RETURNING id INTO v_id;
+  INSERT INTO sent40 VALUES ('d', v_id);
+
+  -- Somebody else's file.
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', 'x', 'n', 's', 1,
+            ARRAY['aaaa1111-0000-4000-8000-000000000001/alice40.bin']);
+    RAISE EXCEPTION 'FAIL: a message named another member''s file';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'attachment_not_yours' THEN RAISE; END IF;
+  END;
+  -- His own, but uploaded to another channel.
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', 'x', 'n', 's', 1,
+            ARRAY['aaaa1111-0000-4000-8000-000000000004/f40c.bin']);
+    RAISE EXCEPTION 'FAIL: a message named a file of another channel';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'attachment_not_yours' THEN RAISE; END IF;
+  END;
+  -- A file that is not there.
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', 'x', 'n', 's', 1,
+            ARRAY['aaaa1111-0000-4000-8000-000000000001/nothing.bin']);
+    RAISE EXCEPTION 'FAIL: a message named a file nobody uploaded';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'attachment_not_yours' THEN RAISE; END IF;
+  END;
+  -- A DM's file under the channel's folder.
+  BEGIN
+    INSERT INTO dm_messages (recipient_id, ciphertext, nonce, signature, key_version, attachment_paths)
+    VALUES ('11111111-aaaa-4aaa-8aaa-000000000001', 'x', 'n', 's', 1,
+            ARRAY['aaaa1111-0000-4000-8000-000000000001/f40b.bin']);
+    RAISE EXCEPTION 'FAIL: a DM named a file of a channel';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'attachment_not_yours' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version, attachment_paths)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', 'x', 'n', 's', 1,
+            array_fill('aaaa1111-0000-4000-8000-000000000001/f40a.bin'::TEXT, ARRAY[65]));
+    RAISE EXCEPTION 'FAIL: a message named 65 files';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'too_many_attachments' THEN RAISE; END IF;
+  END;
+  -- And never changed after.
+  BEGIN
+    UPDATE messages SET attachment_paths = '{}'
+     WHERE id = (SELECT id FROM sent40 WHERE tag = 'b');
+    RAISE EXCEPTION 'FAIL: a sender changed a message''s files';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a message names only its sender''s own files in that conversation (040)';
+END $$;
+
+-- Deleted by its sender, by a moderator or by anything else, a message's
+-- files go to the trash, and the sweep takes them once no message names them.
+DO $$
+BEGIN
+  DELETE FROM messages WHERE id IN (SELECT id FROM sent40 WHERE tag IN ('a1', 'b'));
+  DELETE FROM dm_messages WHERE id = (SELECT id FROM sent40 WHERE tag = 'd');
+END $$;
+RESET ROLE;
+DO $$
+DECLARE found TEXT[];
+BEGIN
+  IF (SELECT count(*) FROM attachment_trash
+       WHERE bucket = 'chat-aaaa0000-0000-4000-8000-000000000001'
+         AND name IN ('aaaa1111-0000-4000-8000-000000000001/f40a.bin',
+                      'aaaa1111-0000-4000-8000-000000000001/f40b.bin',
+                      'dm_11111111-aaaa-4aaa-8aaa-000000000001_11111111-aaaa-4aaa-8aaa-000000000002/d40.bin')) <> 3 THEN
+    RAISE EXCEPTION 'FAIL: a deleted message''s files did not go to the trash';
+  END IF;
+  SELECT array_agg(object_name) INTO found FROM app.orphaned_attachments();
+  IF NOT ('aaaa1111-0000-4000-8000-000000000001/f40b.bin' = ANY(found)) THEN
+    RAISE EXCEPTION 'FAIL: the sweep kept a deleted message''s file';
+  END IF;
+  IF NOT ('dm_11111111-aaaa-4aaa-8aaa-000000000001_11111111-aaaa-4aaa-8aaa-000000000002/d40.bin' = ANY(found)) THEN
+    RAISE EXCEPTION 'FAIL: the sweep kept a deleted DM''s file';
+  END IF;
+  IF 'aaaa1111-0000-4000-8000-000000000001/f40a.bin' = ANY(found) THEN
+    RAISE EXCEPTION 'FAIL: the sweep took a file another message still names';
+  END IF;
+
+  DELETE FROM messages WHERE id = (SELECT id FROM sent40 WHERE tag = 'a2');
+  SELECT array_agg(object_name) INTO found FROM app.orphaned_attachments();
+  IF NOT ('aaaa1111-0000-4000-8000-000000000001/f40a.bin' = ANY(found)) THEN
+    RAISE EXCEPTION 'FAIL: the sweep kept a file once its last message went';
+  END IF;
+  RAISE NOTICE 'ok  a deleted message''s files are swept once nothing names them (040)';
+END $$;
+
+-- The sweep forgets a trashed file once it is gone. Run in a block that is
+-- then undone, since the sweep runs the retention pass too.
+SET LOCAL storage.allow_delete_query = 'true';
+DO $$
+DECLARE v_left TEXT;
+BEGIN
+  BEGIN
+    DELETE FROM storage.objects
+     WHERE name = 'aaaa1111-0000-4000-8000-000000000001/f40b.bin';
+    PERFORM sweep_attachments();
+    RAISE EXCEPTION USING ERRCODE = 'P0040', MESSAGE = (
+      SELECT count(*)::TEXT FROM attachment_trash
+       WHERE name = 'aaaa1111-0000-4000-8000-000000000001/f40b.bin');
+  EXCEPTION WHEN SQLSTATE 'P0040' THEN v_left := SQLERRM;
+  END;
+  IF v_left <> '0' THEN
+    RAISE EXCEPTION 'FAIL: the trash kept a file the sweep already removed';
+  END IF;
+  RAISE NOTICE 'ok  the trash forgets what the sweep removed (040)';
+END $$;
+SET LOCAL ROLE authenticated;
+SET LOCAL storage.allow_delete_query = 'true';
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
 
 -- ============================================================
 -- 11b. What a call may cost the operator (028)
