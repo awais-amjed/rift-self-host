@@ -5376,6 +5376,7 @@ INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version,
   VALUES (9103, 'aaaa1111-0000-4000-8000-000000000001', 'just-for-alice', 'n', 's', 1, '11111111-aaaa-4aaa-8aaa-000000000001');
 INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version) VALUES
   (8101, '11111111-aaaa-4aaa-8aaa-000000000001', 'dm-for-alice', 'n', 's', 1);
+UPDATE dm_messages SET ciphertext = 'dm-for-alice-edited', edited_at = now() WHERE id = 8101;
 UPDATE messages SET ciphertext = 'open-from-bob-edited', edited_at = now() WHERE id = 9101;
 
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -5448,6 +5449,26 @@ BEGIN
                   WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000001' AND event = 'dm'
                     AND payload->>'id' = '8101' AND payload->>'sender_id' = '11111111-aaaa-4aaa-8aaa-000000000002') THEN
     RAISE EXCEPTION 'FAIL: a DM was not told to its recipient';
+  END IF;
+  -- 039: the sender's other devices hear it too, under a name no app reads
+  -- as mail, and an edit reaches both people.
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000002' AND event = 'dm_sent'
+                    AND payload->>'id' = '8101'
+                    AND payload->>'recipient_id' = '11111111-aaaa-4aaa-8aaa-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a DM was not told to its sender''s devices';
+  END IF;
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-000000000002' AND event = 'dm'
+                AND payload->>'id' = '8101') THEN
+    RAISE EXCEPTION 'FAIL: a DM was told to its sender as mail';
+  END IF;
+  SELECT count(DISTINCT topic) INTO v_heard FROM realtime.messages
+   WHERE event = 'dm_changed' AND payload->>'message_id' = '8101'
+     AND topic IN ('user:11111111-aaaa-4aaa-8aaa-000000000001',
+                   'user:11111111-aaaa-4aaa-8aaa-000000000002');
+  IF v_heard <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a DM edit reached % of its two people', v_heard;
   END IF;
 
   IF EXISTS (SELECT 1 FROM realtime.messages
