@@ -11488,4 +11488,51 @@ END $$;
 RESET ROLE;
 
 
+-- ============================================================
+-- 037: the server tells a call about a clip, once a minute
+-- ============================================================
+-- note_clip_allowed is the edge function's, as the service role; a member
+-- reaches neither it nor the table.
+
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000001');  -- ada
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM note_clip_allowed('a0332222-0000-4000-8000-000000000001');
+    RAISE EXCEPTION 'FAIL: a member took a clip notice by hand';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM 1 FROM clip_notices;
+    RAISE EXCEPTION 'FAIL: a member read when others clipped';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  only the server takes a clip notice';
+END $$;
+RESET ROLE;
+
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+  IF NOT note_clip_allowed('a0332222-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a first clip notice was refused';
+  END IF;
+  IF note_clip_allowed('a0332222-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a second clip notice inside the minute was taken';
+  END IF;
+END $$;
+RESET ROLE;
+UPDATE clip_notices SET noted_at = now() - interval '61 seconds'
+ WHERE user_id = 'a0332222-0000-4000-8000-000000000001';
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+  IF NOT note_clip_allowed('a0332222-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a clip notice a minute later was refused';
+  END IF;
+  RAISE NOTICE 'ok  one clip notice a minute per member';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
