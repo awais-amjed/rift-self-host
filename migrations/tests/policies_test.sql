@@ -13169,4 +13169,70 @@ BEGIN
   RAISE NOTICE 'ok  unread counts gather the visible channels once (053)';
 END $$;
 
+-- ============================================================
+-- 39. A ring reads only the cursors that are caught up (054)
+-- ============================================================
+-- Two new public channels in Echo, with e6 and e7 added as members. In
+-- `one`, e1 wrote everything before e7's message, so nobody else has
+-- written there and the sender's bound is 0. In `two`, e2 wrote and then
+-- e1, so e1, the last sender, needs only to have read e2's message, and
+-- everybody else e1's. The banned member and the bot are caught up in
+-- both, and rung in neither.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+INSERT INTO auth.users (id) VALUES
+  ('50505050-eeee-4eee-8eee-000000000006'), ('50505050-eeee-4eee-8eee-000000000007');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key)
+SELECT ('50505050-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
+       'ee500000-0000-4000-8000-000000000001', 'e' || i, 'E' || i, 'pk-e' || i,
+       'sid-e' || i, 'chat-e' || i
+  FROM generate_series(6, 7) i;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('ee501111-0000-4000-8000-000000000003', 'ee500000-0000-4000-8000-000000000001', 'one', 'text', false),
+  ('ee501111-0000-4000-8000-000000000004', 'ee500000-0000-4000-8000-000000000001', 'two', 'text', false);
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature, key_version)
+SELECT v.id, ('ee501111-0000-4000-8000-00000000000' || v.ch)::uuid,
+       ('50505050-eeee-4eee-8eee-' || lpad(v.e::text, 12, '0'))::uuid, 'c', 'n', 's', 1
+  FROM (VALUES (95401, 3, 1), (95402, 3, 1), (95403, 3, 7),
+               (95411, 4, 2), (95412, 4, 1), (95413, 4, 7)) v(id, ch, e);
+-- one: e2 read 95402, e5 only 95401, e6 nothing, e1 no cursor at all.
+-- two: e1 read 95411 (not their own 95412), e2 read 95411, e5 read 95412.
+INSERT INTO read_state (user_id, scope, scope_id, last_read_id)
+SELECT ('50505050-eeee-4eee-8eee-' || lpad(v.e::text, 12, '0'))::uuid, 'channel',
+       ('ee501111-0000-4000-8000-00000000000' || v.ch)::uuid, v.at
+  FROM (VALUES (2, 3, 95402), (5, 3, 95401), (3, 3, 95402), (4, 3, 95402),
+               (1, 4, 95411), (2, 4, 95411), (5, 4, 95412), (3, 4, 95412),
+               (4, 4, 95412)) v(e, ch, at);
+
+DO $$
+DECLARE
+  v_one UUID[];
+  v_two UUID[];
+BEGIN
+  SELECT array_agg(x ORDER BY x) INTO v_one
+    FROM messages m, unnest(app.channel_ring_targets(m)) x WHERE m.id = 95403;
+  SELECT array_agg(x ORDER BY x) INTO v_two
+    FROM messages m, unnest(app.channel_ring_targets(m)) x WHERE m.id = 95413;
+  IF v_one IS DISTINCT FROM ARRAY['50505050-eeee-4eee-8eee-000000000001',
+                                  '50505050-eeee-4eee-8eee-000000000002']::uuid[] THEN
+    RAISE EXCEPTION 'FAIL: a message in a one-author channel rang %, not e1 and e2', v_one;
+  END IF;
+  IF v_two IS DISTINCT FROM ARRAY['50505050-eeee-4eee-8eee-000000000001',
+                                  '50505050-eeee-4eee-8eee-000000000005']::uuid[] THEN
+    RAISE EXCEPTION 'FAIL: a message after another''s rang %, not e1 and e5', v_two;
+  END IF;
+  -- The same author with a cursor of their own, behind their own message,
+  -- is still caught up.
+  INSERT INTO read_state (user_id, scope, scope_id, last_read_id) VALUES
+    ('50505050-eeee-4eee-8eee-000000000001', 'channel', 'ee501111-0000-4000-8000-000000000003', 95401);
+  SELECT array_agg(x ORDER BY x) INTO v_one
+    FROM messages m, unnest(app.channel_ring_targets(m)) x WHERE m.id = 95403;
+  IF NOT ('50505050-eeee-4eee-8eee-000000000001' = ANY (v_one))
+     OR '50505050-eeee-4eee-8eee-000000000005' = ANY (v_one) THEN
+    RAISE EXCEPTION 'FAIL: with the author''s cursor behind their own message, it rang %', v_one;
+  END IF;
+  RAISE NOTICE 'ok  a ring reads only the cursors that are caught up (054)';
+END $$;
+
 ROLLBACK;

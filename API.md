@@ -553,6 +553,12 @@ files, each run once after it, and the list below grows with them.
    reply, and for a bot only what was sent to it or sealed under a key version it was given.
    Same counts. Measured Nov 26 2026 on 300 channels, for a member behind in 93: 157 → 17 ms
    through PostgREST.
+34. **054_ring_targets.sql** — `app.channel_ring_targets`, which picks the phones a new
+   channel message rings, reads `read_state` from the newest message for everybody and finds
+   the last sender's own cursor by the primary key. Before, in a channel only one person
+   writes in, the bound was 0 and every member's cursor was read and checked. Same people
+   rung. Measured Nov 26 2026 with 2,475 of 47,981 members caught up: 45,506 cursors read
+   and dropped → none, 11 → 8.5 ms.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
