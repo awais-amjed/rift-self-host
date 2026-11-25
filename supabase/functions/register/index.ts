@@ -8,6 +8,7 @@ import { extractBearerToken } from "../_shared/auth.ts";
 import { verifyJwt } from "../_shared/jwt.ts";
 import { fetchServerContext } from "../_shared/server_context.ts";
 import { verifyServerPass, web3KeyMatches } from "../_shared/server_pass.ts";
+import { removeFromCalls } from "../_shared/livekit.ts";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -142,6 +143,18 @@ Deno.serve(async (req) => {
     }
 
     const reg = regData as Record<string, any>;
+    // A join that took the account's membership over left its old identity
+    // a former member, still in any call it was in. The join stands whatever
+    // LiveKit answers.
+    const left = Array.isArray(reg.left) ? (reg.left as string[]) : [];
+    if (left.length > 0 && typeof reg[DBSchema.invites.serverId] === "string") {
+      const { error } = await removeFromCalls(
+        supabase,
+        reg[DBSchema.invites.serverId] as string,
+        left,
+      );
+      if (error) console.error("register: the identity taken over kept its calls:", error);
+    }
     switch (reg.reason) {
       case "ok":
         break;
@@ -169,6 +182,14 @@ Deno.serve(async (req) => {
       // The account's ban, whichever identity it came back as.
       case "user_banned":
         return CustomResponse.error("You are banned from this server", EC.USER_BANNED);
+      // The identity's account moved on to another identity, and only the
+      // account's pass moves it back here (044): an old device's seed is not
+      // the account.
+      case "account_moved":
+        return CustomResponse.error(
+          "This account is in this server under a newer identity. Sign in to your Rift account on this device to move it here.",
+          EC.ACCOUNT_IN_USE,
+        );
       case "account_in_use":
         return CustomResponse.error(
           "This account is already a member here under another identity. Restore that identity from your backup.",

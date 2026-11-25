@@ -2960,6 +2960,11 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- The console tells the admins of the server it set up, the first on the
+-- database (044). Alpha stands for it here.
+UPDATE servers SET created_at = '2000-01-01'
+ WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+
 -- What the console keeps (console_schema.ts), made here as it would be.
 CREATE SCHEMA IF NOT EXISTS rift_console;
 REVOKE ALL ON SCHEMA rift_console FROM PUBLIC, anon, authenticated;
@@ -11263,17 +11268,31 @@ BEGIN
     RAISE EXCEPTION 'FAIL: setup, the second identity could not join: %', v;
   END IF;
   -- Back through a link that asks nothing, so no pass: its kept tag says
-  -- whose it is.
+  -- whose it is, but the seed alone does not move the account back (044).
   v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000004',
                      'pk-e4', 'sid-e4', 'eq1', 'E4');
+  IF v ->> 'reason' IS DISTINCT FROM 'account_moved' THEN
+    RAISE EXCEPTION 'FAIL: an old identity with no pass was not refused: %', v;
+  END IF;
+  IF (SELECT is_banned FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000005')
+     OR (SELECT kicked_at IS NULL FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000004') THEN
+    RAISE EXCEPTION 'FAIL: a refused return changed either membership';
+  END IF;
+  RAISE NOTICE 'ok  an old identity with no pass does not push the live one out (044)';
+  -- With the account's pass it does.
+  v := register_user('eps-open', 'e5e51111-0000-4000-8000-000000000004',
+                     'pk-e4', 'sid-e4', 'eq1', 'E4', 'tag-eq');
   IF v ->> 'reason' IS DISTINCT FROM 'readmitted' THEN
-    RAISE EXCEPTION 'FAIL: the first identity could not come back: %', v;
+    RAISE EXCEPTION 'FAIL: the first identity could not come back with its pass: %', v;
   END IF;
   IF NOT (SELECT is_banned AND kicked_at IS NOT NULL
             FROM users WHERE id = 'e5e51111-0000-4000-8000-000000000005') THEN
-    RAISE EXCEPTION 'FAIL: an identity came back by its kept tag and the live one stayed in';
+    RAISE EXCEPTION 'FAIL: an identity came back with its pass and the live one stayed in';
   END IF;
-  RAISE NOTICE 'ok  an identity coming back by its kept tag takes the live one over';
+  IF (v -> 'left') IS DISTINCT FROM '["e5e51111-0000-4000-8000-000000000005"]'::JSONB THEN
+    RAISE EXCEPTION 'FAIL: the take-over did not name who left: %', v;
+  END IF;
+  RAISE NOTICE 'ok  an identity coming back with its pass takes the live one over';
 END $$;
 
 -- ── ...but never the owner's ───────────────────────────────────────────
@@ -11987,6 +12006,267 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a sweep a minute later was refused';
   END IF;
   RAISE NOTICE 'ok  the attachment sweep runs at most once a minute (043)';
+END $$;
+RESET ROLE;
+
+-- ============================================================
+-- 044: what the review of 026–043 found
+-- ============================================================
+-- On Eta: ada is made its owner here, ben an admin; cal is a plain member,
+-- and eta-bot a bot.
+
+RESET ROLE;
+INSERT INTO member_roles (user_id, role_id)
+SELECT 'a0332222-0000-4000-8000-000000000001', id FROM roles
+ WHERE server_id = 'a0330000-0000-4000-8000-000000000001' AND is_owner;
+INSERT INTO member_roles (user_id, role_id)
+SELECT 'a0332222-0000-4000-8000-000000000002', id FROM roles
+ WHERE server_id = 'a0330000-0000-4000-8000-000000000001' AND name = 'Admin';
+INSERT INTO roles (id, server_id, name, position, permissions) VALUES
+  ('a0335555-0000-4000-8000-000000000001', 'a0330000-0000-4000-8000-000000000001',
+   'Senior 044', 350, 0);
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = 'a0330000-0000-4000-8000-000000000001';
+
+-- A channel nobody may post in, and a panel of eta-bot's in it.
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000004a4',
+   'a0330000-0000-4000-8000-000000000001', 'news-044', 'text');
+INSERT INTO channel_overrides (channel_id, role_id, deny)
+SELECT 'aaaa1111-0000-4000-8000-0000000004a4', id, app.perm('SEND_MESSAGES')
+  FROM roles WHERE server_id = 'a0330000-0000-4000-8000-000000000001' AND is_everyone;
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-0000000000b9');
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks) VALUES
+  (94401, 'aaaa1111-0000-4000-8000-0000000004a4', '', 0, '{"v":1,"blocks":[]}');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000003');  -- cal
+DO $$
+BEGIN
+  INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                        to_bot, reply_to, is_interaction, action_id)
+  VALUES ('aaaa1111-0000-4000-8000-0000000004a4', 'skip', 'n', 's', 0,
+          'a0332222-0000-4000-8000-0000000000b9', 94401, true, 'skip');
+  RAISE NOTICE 'ok  a member who may not post presses a panel (044)';
+
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                          to_bot, is_interaction, action_id)
+    VALUES ('aaaa1111-0000-4000-8000-0000000004a4', 'junk', 'n', 's', 0,
+            'a0332222-0000-4000-8000-0000000000b9', true, 'x');
+    RAISE EXCEPTION 'FAIL: a press with no panel went into a channel nobody may post in';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                          to_bot, reply_to, is_interaction, action_id)
+    VALUES ('aaaa1111-0000-4000-8000-0000000004a4', 'junk', 'n', 's', 0,
+            'a0332222-0000-4000-8000-0000000000b9', 93301, true, 'x');
+    RAISE EXCEPTION 'FAIL: a press on a message that is no panel of the bot went in';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+    VALUES ('aaaa1111-0000-4000-8000-0000000004a4', 'hi', 'n', 's', 1);
+    RAISE EXCEPTION 'FAIL: a member posted where nobody may';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  and nothing else: not a press on no panel, not a message (044)';
+END $$;
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000003');
+INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version,
+                      to_bot, reply_to, is_interaction, action_id)
+VALUES ('aaaa1111-0000-4000-8000-0000000004a4', 'skip', 'n', 's', 0,
+        'a0332222-0000-4000-8000-0000000000b9', 94401, true, 'skip');
+RESET ROLE;
+
+-- The cap counts presses apart from messages.
+DO $$
+DECLARE v_presses INTEGER;
+BEGIN
+  UPDATE channels SET history_cap = 1 WHERE id = 'aaaa1111-0000-4000-8000-0000000004a4';
+  PERFORM app.enforce_retention();
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE id = 94401) THEN
+    RAISE EXCEPTION 'FAIL: presses pushed the panel out of a capped channel';
+  END IF;
+  SELECT count(*) INTO v_presses FROM messages
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000004a4' AND is_interaction;
+  IF v_presses <> 1 THEN
+    RAISE EXCEPTION 'FAIL: the cap left % presses, not 1', v_presses;
+  END IF;
+  UPDATE channels SET history_cap = NULL WHERE id = 'aaaa1111-0000-4000-8000-0000000004a4';
+  RAISE NOTICE 'ok  a history cap counts presses apart from messages (044)';
+END $$;
+
+-- The retention pass deletes a DM without ringing anybody.
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000003');
+-- With triggers off for the insert: they stamp `created_at` with now().
+SET LOCAL session_replication_role = replica;
+INSERT INTO dm_messages (sender_id, recipient_id, ciphertext, nonce, signature,
+                         key_version, created_at)
+VALUES ('a0332222-0000-4000-8000-000000000003', 'a0332222-0000-4000-8000-000000000001',
+        'old', 'n', 's', 1, now() - interval '10 days');
+SET LOCAL session_replication_role = origin;
+DO $$
+DECLARE v_before INTEGER := 0; v_after INTEGER := 0;
+BEGIN
+  IF app.realtime_ready() THEN
+    SELECT count(*) INTO v_before FROM realtime.messages WHERE event = 'dm_changed';
+  END IF;
+  UPDATE servers SET dm_retention_days = 1 WHERE id = 'a0330000-0000-4000-8000-000000000001';
+  PERFORM app.enforce_retention();
+  IF EXISTS (SELECT 1 FROM dm_messages
+              WHERE sender_id = 'a0332222-0000-4000-8000-000000000003' AND ciphertext = 'old') THEN
+    RAISE EXCEPTION 'FAIL: setup, the old DM was not deleted';
+  END IF;
+  -- The pass's mark does not outlive it, or every delete after it in the
+  -- same transaction would be silent too.
+  IF current_setting('rift.retention', true) = 'on' THEN
+    RAISE EXCEPTION 'FAIL: the retention pass left its mark set';
+  END IF;
+  UPDATE servers SET dm_retention_days = NULL WHERE id = 'a0330000-0000-4000-8000-000000000001';
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — the DM ring is not counted';
+    RETURN;
+  END IF;
+  SELECT count(*) INTO v_after FROM realtime.messages WHERE event = 'dm_changed';
+  IF v_after <> v_before THEN
+    RAISE EXCEPTION 'FAIL: the retention pass rang % times for a DM it deleted',
+      v_after - v_before;
+  END IF;
+  RAISE NOTICE 'ok  the retention pass deletes a DM without ringing (044)';
+END $$;
+
+-- ── invites: seen to rank, and the role given only while its maker may ──
+INSERT INTO invites (server_id, code, role_id, created_by) VALUES
+  ('a0330000-0000-4000-8000-000000000001', 'eta-044-senior',
+   'a0335555-0000-4000-8000-000000000001', 'a0332222-0000-4000-8000-000000000001');
+INSERT INTO invites (server_id, code, role_id, created_by)
+SELECT 'a0330000-0000-4000-8000-000000000001', 'eta-044-admin', id,
+       'a0332222-0000-4000-8000-000000000002'
+  FROM roles WHERE server_id = 'a0330000-0000-4000-8000-000000000001' AND name = 'Admin';
+INSERT INTO auth.users (id) VALUES
+  ('a0334444-0000-4000-8000-000000000001'),
+  ('a0334444-0000-4000-8000-000000000002');
+
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000002');  -- ben, an admin
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM invites WHERE code = 'eta-044-senior') THEN
+    RAISE EXCEPTION 'FAIL: an admin read a link for a role above their own';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM invites WHERE code = 'eta-044-admin') THEN
+    RAISE EXCEPTION 'FAIL: an admin could not read a link for their own rank';
+  END IF;
+  RAISE NOTICE 'ok  an admin sees the links for roles at or below their rank (044)';
+END $$;
+RESET ROLE;
+
+DO $$
+DECLARE v JSONB;
+BEGIN
+  -- Made by the owner, who may give it: the role comes with the link.
+  v := register_user('eta-044-senior', 'a0334444-0000-4000-8000-000000000001',
+                     'pk-e44a', 'sid-e44a', 'e44a', 'E44A');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: setup, joining through the senior link: %', v;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM member_roles
+                  WHERE user_id = 'a0334444-0000-4000-8000-000000000001'
+                    AND role_id = 'a0335555-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a link from somebody who may give its role did not give it';
+  END IF;
+
+  -- Ben is no longer an admin: his link lets people in with no role.
+  DELETE FROM member_roles
+   WHERE user_id = 'a0332222-0000-4000-8000-000000000002'
+     AND role_id IN (SELECT id FROM roles WHERE server_id = 'a0330000-0000-4000-8000-000000000001'
+                                            AND name = 'Admin');
+  PERFORM app.sync_permission_cache('a0332222-0000-4000-8000-000000000002');
+  v := register_user('eta-044-admin', 'a0334444-0000-4000-8000-000000000002',
+                     'pk-e44b', 'sid-e44b', 'e44b', 'E44B');
+  IF v ->> 'reason' IS DISTINCT FROM 'ok' THEN
+    RAISE EXCEPTION 'FAIL: setup, joining through a demoted admin''s link: %', v;
+  END IF;
+  IF EXISTS (SELECT 1 FROM member_roles WHERE user_id = 'a0334444-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: a demoted admin''s link still gave out Admin';
+  END IF;
+  RAISE NOTICE 'ok  a link gives its role only while its maker may (044)';
+
+  -- A new member has no cursor for a private channel, and gets one when seated.
+  IF EXISTS (SELECT 1 FROM read_state
+              WHERE user_id = 'a0334444-0000-4000-8000-000000000002'
+                AND scope_id = 'aaaa1111-0000-4000-8000-0000000000f4') THEN
+    RAISE EXCEPTION 'FAIL: a new member was handed a private channel''s cursor';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM read_state
+                  WHERE user_id = 'a0334444-0000-4000-8000-000000000002'
+                    AND scope_id = 'aaaa1111-0000-4000-8000-0000000000f3') THEN
+    RAISE EXCEPTION 'FAIL: a new member has no cursor for a public channel';
+  END IF;
+  INSERT INTO channel_members (channel_id, user_id)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000f4', 'a0334444-0000-4000-8000-000000000002');
+  IF NOT EXISTS (SELECT 1 FROM read_state
+                  WHERE user_id = 'a0334444-0000-4000-8000-000000000002'
+                    AND scope_id = 'aaaa1111-0000-4000-8000-0000000000f4') THEN
+    RAISE EXCEPTION 'FAIL: a seat in a private channel came with no cursor';
+  END IF;
+  RAISE NOTICE 'ok  a private channel''s cursor comes with its seat (044)';
+END $$;
+
+-- ── a claim renews the region it finds ──────────────────────────────────
+DO $$
+DECLARE v_at TIMESTAMPTZ;
+BEGIN
+  DELETE FROM voice_rooms WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000004a3';
+  INSERT INTO voice_rooms (channel_id, node_id, opened_at)
+  SELECT 'aaaa1111-0000-4000-8000-0000000004a3', id, now() - interval '5 minutes'
+    FROM livekit_nodes WHERE server_id = 'a0330000-0000-4000-8000-000000000001' AND is_default;
+  PERFORM app.claim_voice_node('aaaa1111-0000-4000-8000-0000000004a3');
+  SELECT opened_at INTO v_at FROM voice_rooms
+   WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000004a3';
+  IF v_at < now() - interval '1 second' THEN
+    RAISE EXCEPTION 'FAIL: a claim left an old row''s time as it was: %', v_at;
+  END IF;
+  PERFORM release_idle_voice_node(ARRAY['aaaa1111-0000-4000-8000-0000000004a3']::UUID[]);
+  IF NOT EXISTS (SELECT 1 FROM voice_rooms
+                  WHERE channel_id = 'aaaa1111-0000-4000-8000-0000000004a3') THEN
+    RAISE EXCEPTION 'FAIL: the roster let go of a region just claimed again';
+  END IF;
+  RAISE NOTICE 'ok  a claim renews a region it finds, so the roster keeps it (044)';
+END $$;
+
+-- ── the console's notice goes to the console's server alone ─────────────
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000001');  -- ada, Eta's owner
+DO $$
+BEGIN
+  IF app.console_update() IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: another server''s admin was told of the console update';
+  END IF;
+  RAISE NOTICE 'ok  only the console''s own server hears of a console update (044)';
+END $$;
+RESET ROLE;
+
+-- ── an upload is named for a conversation the uploader is in ────────────
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('a0332222-0000-4000-8000-000000000002');  -- ben, not in quiet-room
+DO $$
+BEGIN
+  IF app.can_attach('aaaa1111-0000-4000-8000-0000000000f4/x.bin') THEN
+    RAISE EXCEPTION 'FAIL: an upload was named for a private channel the uploader is not in';
+  END IF;
+  IF NOT app.can_attach('aaaa1111-0000-4000-8000-0000000000f3/x.bin') THEN
+    RAISE EXCEPTION 'FAIL: an upload to a public channel was refused';
+  END IF;
+  IF app.can_attach('dm_a0332222-0000-4000-8000-000000000001_a0332222-0000-4000-8000-000000000003/x.bin') THEN
+    RAISE EXCEPTION 'FAIL: an upload was named for somebody else''s DM';
+  END IF;
+  IF NOT app.can_attach('dm_a0332222-0000-4000-8000-000000000001_a0332222-0000-4000-8000-000000000002/x.bin') THEN
+    RAISE EXCEPTION 'FAIL: an upload to the uploader''s own DM was refused';
+  END IF;
+  RAISE NOTICE 'ok  an upload is named for a conversation the uploader is in (044)';
 END $$;
 RESET ROLE;
 

@@ -480,3 +480,65 @@ export async function manageableRooms(
   }));
   return new Set(answers.filter((room): room is string => room !== null));
 }
+
+/**
+ * Take [userIds] out of every call they are in on this server: its channels'
+ * rooms and their DM calls (`dm-<callId>`), on every node, every device and
+ * connection of theirs.
+ *
+ * For the identities a write in the database put out without naming them: the
+ * account's other identities a ban reached (`app.ban_keeps_tag`), and the one
+ * a join took over (`register_user`). Neither is the person the caller acted
+ * on, so nothing else would end their calls, and they kept talking until
+ * they left.
+ *
+ * Answers how many connections it removed, and `livekit_unreachable` when a
+ * node or a removal failed, so the caller can say so; the database is already
+ * right whatever this answers.
+ */
+export async function removeFromCalls(
+  supabase: SupabaseClient,
+  serverId: string,
+  userIds: string[],
+): Promise<{ removed: number; error: string | null }> {
+  const targets = new Set(userIds);
+  if (targets.size === 0) return { removed: 0, error: null };
+
+  const services = await livekitRoomServices(supabase, serverId);
+  if (services.length === 0) return { removed: 0, error: "credentials_missing" };
+
+  const { data: channels, error: channelsError } = await supabase
+    .from(DBSchema.channels.tableName)
+    .select(DBSchema.channels.id)
+    .eq(DBSchema.channels.serverId, serverId);
+  if (channelsError) return { removed: 0, error: "db_error" };
+  const channelIds = (channels ?? []).map(
+    (c) => (c as Record<string, any>)[DBSchema.channels.id] as string,
+  );
+
+  let unreachable = false;
+  const rooms = (await Promise.all(services.map(async ({ service }) => {
+    try {
+      const channelRooms = channelIds.length > 0 ? await service.listRooms(channelIds) : [];
+      const callRooms = (await service.listRooms())
+        .filter((room) => room.name.startsWith("dm-"));
+      return [...channelRooms, ...callRooms];
+    } catch {
+      unreachable = true;
+      return [];
+    }
+  }))).flat();
+
+  const theirs = (await roomParticipantsAcross(services, rooms)).flatMap(
+    ({ room, participants, service }) =>
+      participants
+        .filter((p) => targets.has(p.identity.split("~")[0]))
+        .map((p) => ({ room, identity: p.identity, service })),
+  );
+  const results = await Promise.allSettled(
+    theirs.map(({ room, identity, service }) => service.removeParticipant(room, identity)),
+  );
+  const removed = results.filter((r) => r.status === "fulfilled").length;
+  if (removed < results.length) unreachable = true;
+  return { removed, error: unreachable ? "livekit_unreachable" : null };
+}

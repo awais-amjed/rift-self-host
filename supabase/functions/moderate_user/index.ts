@@ -9,6 +9,7 @@ import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/a
 import {
   connectionKind,
   livekitRoomServices,
+  removeFromCalls,
   roomParticipantsAcross,
 } from "../_shared/livekit.ts";
 import { livePermissionsFor, micDenied, moderationMetadata } from "../_shared/moderation.ts";
@@ -137,18 +138,54 @@ Deno.serve(async (req) => {
       isBot,
     );
 
+    // A ban keeps the account's tag, and the database bans the account's
+    // other identities with it (`app.ban_keeps_tag`). Those are in no call
+    // this request named, so they are taken out of theirs here, or the
+    // account went on talking under its other identity until it left.
+    let elsewhere = { removed: 0, error: null as string | null };
+    if (isBanned && !isKicked) {
+      elsewhere = await removeFromCalls(
+        supabase,
+        auth.serverId,
+        await sameAccountBanned(auth.serverId, target_user_id),
+      );
+    }
+
     return CustomResponse.success({
       muted: isMuted,
       deafened: isDeafened,
       banned: isBanned,
       kicked: isKicked,
-      connections_updated: applied.updated,
-      livekit_error: applied.error,
+      connections_updated: applied.updated + elsewhere.removed,
+      livekit_error: applied.error ?? elsewhere.error,
     });
   } catch (err) {
     return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
+
+/**
+ * The account's other identities on this server that are banned now: the
+ * ones the ban of [targetUserId] reached through the tag they share.
+ */
+async function sameAccountBanned(serverId: string, targetUserId: string): Promise<string[]> {
+  const { data: own } = await supabase
+    .from("member_account_tags")
+    .select("tag")
+    .eq("user_id", targetUserId)
+    .maybeSingle();
+  const tag = (own as Record<string, any> | null)?.tag as string | undefined;
+  if (!tag) return [];
+  const { data: rows } = await supabase
+    .from("member_account_tags")
+    .select("user_id, users!inner(is_banned, kicked_at)")
+    .eq("server_id", serverId)
+    .eq("tag", tag)
+    .neq("user_id", targetUserId)
+    .eq("users.is_banned", true)
+    .is("users.kicked_at", null);
+  return ((rows ?? []) as Record<string, any>[]).map((r) => r.user_id as string);
+}
 
 /**
  * Push the state onto every live connection the target holds on this server.
