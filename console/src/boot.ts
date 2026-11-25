@@ -30,12 +30,14 @@ import {
 import type { Paths } from "./setup/run.ts";
 import {
   composeProblem,
+  listedServices,
   recreateOutdated,
   restartService,
-  serviceStatuses,
+  type ServiceStatus,
   startStack,
   waitForSettled,
 } from "./docker.ts";
+import { finishDatabaseRotation } from "./rotation.ts";
 import {
   type PostgresTarget,
   queryRows,
@@ -137,7 +139,12 @@ async function prepare(
   // The log and, during a restore from the console page, the page itself.
   const say = stepReporter(report);
 
-  const written = await restoreMissingConfig(paths);
+  // Not fatal: one value in `.env` it cannot use stopped the migrations and
+  // everything after them too.
+  const written = await restoreMissingConfig(paths).catch((error) => {
+    console.error("Could not write the missing configuration:", error);
+    return [] as string[];
+  });
   if (written.length > 0) {
     report("Writing the configuration");
     console.log(`Wrote missing configuration from .env: ${written.join(", ")}`);
@@ -175,7 +182,8 @@ async function prepare(
   // the same project: two of those at once is not a defined thing.
   await waitForSettled();
 
-  const statuses = await serviceStatuses();
+  // Null when compose could not say, which is not the same as nothing there.
+  const statuses = await listedServices() ?? [{ name: "unknown" } as ServiceStatus];
   if (statuses.every((service) => service.name === "console")) {
     report("Starting the server");
     console.log("Nothing but the console is here yet — bringing the stack up.");
@@ -209,6 +217,20 @@ async function prepare(
   if (updated.length > 0) {
     report("Updating services");
     console.log(`Updated to the images the compose file names: ${updated.join(", ")}`);
+  }
+
+  // A database rotation the last console stopped in the middle of: until it
+  // is settled, `.env` may hold a password the database no longer takes.
+  const rotation = await finishDatabaseRotation(paths).catch((error) => {
+    console.error("Could not finish the database password change:", error);
+    return "unknown" as const;
+  });
+  if (rotation === "finished") {
+    say("Finished replacing the database password, which the console stopped partway.");
+  } else if (rotation === "dropped") {
+    console.log(
+      "A database password change that never reached the database was dropped.",
+    );
   }
 
   const target = targetFromEnv();

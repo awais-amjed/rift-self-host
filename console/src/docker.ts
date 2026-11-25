@@ -165,8 +165,18 @@ export async function restartStackServices(): Promise<CommandResult> {
  * resolve and nothing but the console exists.
  */
 export async function serviceStatuses(): Promise<ServiceStatus[]> {
+  return await listedServices() ?? [];
+}
+
+/**
+ * What is running, or null when compose could not say. Whatever acts on the
+ * answer asks this one: an empty list from a `ps` that timed out read as
+ * "nothing to recreate", and a key rotation reported success having
+ * restarted nothing.
+ */
+export async function listedServices(): Promise<ServiceStatus[] | null> {
   const result = await compose(["ps", "--all", "--format", "json"], 30_000);
-  if (!result.ok) return [];
+  if (!result.ok) return null;
 
   // One JSON object per line, not a JSON array — compose changed this once and
   // may again, so both shapes are accepted.
@@ -397,7 +407,7 @@ export async function servicesIn(profiles: string[]): Promise<string[]> {
  */
 export async function startStack(
   profiles: string[] = ["full"],
-  options: { exclude?: string[] } = {},
+  options: { exclude?: string[]; recreate?: boolean } = {},
 ): Promise<CommandResult> {
   const skip = new Set([SELF, ...disabledServices(), ...(options.exclude ?? [])]);
   const services = (await servicesIn(profiles)).filter((s) => !skip.has(s));
@@ -411,7 +421,7 @@ export async function startStack(
 
   // No --remove-orphans: it is scoped to services the compose file no longer
   // defines, but the blast radius if that ever changed is this container.
-  return compose(upArgs(profiles, services));
+  return compose(upArgs(profiles, services, options.recreate ?? false));
 }
 
 /**
@@ -425,13 +435,23 @@ export async function startStack(
  * start recreated it, database included, and the reverse. The things that do
  * need a container recreated — a new image, a rotated key, the LAN switch —
  * each recreate exactly their own service instead.
+ *
+ * [recreate] leaves the flag off, for a setup run again after one that
+ * stopped: every container there was made minutes ago by this same compose,
+ * from settings the retry may have just changed. With the flag, a port
+ * changed to get past one that was taken was written to `.env` and never
+ * reached the container, which failed on the old port again.
  */
-export function upArgs(profiles: string[], services: string[]): string[] {
+export function upArgs(
+  profiles: string[],
+  services: string[],
+  recreate = false,
+): string[] {
   return [
     ...profiles.flatMap((profile) => ["--profile", profile]),
     "up",
     "-d",
-    "--no-recreate",
+    ...(recreate ? [] : ["--no-recreate"]),
     "--wait",
     ...services,
   ];

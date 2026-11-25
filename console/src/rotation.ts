@@ -33,8 +33,14 @@
 import { SignJWT } from "npm:jose@5";
 import { join } from "jsr:@std/path@1";
 import { readEnvFile, updateSettings } from "./env_file.ts";
-import { literal, type PostgresTarget, runSql, targetFromEnv } from "./postgres.ts";
-import { recreateServices, serviceStatuses } from "./docker.ts";
+import {
+  isReachable,
+  literal,
+  type PostgresTarget,
+  runSql,
+  targetFromEnv,
+} from "./postgres.ts";
+import { listedServices, recreateServices } from "./docker.ts";
 import { readState, writeState } from "./state.ts";
 import {
   livekitSettings,
@@ -315,8 +321,14 @@ async function runSecretSql(
 
 /** Recreate what [kind] affects on this stack. */
 async function recreateFor(kind: RotationKind): Promise<void> {
-  const present = (await serviceStatuses()).map((service) => service.name);
-  await recreateServices(servicesToRecreate(kind, present));
+  const listed = await listedServices();
+  if (listed === null || listed.length === 0) {
+    throw new Error(
+      "Could not list this stack's containers, so none were restarted onto the " +
+        "new value. Check `docker compose ps`, then try again.",
+    );
+  }
+  await recreateServices(servicesToRecreate(kind, listed.map((service) => service.name)));
 }
 
 /**
@@ -383,7 +395,17 @@ async function rotateDatabase(
   // rotation leaves alone, so one value serves both directions.
   const apiSecret = secretsFromEnv(readEnvFile(paths.projectDir)).jwtSecret;
 
-  await runSecretSql(admin, passwordStatements(next), hidden, "the new password");
+  // Written down before the roles change: between the two, the new password
+  // is the only one that works, and a console killed there (an update's
+  // handover, a reboot) took the only copy with it. The next start finishes
+  // the rotation or drops this line ([finishDatabaseRotation]).
+  await updateSettings({ [PENDING_PASSWORD]: next }, paths.projectDir);
+  try {
+    await runSecretSql(admin, passwordStatements(next), hidden, "the new password");
+  } catch (error) {
+    await updateSettings({ [PENDING_PASSWORD]: null }, paths.projectDir).catch(() => {});
+    throw error;
+  }
 
   try {
     await putRealtimeTenant(
@@ -391,7 +413,10 @@ async function rotateDatabase(
       realtimeDatabaseTenant(next),
       "the new database password",
     );
-    await updateSettings({ POSTGRES_PASSWORD: next }, paths.projectDir);
+    await updateSettings(
+      { POSTGRES_PASSWORD: next, [PENDING_PASSWORD]: null },
+      paths.projectDir,
+    );
     await recreateFor("database");
   } catch (error) {
     await runSecretSql(
@@ -406,12 +431,65 @@ async function rotateDatabase(
       "the old database password",
     )
       .catch(() => {});
-    await updateSettings({ POSTGRES_PASSWORD: current }, paths.projectDir).catch(
-      () => {},
-    );
+    await updateSettings(
+      { POSTGRES_PASSWORD: current, [PENDING_PASSWORD]: null },
+      paths.projectDir,
+    ).catch(() => {});
     await recreateFor("database").catch(() => {});
     throw error;
   }
+}
+
+/** Realtime and every service that holds the database password, onto [password]. */
+async function moveServicesTo(password: string): Promise<void> {
+  const apiSecret = secretsFromEnv(readEnvFile()).jwtSecret;
+  await putRealtimeTenant(
+    apiSecret,
+    realtimeDatabaseTenant(password),
+    "the new database password",
+  ).catch((error) => console.error("[rotate] Realtime:", error));
+  await recreateFor("database");
+}
+
+/** A database password being put in place, kept in `.env` until it is. */
+export const PENDING_PASSWORD = "POSTGRES_PASSWORD_NEXT";
+
+/**
+ * At start-up, before anything connects: finish or drop a database rotation
+ * the console stopped in the middle of. Whichever password the database
+ * answers to is the one; if that is the new one, `.env`, Realtime and the
+ * services move onto it. Returns what it did.
+ */
+export async function finishDatabaseRotation(
+  paths: RotationPaths,
+  timeoutMs = 120_000,
+  // The database and the services, which a test stands in for.
+  live: {
+    reachable: (target: PostgresTarget) => Promise<boolean>;
+    moveServices: (password: string) => Promise<void>;
+  } = { reachable: isReachable, moveServices: moveServicesTo },
+): Promise<"none" | "finished" | "dropped" | "unknown"> {
+  const pending = readEnvFile(paths.projectDir)[PENDING_PASSWORD];
+  if (!pending) return "none";
+  const env = readEnvFile(paths.projectDir);
+  const current = { ...targetFromEnv(), password: env.POSTGRES_PASSWORD ?? "" };
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await live.reachable({ ...current, password: pending })) {
+      await updateSettings(
+        { POSTGRES_PASSWORD: pending, [PENDING_PASSWORD]: null },
+        paths.projectDir,
+      );
+      await live.moveServices(pending);
+      return "finished";
+    }
+    if (await live.reachable(current)) {
+      await updateSettings({ [PENDING_PASSWORD]: null }, paths.projectDir);
+      return "dropped";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  return "unknown";
 }
 
 /**

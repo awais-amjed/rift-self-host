@@ -311,6 +311,7 @@ export async function writeConfigFiles(
   await Deno.writeTextFile(envPath, renderEnv(context), { mode: 0o600 });
   written.push(".env");
 
+  await lockSecretFolders(projectDir);
   return written;
 }
 
@@ -429,7 +430,33 @@ export async function restoreMissingConfig(
     written.push(OVERRIDE_FILE);
   }
 
+  // On every start, so a server set up before this is closed too.
+  await lockSecretFolders(projectDir);
   return written;
+}
+
+/** The folders holding a file with a key in it. */
+const SECRET_FOLDERS = ["volumes/api", "volumes/livekit"] as const;
+
+/**
+ * Make [SECRET_FOLDERS] the owner's alone. `.env` is written 0600 because it
+ * holds the service-role key, and `volumes/api/kong.yml` holds the same key
+ * (and the secret one), `volumes/livekit/livekit.yaml` LiveKit's secret, both
+ * readable by every user on the machine. Each is mounted into its container
+ * as a single file, which a container reads whatever its folder's mode, so
+ * closing the folders costs the services nothing (checked Nov 25 2026 with a
+ * container running as another user).
+ */
+export async function lockSecretFolders(projectDir: string): Promise<void> {
+  for (const folder of SECRET_FOLDERS) {
+    try {
+      await Deno.chmod(join(projectDir, folder), 0o700);
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) {
+        console.error(`Could not make ${folder} private:`, error);
+      }
+    }
+  }
 }
 
 /**

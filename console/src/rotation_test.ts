@@ -4,13 +4,16 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "jsr:@std/assert@1";
+import { parseEnv } from "./env_file.ts";
 import {
   AFFECTED,
   DATABASE_ROLES,
+  finishDatabaseRotation,
   isRotationKind,
   jwtSettingStatement,
   livekitStatement,
   passwordStatements,
+  PENDING_PASSWORD,
   realtimeDatabaseTenant,
   servicesToRecreate,
   withLivekitKey,
@@ -143,4 +146,44 @@ Deno.test("Realtime is sent its database login exactly as its seed wrote it", as
   assertEquals(extension.settings.db_port, environment("DB_PORT"));
   assertEquals(extension.settings.db_user, environment("DB_USER"));
   assertEquals(extension.settings.db_password, "the-password");
+});
+
+Deno.test("a database rotation stopped midway is finished or dropped at start", async () => {
+  const dir = await Deno.makeTempDir();
+  const paths = { templateRoot: dir, projectDir: dir };
+  try {
+    // The roles took the new password before the console stopped.
+    await Deno.writeTextFile(
+      `${dir}/.env`,
+      `POSTGRES_PASSWORD=old\n${PENDING_PASSWORD}=new\n`,
+    );
+    const moved: string[] = [];
+    const finished = await finishDatabaseRotation(paths, 1_000, {
+      reachable: (target) => Promise.resolve(target.password === "new"),
+      moveServices: (password) => Promise.resolve(void moved.push(password)),
+    });
+    assertEquals(finished, "finished");
+    assertEquals(moved, ["new"]);
+    assertEquals(parseEnv(await Deno.readTextFile(`${dir}/.env`)), {
+      POSTGRES_PASSWORD: "new",
+    });
+
+    // They never did.
+    await Deno.writeTextFile(
+      `${dir}/.env`,
+      `POSTGRES_PASSWORD=old\n${PENDING_PASSWORD}=new\n`,
+    );
+    const dropped = await finishDatabaseRotation(paths, 1_000, {
+      reachable: (target) => Promise.resolve(target.password === "old"),
+      moveServices: () => Promise.reject(new Error("not to be called")),
+    });
+    assertEquals(dropped, "dropped");
+    assertEquals(parseEnv(await Deno.readTextFile(`${dir}/.env`)), {
+      POSTGRES_PASSWORD: "old",
+    });
+
+    assertEquals(await finishDatabaseRotation(paths, 1_000), "none");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

@@ -107,9 +107,24 @@ export function updateSetting(
  * A null value removes the key's lines instead, so swapping one setting for
  * another (the console password for its hash) is one write as well.
  */
-export async function updateSettings(
+export function updateSettings(
   values: Record<string, string | null>,
   directory: string = projectDir(),
+): Promise<void> {
+  // One at a time: each reads the file, changes it and writes it back, and
+  // two at once (a rotation and a file-limit change) each wrote its own
+  // reading, so the later one undid the earlier.
+  const run = writing.then(() => writeSettings(values, directory));
+  writing = run.catch(() => {});
+  return run;
+}
+
+/** The last write queued, which the next waits for. */
+let writing: Promise<void> = Promise.resolve();
+
+async function writeSettings(
+  values: Record<string, string | null>,
+  directory: string,
 ): Promise<void> {
   const path = join(directory, ".env");
   const text = await Deno.readTextFile(path);
@@ -133,7 +148,9 @@ export async function updateSettings(
   const end = lines.at(-1) === "" ? lines.length - 1 : lines.length;
   lines.splice(end, 0, ...missing.map((name) => `${name}=${values[name]}`));
 
-  const temporary = `${path}.writing`;
+  // Named for this process: the update and password-reset commands run in
+  // processes of their own and write here too.
+  const temporary = `${path}.writing-${Deno.pid}`;
   // A leftover from a crash would keep its own permissions, and the mode below
   // only applies to a file this call creates.
   await Deno.remove(temporary).catch(() => {});

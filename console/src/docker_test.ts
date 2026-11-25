@@ -59,3 +59,8 @@ Deno.test("the console moves only when its address changed, and only when known"
   // Docker could not say where it is: leave it rather than guess.
   assertEquals(consoleMoveNeeded(null, { bind: "0.0.0.0", port: "9001" }), false);
 });
+
+Deno.test("a setup run again recreates what the stopped one made", () => {
+  assert(upArgs(["full"], ["kong"]).includes("--no-recreate"));
+  assert(!upArgs(["full"], ["kong"], true).includes("--no-recreate"));
+});

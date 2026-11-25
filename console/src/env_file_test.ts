@@ -133,3 +133,22 @@ Deno.test("a comment after a value ends it, as compose reads it", () => {
     QUOTED: "x # y",
   });
 });
+
+Deno.test("two changes at once both land", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${dir}/.env`, "A=1\nB=2\n");
+    await Promise.all([
+      updateSettings({ A: "10" }, dir),
+      updateSettings({ B: "20" }, dir),
+      updateSettings({ C: "30" }, dir),
+    ]);
+    assertEquals(parseEnv(await Deno.readTextFile(`${dir}/.env`)), {
+      A: "10",
+      B: "20",
+      C: "30",
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

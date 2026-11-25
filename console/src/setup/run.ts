@@ -153,7 +153,9 @@ export async function runSetup(
     // [disabledServices], which reads that from the `.env` written above
     // rather than taking it as an argument, so a later restart makes the same
     // decision this one did.
-    const result = await startStack(["full"]);
+    const result = await startStack(["full"], {
+      recreate: previous.RIFT_SETUP === "running",
+    });
     if (!result.ok) {
       throw new Error(result.stderr || "docker compose could not start the stack");
     }
