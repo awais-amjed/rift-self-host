@@ -12878,4 +12878,150 @@ BEGIN
   RAISE NOTICE 'ok  a page''s reactions are counted per message, for whoever may see it (050)';
 END $$;
 
+-- ============================================================
+-- 36. A conversation is read off its own index (051)
+-- ============================================================
+-- Echo again (section 35, whose 95101 is e1's first DM to e2), with e5:
+-- e1 and e2 talk; e1 takes requests, and
+-- e5 has asked (one message: the gate holds the rest until an answer). The page, the badge and both ways of marking read must give
+-- what they gave before, and nobody outside a conversation gets any of it.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+INSERT INTO auth.users (id) VALUES ('50505050-eeee-4eee-8eee-000000000005');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key)
+VALUES ('50505050-eeee-4eee-8eee-000000000005', 'ee500000-0000-4000-8000-000000000001',
+        'e5', 'E5', 'pk-e5', 'sid-e5', 'chat-e5');
+UPDATE users SET dm_policy = 'requests' WHERE id = '50505050-eeee-4eee-8eee-000000000001';
+
+INSERT INTO dm_messages (id, sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+VALUES (95201, '50505050-eeee-4eee-8eee-000000000001', '50505050-eeee-4eee-8eee-000000000002', 'c', 'n', 's', 1),
+       (95202, '50505050-eeee-4eee-8eee-000000000002', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1),
+       (95203, '50505050-eeee-4eee-8eee-000000000002', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1),
+       (95204, '50505050-eeee-4eee-8eee-000000000001', '50505050-eeee-4eee-8eee-000000000002', 'c', 'n', 's', 1),
+       (95205, '50505050-eeee-4eee-8eee-000000000002', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1),
+       (95206, '50505050-eeee-4eee-8eee-000000000005', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1);
+
+CREATE FUNCTION pg_temp.page51(p_peer INTEGER, p_before BIGINT, p_after BIGINT,
+                               p_limit INTEGER) RETURNS BIGINT[] LANGUAGE sql AS $$
+  SELECT COALESCE(array_agg(d.id), '{}') FROM dm_messages_page(
+    ('50505050-eeee-4eee-8eee-' || lpad(p_peer::text, 12, '0'))::uuid,
+    p_before, p_after, p_limit) d
+$$;
+GRANT EXECUTE ON FUNCTION pg_temp.page51(INTEGER, BIGINT, BIGINT, INTEGER) TO authenticated;
+
+DO $$
+DECLARE
+  e1 CONSTANT UUID := '50505050-eeee-4eee-8eee-000000000001';
+  e2 CONSTANT UUID := '50505050-eeee-4eee-8eee-000000000002';
+  e5 CONSTANT UUID := '50505050-eeee-4eee-8eee-000000000005';
+  v  JSONB;
+  i  INTEGER;
+BEGIN
+  IF NOT app.dm_is_request(e5, e1) THEN
+    RAISE EXCEPTION 'FAIL: setup: e5''s messages to e1 are not a request';
+  END IF;
+  -- The ring asks this as the server, before anybody has read anything.
+  IF NOT has_unread_before(e1, 'dm', e2, 95205)
+     OR NOT has_unread_before(e2, 'dm', e1, 95204)
+     OR has_unread_before(e1, 'dm', e2, 95202)
+     OR has_unread_before(e2, 'dm', e1, 95101) THEN
+    RAISE EXCEPTION 'FAIL: has_unread_before is wrong about a conversation';
+  END IF;
+
+  PERFORM pg_temp.as50(1);
+  SET LOCAL ROLE authenticated;
+
+  -- The page: newest first, older from a before, oldest first from an after.
+  IF pg_temp.page51(2, NULL, NULL, 51) <> ARRAY[95205, 95204, 95203, 95202, 95201, 95101]::BIGINT[]
+     OR pg_temp.page51(2, 95204, NULL, 51) <> ARRAY[95203, 95202, 95201, 95101]::BIGINT[]
+     OR pg_temp.page51(2, NULL, 95202, 51) <> ARRAY[95203, 95204, 95205]::BIGINT[]
+     OR pg_temp.page51(2, NULL, NULL, 2) <> ARRAY[95205, 95204]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: a conversation''s page came back as %',
+      pg_temp.page51(2, NULL, NULL, 51);
+  END IF;
+  -- The request is e1's to read, as its rows always were.
+  IF pg_temp.page51(5, NULL, NULL, 51) <> ARRAY[95206]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: a request''s messages left its recipient''s page';
+  END IF;
+
+  -- The badge: e2's three, and not the request.
+  v := unread_counts()->'dms';
+  IF v <> jsonb_build_object(e2::TEXT, 3) THEN
+    RAISE EXCEPTION 'FAIL: unread DMs came back as %', v;
+  END IF;
+
+  -- Marking read: to the newest from e2, and never backwards.
+  IF mark_read('dm', e2, 0) <> 95205 OR mark_read('dm', e2, 95202) <> 95205 THEN
+    RAISE EXCEPTION 'FAIL: mark_read moved a DM cursor wrongly';
+  END IF;
+  IF (SELECT r.last_read_id FROM read_state r
+       WHERE r.user_id = e1 AND r.scope = 'dm' AND r.scope_id = e2) <> 95205 THEN
+    RAISE EXCEPTION 'FAIL: the DM cursor went backwards';
+  END IF;
+  IF unread_counts()->'dms' <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a read conversation still has a badge';
+  END IF;
+
+  -- Accepted, the request counts; then marking all read clears it.
+  PERFORM answer_dm_request(e5, true);
+  IF unread_counts()->'dms' <> jsonb_build_object(e5::TEXT, 1) THEN
+    RAISE EXCEPTION 'FAIL: an accepted request is not unread: %', unread_counts()->'dms';
+  END IF;
+  PERFORM mark_all_read();
+  IF unread_counts()->'dms' <> '{}'::jsonb
+     OR (SELECT r.last_read_id FROM read_state r
+          WHERE r.user_id = e1 AND r.scope = 'dm' AND r.scope_id = e5) <> 95206 THEN
+    RAISE EXCEPTION 'FAIL: mark_all_read left a conversation unread';
+  END IF;
+  RESET ROLE;
+
+  -- A request still waiting is marked read by mark_all_read too, as before.
+  UPDATE dm_links SET status = 'requested', answered_at = NULL
+   WHERE user_low = LEAST(e1, e5) AND user_high = GREATEST(e1, e5);
+  DELETE FROM read_state WHERE user_id = e1 AND scope = 'dm' AND scope_id = e5;
+  DELETE FROM dm_conversation_heads WHERE user_id = e1 AND peer_id = e5;
+  PERFORM pg_temp.as50(1);
+  SET LOCAL ROLE authenticated;
+  PERFORM mark_all_read();
+  IF (SELECT r.last_read_id FROM read_state r
+       WHERE r.user_id = e1 AND r.scope = 'dm' AND r.scope_id = e5) IS DISTINCT FROM 95206 THEN
+    RAISE EXCEPTION 'FAIL: mark_all_read skipped a waiting request';
+  END IF;
+  RESET ROLE;
+
+  -- Nobody else reads the conversation: not the bot, not a banned member,
+  -- not somebody on another server. Each asks as though it were theirs.
+  FOREACH i IN ARRAY ARRAY[3, 4] LOOP
+    PERFORM pg_temp.as50(i);
+    SET LOCAL ROLE authenticated;
+    IF pg_temp.page51(1, NULL, NULL, 51) <> '{}'::BIGINT[]
+       OR pg_temp.page51(2, NULL, NULL, 51) <> '{}'::BIGINT[]
+       OR app.dm_newest_from(e2) IS NOT NULL
+       OR app.dm_unread_from(e1, 0) <> 0 THEN
+      RAISE EXCEPTION 'FAIL: e% read the conversation of e1 and e2', i;
+    END IF;
+    RESET ROLE;
+  END LOOP;
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  SET LOCAL ROLE authenticated;
+  IF pg_temp.page51(1, NULL, NULL, 51) <> '{}'::BIGINT[]
+     OR pg_temp.page51(2, NULL, NULL, 51) <> '{}'::BIGINT[]
+     OR app.dm_newest_from(e2) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: another server''s member read a conversation';
+  END IF;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+
+  IF has_function_privilege('anon', 'dm_messages_page(uuid, bigint, bigint, integer)', 'EXECUTE')
+     OR has_function_privilege('anon', 'app.dm_newest_from(uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'app.dm_unread_from(uuid, bigint)', 'EXECUTE')
+     OR has_function_privilege('anon', 'app.dm_requests_to_me()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: a DM read is open to anon';
+  END IF;
+  RAISE NOTICE 'ok  a conversation is read off its own index, by the two in it (051)';
+END $$;
+
 ROLLBACK;
