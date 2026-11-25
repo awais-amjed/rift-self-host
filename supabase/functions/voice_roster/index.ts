@@ -7,7 +7,6 @@ import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
 import {
   livekitRoomServices,
-  releaseVoiceNodes,
   voiceUserId,
 } from "../_shared/livekit.ts";
 import { orphanedWatchers, removeWatchers } from "../_shared/watch.ts";
@@ -172,7 +171,16 @@ Deno.serve(async (req) => {
             }),
           );
 
-          return { node, rosters, load: summarise(node, rooms) };
+          // Every room this node holds, whoever is in it: a room LiveKit
+          // still lists is a call that has not ended, even one opened a
+          // moment ago or one whose participants did not answer.
+          return {
+            node,
+            rosters,
+            open: visible.map((room) => room.name),
+            reachable: true,
+            load: summarise(node, rooms),
+          };
         } catch {
           // A node that is down answers with nothing rather than blanking the
           // whole roster. Its calls go missing from the sidebar until it is
@@ -186,6 +194,8 @@ Deno.serve(async (req) => {
               startedAt: number;
               participants: unknown[];
             }[],
+            open: [] as string[],
+            reachable: false,
             load: { id: node.id, label: node.label, load: null, reachable: false },
           };
         }
@@ -197,13 +207,9 @@ Deno.serve(async (req) => {
     // Visible, occupied calls only, like the roster: a private channel's
     // start time would say when a call nobody here can join began.
     const started: Record<string, number> = {};
-    const busy = new Set<string>();
     for (const { rosters } of perNode) {
       for (const { room, startedAt, participants } of rosters) {
-        if (participants.length > 0) {
-          busy.add(room);
-          if (startedAt > 0) started[room] = startedAt;
-        }
+        if (participants.length > 0 && startedAt > 0) started[room] = startedAt;
         for (
           const participant of participants as {
             identity: string;
@@ -238,9 +244,32 @@ Deno.serve(async (req) => {
     // for a private channel they are not in — a stale row costs a worse
     // choice next time, never a broken call, so being conservative here is
     // free.
-    const ended = channelIds.filter((id) => !busy.has(id));
-    if (ended.length > 0) {
-      await releaseVoiceNodes(supabase, ended).catch(() => {});
+    //
+    // Ended means no node lists a room for it, and the node the call was
+    // claimed on answered. A node that did not answer may be holding it, and
+    // a room that is there but answered nobody may be one somebody is joining
+    // right now: releasing either let the next person in claim the same call
+    // on another node, splitting it in two. The database also keeps any row
+    // claimed in the last half minute (`release_idle_voice_node`), which
+    // covers a room claimed but not yet opened.
+    const open = new Set(perNode.flatMap((n) => n.open));
+    const candidates = channelIds.filter((id) => !open.has(id));
+    if (candidates.length > 0) {
+      const answered = new Set(perNode.filter((n) => n.reachable).map((n) => n.node.id));
+      const { data: claimed, error: claimedError } = await supabase
+        .from("voice_rooms")
+        .select("channel_id, node_id")
+        .in("channel_id", candidates);
+      const ended = claimedError ? [] : ((claimed ?? []) as Record<string, any>[])
+        .filter((row) => answered.has(row.node_id as string))
+        .map((row) => row.channel_id as string);
+      if (claimedError) console.error("[voice_roster] claims", claimedError);
+      if (ended.length > 0) {
+        await supabase.rpc("release_idle_voice_node", { p_channels: ended })
+          .then(({ error }) => {
+            if (error) console.error("[voice_roster] release", error);
+          });
+      }
     }
 
     return CustomResponse.success({
@@ -250,6 +279,6 @@ Deno.serve(async (req) => {
       regions: perNode.map(({ load }) => load),
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

@@ -100,7 +100,7 @@ Deno.serve(async (req) => {
       livekit_error: removed.error,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
@@ -133,6 +133,7 @@ async function removeFromLiveRoom(
 
     return { updated: mine.length, error: null };
   } catch (err) {
-    return { updated: 0, error: String(err) };
+    console.error("[livekit]", err);
+    return { updated: 0, error: "livekit_unreachable" };
   }
 }

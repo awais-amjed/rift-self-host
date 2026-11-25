@@ -65,7 +65,7 @@ Deno.serve(async (req) => {
       expires_at: data,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 

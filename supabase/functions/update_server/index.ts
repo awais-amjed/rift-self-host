@@ -64,6 +64,18 @@ function isIconPath(serverId: string, value: string): boolean {
   return value.startsWith(prefix) && /^[0-9a-f]{8,64}\.img$/.test(value.slice(prefix.length));
 }
 
+/** A LiveKit address as `livekit_nodes.url` takes one: ws or wss, a host, and no credentials in it. */
+function isLiveKitUrl(value: unknown): boolean {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  try {
+    const url = new URL(value);
+    return ["ws:", "wss:"].includes(url.protocol) &&
+      url.hostname !== "" && url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
+
 /** A `servers` row as the client reads it — snake_case, limits included. */
 function toServerResponse(row: Record<string, any> | null) {
   if (!row) return row;
@@ -89,6 +101,12 @@ Deno.serve(async (req) => {
     // Authenticate
     const auth = await authenticateToken(supabase, token);
     if (isAuthError(auth)) return auth;
+
+    // First, so a member learns nothing about the limits' rules or the
+    // file ceiling from a refusal.
+    if (!auth.isServerAdmin) {
+      return CustomResponse.error("Unauthorized: Only server admins can update server details", EC.PERMISSION_DENIED);
+    }
 
     const limitsGiven = LIMIT_FIELDS.filter((f) => body[f.key] !== undefined);
 
@@ -129,17 +147,41 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Check permission
-    if (!auth.isServerAdmin) {
-      return CustomResponse.error("Unauthorized: Only server admins can update server details", EC.PERMISSION_DENIED);
-    }
-
     // Null or empty clears the icon.
     if (icon_url !== undefined && icon_url !== null && icon_url !== "") {
       if (typeof icon_url !== "string" || !isIconPath(auth.serverId, icon_url)) {
         return CustomResponse.error(
           "icon_url must be the path of an icon uploaded to this server's folder of the servers bucket",
           EC.ICON_INVALID,
+        );
+      }
+    }
+
+    // A new LiveKit address comes with its own key pair, or not at all. The
+    // functions sign admin tokens for whatever this column names with the
+    // pair in `server_secrets`, and on a stack with several servers that pair
+    // is the bundled LiveKit's, shared by all of them: an address alone sent
+    // every other server's room keys to a host the admin chose.
+    if (livekit_url) {
+      if (!isLiveKitUrl(livekit_url)) {
+        return CustomResponse.error(
+          "livekit_url must be a ws:// or wss:// address",
+          EC.LIVEKIT_URL_INVALID,
+        );
+      }
+      const { data: current, error: currentError } = await supabase
+        .from(DBSchema.servers.tableName)
+        .select(DBSchema.servers.livekitUrl)
+        .eq(DBSchema.servers.id, auth.serverId)
+        .single();
+      if (currentError) {
+        return CustomResponse.error("Error reading server", EC.DB_ERROR, currentError);
+      }
+      const moved = (current as Record<string, any>)?.[DBSchema.servers.livekitUrl] !== livekit_url;
+      if (moved && !(livekit_api_key && livekit_secret_key)) {
+        return CustomResponse.error(
+          "A new livekit_url needs its own livekit_api_key and livekit_secret_key",
+          EC.LIVEKIT_URL_INVALID,
         );
       }
     }
@@ -161,6 +203,10 @@ Deno.serve(async (req) => {
     // Credentials live in server_secrets, so they are a separate write. This
     // endpoint exists for them: name and icon ride along rather than splitting
     // one settings dialog across two transports.
+    //
+    // Keys before the address, on purpose. If the second write fails, the old
+    // address with the new keys is a call that does not open; the new address
+    // with the old keys would be the old keys sent to the new host.
     const secretData: Record<string, unknown> = {};
     if (livekit_api_key) {
       secretData[DBSchema.serverSecrets.livekitApiKey] = livekit_api_key;

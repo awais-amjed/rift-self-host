@@ -162,3 +162,27 @@ export async function reconcileConnections(
   }));
   return updated;
 }
+
+/**
+ * The connections in [channelId]'s call of anybody who may no longer be
+ * there, by the question `get_channel_token` asks at the door
+ * (`channel_joinable_by`). A summoned bot is in the call without a seat, and
+ * stays. Unreadable is left alone: a database hiccup must not throw a whole
+ * call out.
+ */
+export async function connectionsOutside(
+  supabase: SupabaseClient,
+  channelId: string,
+  connections: ParticipantInfo[],
+): Promise<ParticipantInfo[]> {
+  const userIds = [...new Set(connections.map((p) => p.identity.split("~")[0]))];
+  const answers = await Promise.all(userIds.map(async (userId) => {
+    const { data: joinable, error } = await supabase.rpc("channel_joinable_by", {
+      p_channel: channelId,
+      p_user: userId,
+    });
+    return [userId, error ? true : joinable === true] as const;
+  }));
+  const outside = new Set(answers.filter(([, may]) => !may).map(([id]) => id));
+  return connections.filter((p) => outside.has(p.identity.split("~")[0]));
+}

@@ -98,7 +98,7 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success({ channel_id, livekit_error: roomError });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
@@ -117,8 +117,10 @@ async function deleteRoom(serverId: string, channelId: string): Promise<string |
     await roomService.deleteRoom(channelId);
     return null;
   } catch (err) {
-    // Includes "room does not exist", which is the normal case for a text
-    // channel or an empty voice one.
-    return String(err);
+    // "Room does not exist" is the normal case for a text channel or an
+    // empty voice one. Anything else is logged here, not sent.
+    if (/not found|does not exist/i.test(String(err))) return null;
+    console.error("[livekit]", err);
+    return "livekit_unreachable";
   }
 }

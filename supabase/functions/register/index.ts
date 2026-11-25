@@ -79,6 +79,19 @@ Deno.serve(async (req) => {
       );
     }
 
+    // The key a member joins with is the one they signed in with. Asked
+    // only beside a pass once, so a caller signed in as one key could take a
+    // membership naming another's — whoever held that key then found a row
+    // under their name that they never made, and signing in as themselves
+    // met "already registered".
+    const signedInAs = await web3Subject(authUid);
+    if (!signedInAs || !web3KeyMatches(signedInAs, public_key)) {
+      return CustomResponse.error(
+        "public_key is not the key this session signed in with",
+        EC.INVALID_PUBLIC_KEY,
+      );
+    }
+
     // Central's pass, for a link that needs a Rift account (see
     // `_shared/server_pass.ts`). Checked against the server the invite is
     // for and the identity signing in, and only its tag goes on: whether
@@ -98,11 +111,10 @@ Deno.serve(async (req) => {
           publicKey: public_key,
           publicUrl: Deno.env.get("SUPABASE_PUBLIC_URL") ?? "",
         });
-        // The key the pass names has to be the one this caller signed in
-        // with, not just the one they typed into the request: otherwise a
-        // pass seen anywhere could bring somebody else in under its tag.
-        const signedInAs = verified ? await web3Subject(authUid) : null;
-        if (!verified || !signedInAs || !web3KeyMatches(signedInAs, public_key)) {
+        // The pass names `public_key`, which is the key this caller signed
+        // in with (above): a pass seen anywhere cannot bring somebody else in
+        // under its tag.
+        if (!verified) {
           return CustomResponse.error(
             "Rift couldn't vouch for your account. Try joining again.",
             EC.PASS_INVALID,
@@ -194,7 +206,7 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success(context);
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 

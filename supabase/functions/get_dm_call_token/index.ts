@@ -12,6 +12,7 @@ import {
   livekitCredentials,
   nodeKeyPair,
   normaliseHost,
+  preferredNode,
 } from "../_shared/livekit.ts";
 
 const supabase = createClient(
@@ -99,7 +100,7 @@ Deno.serve(async (req) => {
       supabase.rpc("claim_dm_call_room", {
         p_call: call_id,
         p_user: auth.userId,
-        p_preferred: typeof preferred_node_id === "string" ? preferred_node_id : null,
+        p_preferred: preferredNode(preferred_node_id),
       }),
       supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "CONNECT" }),
       wantsShare
@@ -260,6 +261,6 @@ Deno.serve(async (req) => {
       max_share_mbps: Number(limits[DBSchema.servers.maxShareMbps] ?? 0),
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

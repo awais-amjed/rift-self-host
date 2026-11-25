@@ -137,6 +137,34 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Sealing a key is only honest from somebody who has it. A heal re-seals
+    // the version the sender unwrapped from their own entry, and a rotation is
+    // handed out (`channel_key_work`) only to a holder of the version before.
+    // Without this a member who never held a version could seal garbage to a
+    // newcomer first, and since an entry is never replaced, the newcomer never
+    // opens it. A bootstrap (version 1) has nothing before it.
+    const minting = mint === true ||
+      (mint !== false && key_version === currentVersion + 1);
+    const mustHold = minting ? key_version - 1 : key_version;
+    if (mustHold >= 1) {
+      const { data: held, error: heldError } = await supabase
+        .from(DBSchema.channelKeyring.tableName)
+        .select(DBSchema.channelKeyring.keyVersion)
+        .eq(DBSchema.channelKeyring.channelId, channel_id)
+        .eq(DBSchema.channelKeyring.keyVersion, mustHold)
+        .eq(DBSchema.channelKeyring.userId, auth.userId)
+        .limit(1);
+      if (heldError) {
+        return CustomResponse.error("Error reading keyring", EC.DB_ERROR, heldError);
+      }
+      if ((held ?? []).length === 0) {
+        return CustomResponse.error(
+          `You do not hold key_version ${mustHold} of this channel`,
+          EC.PERMISSION_DENIED,
+        );
+      }
+    }
+
     // Every target user must be a member of this server.
     const userIds = [...new Set(entries.map((e: Record<string, any>) => e.user_id as string))];
     const { data: usersData, error: usersError } = await supabase
@@ -259,6 +287,6 @@ Deno.serve(async (req) => {
       link_stored: linkStored,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

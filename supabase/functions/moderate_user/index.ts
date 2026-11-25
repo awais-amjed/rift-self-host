@@ -146,7 +146,7 @@ Deno.serve(async (req) => {
       livekit_error: applied.error,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
@@ -255,7 +255,9 @@ async function applyToLiveRooms(
     // because the first stops the next publish and the second stops the audio
     // already flowing. Reversed, a track muted first can be raised again by
     // the client before its permission is gone.
-    await Promise.all(
+    // Each connection on its own, too: one that left in the meantime must not
+    // stop a ban reaching the others.
+    const results = await Promise.allSettled(
       mine.map(async ({ room, participant, service }) => {
         if (isBanned) {
           await service.removeParticipant(room, participant.identity);
@@ -284,9 +286,15 @@ async function applyToLiveRooms(
         }
       }),
     );
+    const failed = results.filter((r) => r.status === "rejected");
+    for (const r of failed) console.error("[livekit]", (r as PromiseRejectedResult).reason);
 
-    return { updated: mine.length, error: null };
+    return {
+      updated: mine.length - failed.length,
+      error: failed.length > 0 ? "livekit_unreachable" : null,
+    };
   } catch (err) {
-    return { updated: 0, error: String(err) };
+    console.error("[livekit]", err);
+    return { updated: 0, error: "livekit_unreachable" };
   }
 }

@@ -31,7 +31,7 @@ const BATCH = 1000;
  *
  * Any member may call it, the way any member may call `sweep_channel_keys`:
  * it removes only unreferenced objects, so the worst a caller can do is
- * maintenance. Clients run it on server-ready.
+ * maintenance — and only once a minute. Clients run it on server-ready.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -42,6 +42,17 @@ Deno.serve(async (req) => {
     const token = extractBearerToken(req);
     const auth = await authenticateToken(supabase, token);
     if (isAuthError(auth)) return auth;
+
+    // A minute apart, whoever asks (`claim_attachment_sweep`): every app
+    // calls this as it opens a server, and each run is a pass over the whole
+    // database. Too soon is not a failure, just nothing to do yet.
+    const { data: due, error: dueError } = await supabase.rpc("claim_attachment_sweep");
+    if (dueError) {
+      return CustomResponse.error("Error running the sweep", EC.DB_ERROR, dueError);
+    }
+    if (due !== true) {
+      return CustomResponse.success({ swept: 0, more: false });
+    }
 
     const { data, error } = await supabase.rpc("sweep_attachments", { p_limit: BATCH });
     if (error) {

@@ -8,6 +8,7 @@ import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
 import {
   livekitRoomServices,
+  manageableRooms,
   roomParticipantsAcross,
   voiceUserId,
 } from "../_shared/livekit.ts";
@@ -69,6 +70,25 @@ Deno.serve(async (req) => {
     // written down — so the check is here.
     if (!auth.isServerAdmin && !auth.isChannelManager) {
       return CustomResponse.error("Not allowed to move members", EC.PERMISSION_DENIED);
+    }
+
+    // Never an administrator, as for a kick (`kick_user`): moving the owner
+    // out of a call is the same power over them. And only somebody of this
+    // server.
+    const { data: targetData, error: targetError } = await supabase
+      .from(DBSchema.users.tableName)
+      .select(`${DBSchema.users.id}, ${DBSchema.users.isServerAdmin}`)
+      .eq(DBSchema.users.id, target_user_id)
+      .eq(DBSchema.users.serverId, auth.serverId)
+      .maybeSingle();
+    if (targetError || !targetData) {
+      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND, targetError);
+    }
+    if (
+      target_user_id !== auth.userId &&
+      (targetData as Record<string, any>)[DBSchema.users.isServerAdmin] === true
+    ) {
+      return CustomResponse.error("Admins cannot be moved", EC.PERMISSION_DENIED);
     }
 
     // The destination has to be a voice channel *on this server*: the caller
@@ -138,18 +158,29 @@ Deno.serve(async (req) => {
       }),
     );
 
-    const found = (await roomParticipantsAcross(services, rooms))
+    const everywhere = (await roomParticipantsAcross(services, rooms))
       .map(({ room, participants, service }) => ({
         room,
         service,
         identities: voiceConnectionsOf(participants, target_user_id),
       }))
       .filter(({ identities }) => identities.length > 0);
+    // Out of a call the caller manages, into one they manage: a private call
+    // they are not in is not theirs to empty, or to learn the target is in.
+    const mine = await manageableRooms(
+      supabase,
+      [...everywhere.map(({ room }) => room), channel_id],
+      auth.userId,
+    );
+    if (!mine.has(channel_id)) {
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    }
+    const found = everywhere.filter(({ room }) => mine.has(room));
 
     foundAnywhere = found.length > 0;
     // Already where they're being sent — nothing to say to them.
     const toMove = found.filter(({ room }) => room !== channel_id);
-    await Promise.all(
+    const results = await Promise.allSettled(
       toMove.map(({ room, identities, service }) =>
         service.sendData(room, payload, DataPacket_Kind.RELIABLE, {
           destinationIdentities: identities,
@@ -157,6 +188,9 @@ Deno.serve(async (req) => {
         })
       ),
     );
+    for (const r of results) {
+      if (r.status === "rejected") console.error("[move_user] send", r.reason);
+    }
     moved = toMove.reduce((n, { identities }) => n + identities.length, 0);
 
     if (!foundAnywhere) {
@@ -168,7 +202,7 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success({ channel_id, connections_moved: moved });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 

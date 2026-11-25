@@ -186,6 +186,6 @@ Deno.serve(async (req) => {
       my_voice_key: myVoiceKey,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

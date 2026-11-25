@@ -10,8 +10,7 @@ import { livekitCredentials, nodeKeyPair, normaliseHost } from "../_shared/livek
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
-  (Deno.env.get("RIFT_SECRET_KEY") ??
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"))!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
 // Same channel as a move between channels: the client already listens there,
@@ -252,6 +251,6 @@ Deno.serve(async (req) => {
       region: to.label,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

@@ -86,7 +86,7 @@ Deno.serve(async (req) => {
       livekit_error: applied.error,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
@@ -122,6 +122,7 @@ async function applyToLiveCall(
     const updated = await reconcileConnections(supabase, service, channelId, connections);
     return { updated, error: null };
   } catch (err) {
-    return { updated: 0, error: String(err) };
+    console.error("[livekit]", err);
+    return { updated: 0, error: "livekit_unreachable" };
   }
 }

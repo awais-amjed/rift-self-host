@@ -30,7 +30,7 @@ export async function fetchServerContext(
 
   if (serverError || !serverData) {
     return CustomResponse.error(
-      `Server not found (fetchServerContext, serverId="${opts.serverId}"): ${JSON.stringify(serverError)}`,
+      "Server not found",
       EC.SERVER_NOT_FOUND,
       serverError,
     );

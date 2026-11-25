@@ -223,6 +223,13 @@ export async function nodeKeyPair(
   return (await nodeKeyPairs(supabase, [node.id])).get(node.id) ?? null;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A region id a client sent, or null when it is not one: a bad cast fails a whole claim. */
+export function preferredNode(value: unknown): string | null {
+  return typeof value === "string" && UUID.test(value) ? value : null;
+}
+
 /**
  * Where this channel's call is, creating that answer if there is not one yet.
  *
@@ -241,11 +248,19 @@ export async function claimVoiceNode(
   preferredNodeId: string | null,
   ignorePin = false,
 ): Promise<LiveKitNode | null> {
-  const { data } = await supabase.rpc("claim_voice_node", {
+  // Anything but a uuid is dropped here rather than handed on: the database
+  // fails the whole claim on a bad cast, and a caller that read that failure
+  // as "no node" opened the call on the default node with nothing claimed,
+  // so the next person in could open the same call somewhere else.
+  const preferred = preferredNode(preferredNodeId);
+  const { data, error } = await supabase.rpc("claim_voice_node", {
     p_channel: channelId,
-    p_preferred: preferredNodeId,
+    p_preferred: preferred,
     p_ignore_pin: ignorePin,
   });
+  // Thrown, never answered as null: null means "this server has no node
+  // list", and a claim that failed is not that.
+  if (error) throw new Error(`claim_voice_node failed: ${error.message}`);
   const row = Array.isArray(data) ? data[0] : data;
   if (!row?.id || !row?.url) return null;
   return {
@@ -342,7 +357,8 @@ export async function livekitRoomServices(
  * Who is in each of [rooms], asked of every node.
  *
  * The same answer shape as [roomParticipants], merged: a room lives on one
- * node, so at most one of them answers with anybody in it. Which node that
+ * node, so usually one of them answers with anybody in it, and a room split
+ * across two comes back once for each. Which node that
  * was comes back too, because the caller usually wants to act on the room
  * next and needs to know where to send the instruction.
  */
@@ -350,23 +366,29 @@ export async function roomParticipantsAcross(
   services: { node: LiveKitNode; service: RoomServiceClient }[],
   rooms: { name: string }[],
 ): Promise<(RoomRoster & { node: LiveKitNode; service: RoomServiceClient })[]> {
+  // Callers list rooms from every node, so a room on two comes in twice.
+  const names = [...new Set(rooms.map((r) => r.name))].map((name) => ({ name }));
   const perNode = await Promise.all(
     services.map(async ({ node, service }) => {
-      const rosters = await roomParticipants(service, rooms);
+      const rosters = await roomParticipants(service, names);
       return rosters.map((r) => ({ ...r, node, service }));
     }),
   );
 
-  // One row per room: the node that has people in it, or the first node's
-  // empty answer so that every room is still represented.
-  const byRoom = new Map<string, RoomRoster & { node: LiveKitNode; service: RoomServiceClient }>();
+  // Every node that has people in a room, and the first node's empty answer
+  // for a room nobody is in, so that every room is still represented.
+  //
+  // Every node, not the first: a room is meant to live on one, but a call
+  // that has split across two (a claim lost, an old token for another node)
+  // has people on both, and a kick or a ban that acted on the first left
+  // the second half of the call untouched.
+  const occupied = perNode.flat().filter((r) => r.participants.length > 0);
+  const seen = new Set(occupied.map((r) => r.room));
+  const empty = new Map<string, RoomRoster & { node: LiveKitNode; service: RoomServiceClient }>();
   for (const roster of perNode.flat()) {
-    const held = byRoom.get(roster.room);
-    if (!held || (held.participants.length === 0 && roster.participants.length > 0)) {
-      byRoom.set(roster.room, roster);
-    }
+    if (!seen.has(roster.room) && !empty.has(roster.room)) empty.set(roster.room, roster);
   }
-  return [...byRoom.values()];
+  return [...occupied, ...empty.values()];
 }
 
 /**
@@ -433,4 +455,28 @@ export async function callNodeOf(
   if (!pair) return null;
 
   return { url, pair };
+}
+
+/**
+ * Which of [rooms] (channel ids) [userId] manages, by `channel_manageable_by`.
+ *
+ * For a kick or a move, which search every call on the server to find the
+ * target. The server-wide permission says who may do either at all; this says
+ * where. Without it a channel manager reached into a private call they are not
+ * in, and learned from the answer whether the target was there.
+ */
+export async function manageableRooms(
+  supabase: SupabaseClient,
+  rooms: string[],
+  userId: string,
+): Promise<Set<string>> {
+  const unique = [...new Set(rooms)];
+  const answers = await Promise.all(unique.map(async (room) => {
+    const { data, error } = await supabase.rpc("channel_manageable_by", {
+      p_channel: room,
+      p_user: userId,
+    });
+    return !error && data === true ? room : null;
+  }));
+  return new Set(answers.filter((room): room is string => room !== null));
 }

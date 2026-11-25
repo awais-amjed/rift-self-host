@@ -5,7 +5,8 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
+import { livekitRoomServiceForChannel, livekitRoomServices } from "../_shared/livekit.ts";
+import { connectionsOutside } from "../_shared/call_rights.ts";
 
 /**
  * Change who is in a private channel, or leave one, and take whoever is no
@@ -52,6 +53,14 @@ Deno.serve(async (req) => {
     if (isAuthError(auth)) return auth;
 
     const leaving = leave === true;
+    // One or the other: with both, leaving quietly won and the change asked
+    // for beside it never happened.
+    if (leaving && (add !== undefined || remove !== undefined)) {
+      return CustomResponse.error(
+        "Send leave on its own, or add and remove without it",
+        EC.MISSING_FIELDS,
+      );
+    }
     if (
       !channel_id ||
       (!leaving && (!isIdList(add ?? []) || !isIdList(remove ?? [])))
@@ -95,7 +104,7 @@ Deno.serve(async (req) => {
       livekit_error: applied.error,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
@@ -117,48 +126,47 @@ async function applyToLiveCall(
       .select(`${DBSchema.channels.channelType}, ${DBSchema.channels.serverId}`)
       .eq(DBSchema.channels.id, channelId)
       .maybeSingle();
-    if (channelError) return { removed: 0, error: String(channelError.message) };
+    if (channelError) {
+      console.error("[change_channel_members]", channelError);
+      return { removed: 0, error: "db_error" };
+    }
     const row = channel as Record<string, any> | null;
     if (row && row[DBSchema.channels.serverId] !== serverId) return { removed: 0, error: null };
     if (row && row[DBSchema.channels.channelType] !== "voice") return { removed: 0, error: null };
 
-    const service = await livekitRoomServiceForChannel(supabase, serverId, channelId);
-    if (!service) return { removed: 0, error: "credentials_missing" };
-
     // The last seat took the channel with it: nobody may be in its call.
+    // Asked of every node: the row that said where the call was went with
+    // the channel, so the one node it would name now is the default, and a
+    // call held in another region would have gone on.
     if (!row) {
-      try {
-        await service.deleteRoom(channelId);
-      } catch {
-        // No room is the usual answer: nobody was in a call there.
-      }
+      const services = await livekitRoomServices(supabase, serverId);
+      if (services.length === 0) return { removed: 0, error: "credentials_missing" };
+      // No room is the usual answer on each: nobody was in a call there.
+      await Promise.allSettled(services.map(({ service }) => service.deleteRoom(channelId)));
       return { removed: 0, error: null };
     }
+
+    const service = await livekitRoomServiceForChannel(supabase, serverId, channelId);
+    if (!service) return { removed: 0, error: "credentials_missing" };
 
     const rooms = await service.listRooms([channelId]);
     if (rooms.length === 0) return { removed: 0, error: null };
     const connections = await service.listParticipants(channelId);
 
-    const userIds = [...new Set(connections.map((p) => p.identity.split("~")[0]))];
-    const answers = await Promise.all(userIds.map(async (userId) => {
-      // The question `get_channel_token` asks at the door: a summoned bot is
-      // in the call without a seat, and stays.
-      const { data: joinable, error } = await supabase.rpc("channel_joinable_by", {
-        p_channel: channelId,
-        p_user: userId,
-      });
-      // Unreadable is left alone: a hiccup here must not throw the whole
-      // call out, and the seat itself already changed.
-      return [userId, error ? true : joinable === true] as const;
-    }));
-    const outside = new Set(answers.filter(([, sees]) => !sees).map(([id]) => id));
-
-    const toRemove = connections.filter((p) => outside.has(p.identity.split("~")[0]));
-    await Promise.all(
+    const toRemove = await connectionsOutside(supabase, channelId, connections);
+    // Each on its own: one connection that left in the meantime must not
+    // keep the rest in the call.
+    const results = await Promise.allSettled(
       toRemove.map((p) => service.removeParticipant(channelId, p.identity)),
     );
-    return { removed: toRemove.length, error: null };
+    const failed = results.filter((r) => r.status === "rejected");
+    for (const r of failed) console.error("[livekit]", (r as PromiseRejectedResult).reason);
+    return {
+      removed: toRemove.length - failed.length,
+      error: failed.length > 0 ? "livekit_unreachable" : null,
+    };
   } catch (err) {
-    return { removed: 0, error: String(err) };
+    console.error("[livekit]", err);
+    return { removed: 0, error: "livekit_unreachable" };
   }
 }

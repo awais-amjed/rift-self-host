@@ -301,9 +301,14 @@ Deno.serve(async (req) => {
     // back to automatic below.
     const { data: channelRow } = await supabase
       .from(DBSchema.channels.tableName)
-      .select(DBSchema.channels.livekitNodeId)
+      .select(`${DBSchema.channels.livekitNodeId}, ${DBSchema.channels.channelType}`)
       .eq(DBSchema.channels.id, channel_id)
       .maybeSingle();
+    // A call is only ever in a voice channel. Without this a text channel's id
+    // made a room too, which nothing lists and nothing moderates.
+    if ((channelRow as Record<string, any> | null)?.[DBSchema.channels.channelType] !== "voice") {
+      return CustomResponse.error("Not a voice channel", EC.CHANNEL_NOT_FOUND);
+    }
     const pinnedNodeId =
       (channelRow as Record<string, any> | null)?.[
         DBSchema.channels.livekitNodeId
@@ -319,7 +324,16 @@ Deno.serve(async (req) => {
     // up yet. A client that names somebody else's node, or a stale one, is
     // answered with the default rather than refused — being sent to a working
     // node is better than being told no.
-    let node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
+    let node: Awaited<ReturnType<typeof claimVoiceNode>>;
+    try {
+      node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
+    } catch (err) {
+      return CustomResponse.error(
+        "Could not decide where this call is held",
+        EC.VOICE_SERVER_UNREACHABLE,
+        err,
+      );
+    }
     let nodeUrl = node?.url ?? credentials.url;
     let nodeHost = node ? normaliseHost(node.url) : credentials.host;
 
@@ -401,7 +415,8 @@ Deno.serve(async (req) => {
       // well, so it is still the one the client measured as best. Without a
       // preference the claim falls through to the default node, which is the
       // honest meaning of "put this call up somewhere that works".
-      const fallback = await claimVoiceNode(supabase, channel_id, null, true);
+      const fallback = await claimVoiceNode(supabase, channel_id, null, true)
+        .catch(() => null);
       // Against the region that just failed, not against the pin. They are
       // the same here, and naming the failure is what stays true if this ever
       // runs for a region that was not pinned.
@@ -496,11 +511,13 @@ Deno.serve(async (req) => {
       // worst case is somebody hiding their own "muted by a moderator" badge
       // from other people's rosters.
       canUpdateOwnMetadata: true,
-      // A bot is never a room admin. `isChannelManager` is a cached boolean a
-      // bot could hold if somebody handed it a moderator role, and roomAdmin is
-      // the power to mute and remove people in a call — a thing a bot should be
-      // given deliberately if ever, not as a side effect of a text permission.
-      roomAdmin: auth.isChannelManager && !isBot,
+      // Nobody is a room admin. RoomService admin is the power to mute and
+      // remove anybody in the call, admins and the owner included, to lift a
+      // server mute or deafen from yourself, and to send packets as anybody —
+      // and a token keeps it for its whole life, past a demotion or a ban.
+      // The app never uses it: every moderation act goes through an edge
+      // function, which asks the database first.
+      roomAdmin: false,
     });
 
     const livekitToken = await at.toJwt();
@@ -530,6 +547,6 @@ Deno.serve(async (req) => {
       max_share_mbps: maxShareMbps,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

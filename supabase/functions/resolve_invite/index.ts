@@ -65,11 +65,13 @@ Deno.serve(async (req) => {
     // Spent invites are refused here rather than by `register`, which is the
     // only other thing that counts them. Both answers are correct; this one
     // arrives before somebody has picked a username and generated a keypair
-    // for a server they were never going to be let into. `max_uses` of 0 is
-    // unlimited, as everywhere else.
+    // for a server they were never going to be let into. Counted as
+    // `register_user` counts them, which is the answer that holds: null is
+    // unlimited, and 0 is spent. Read as unlimited here, an invite of 0
+    // promised a join the database then refused.
     const maxUses = invite[DBSchema.invites.maxUses] as number | null;
     const uses = (invite[DBSchema.invites.uses] as number | null) ?? 0;
-    if (maxUses !== null && maxUses > 0 && uses >= maxUses) {
+    if (maxUses !== null && uses >= maxUses) {
       return CustomResponse.error(
         "Invite code has reached its maximum uses",
         EC.INVITE_EXHAUSTED,
@@ -100,6 +102,6 @@ Deno.serve(async (req) => {
       public_url: Deno.env.get("SUPABASE_PUBLIC_URL") || null,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });

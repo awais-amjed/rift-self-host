@@ -6,7 +6,11 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomServices, roomParticipantsAcross } from "../_shared/livekit.ts";
+import {
+  livekitRoomServices,
+  manageableRooms,
+  roomParticipantsAcross,
+} from "../_shared/livekit.ts";
 
 /**
  * Disconnect a member from the voice channel they are in.
@@ -115,12 +119,22 @@ Deno.serve(async (req) => {
     // The service comes back with each roster so the removal is sent to the
     // node that actually has them.
     const rosters = await roomParticipantsAcross(services, rooms);
-    const toRemove = rosters.flatMap(({ room, participants, service }) =>
+    const found = rosters.flatMap(({ room, participants, service }) =>
       connectionsOf(participants, target_user_id).map((identity) => ({ room, identity, service }))
     );
-    await Promise.all(
+    // Only from a call the caller manages. A call they do not answers as if
+    // the target were not in voice at all, since a private one is not theirs
+    // to know about.
+    const mine = await manageableRooms(supabase, found.map(({ room }) => room), auth.userId);
+    const toRemove = found.filter(({ room }) => mine.has(room));
+    // Each on its own: one connection that has already gone must not stop
+    // the rest being removed.
+    const results = await Promise.allSettled(
       toRemove.map(({ room, identity, service }) => service.removeParticipant(room, identity)),
     );
+    for (const r of results) {
+      if (r.status === "rejected") console.error("[kick_user] remove", r.reason);
+    }
     const removed = toRemove.length;
 
     if (removed === 0) {
@@ -129,7 +143,7 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success({ connections_removed: removed });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 

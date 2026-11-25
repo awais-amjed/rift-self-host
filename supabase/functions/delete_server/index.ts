@@ -67,34 +67,55 @@ Deno.serve(async (req) => {
     }
 
     const errors: Record<string, string> = {};
-    const roomError = await deleteRooms(auth.serverId, leftovers.voiceChannelIds);
+    const roomError = await deleteRooms(leftovers.services, leftovers.voiceChannelIds);
     if (roomError) errors.livekit = roomError;
     const storageError = await deleteStorage(auth.serverId, leftovers.avatarPaths);
     if (storageError) errors.storage = storageError;
 
     return CustomResponse.success({ server_id: auth.serverId, errors });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
-/** What the cascade will not clean up, read while the rows still exist. */
+/**
+ * What the cascade will not clean up, read while the rows still exist.
+ *
+ * The LiveKit admin clients too: they are built from `server_secrets` and the
+ * nodes' keys, which the cascade deletes. Read afterwards, there were none,
+ * so no room was ever deleted and every call on the server went on.
+ */
 async function collectLeftovers(serverId: string) {
   const { data: channels } = await supabase
     .from(DBSchema.channels.tableName)
     .select(DBSchema.channels.id)
     .eq(DBSchema.channels.serverId, serverId)
     .eq(DBSchema.channels.channelType, "voice");
-  const { data: users } = await supabase
-    .from(DBSchema.users.tableName)
-    .select(DBSchema.users.avatarPath)
-    .eq(DBSchema.users.serverId, serverId)
-    .not(DBSchema.users.avatarPath, "is", null);
+  // Paged: a read stops at the API's row cap, and every avatar past it would
+  // stay in storage for good.
+  const avatarPaths: string[] = [];
+  for (let from = 0;; from += AVATAR_PAGE) {
+    const { data: users, error } = await supabase
+      .from(DBSchema.users.tableName)
+      .select(DBSchema.users.avatarPath)
+      .eq(DBSchema.users.serverId, serverId)
+      .not(DBSchema.users.avatarPath, "is", null)
+      .order(DBSchema.users.id)
+      .range(from, from + AVATAR_PAGE - 1);
+    if (error || !users) break;
+    avatarPaths.push(
+      ...users.map((u: Record<string, any>) => u[DBSchema.users.avatarPath] as string),
+    );
+    if (users.length < AVATAR_PAGE) break;
+  }
   return {
     voiceChannelIds: (channels ?? []).map((c: Record<string, any>) => c[DBSchema.channels.id] as string),
-    avatarPaths: (users ?? []).map((u: Record<string, any>) => u[DBSchema.users.avatarPath] as string),
+    avatarPaths,
+    services: await livekitRoomServices(supabase, serverId),
   };
 }
+
+const AVATAR_PAGE = 1000;
 
 /**
  * Drops every voice channel's room, disconnecting whoever is in it.
@@ -102,12 +123,14 @@ async function collectLeftovers(serverId: string) {
  * Never throws. A channel with no call has no room, and LiveKit says so with
  * an error that is not worth reporting; anything else is.
  */
-async function deleteRooms(serverId: string, channelIds: string[]): Promise<string | null> {
+async function deleteRooms(
+  services: Awaited<ReturnType<typeof livekitRoomServices>>,
+  channelIds: string[],
+): Promise<string | null> {
   if (channelIds.length === 0) return null;
   try {
     // Every node, because the server's calls may be spread across them and a
     // deleted server must not leave one running anywhere.
-    const services = await livekitRoomServices(supabase, serverId);
     if (services.length === 0) return "credentials_missing";
     // Ask which rooms exist before deleting any. Rooms are named by channel
     // id and most channels are text, so deleting by id blind meant a round
@@ -131,13 +154,16 @@ async function deleteRooms(serverId: string, channelIds: string[]): Promise<stri
           return null;
         } catch (err) {
           // A call that emptied between the listing and here is already gone.
-          return String(err).includes("not found") ? null : `${room.name}: ${err}`;
+          if (String(err).includes("not found")) return null;
+          console.error("[delete_server] room", room.name, err);
+          return room.name;
         }
       }),
     )).filter((f): f is string => f !== null);
-    return failures.length === 0 ? null : failures.join("; ");
+    return failures.length === 0 ? null : `livekit_unreachable: ${failures.join(", ")}`;
   } catch (err) {
-    return String(err);
+    console.error("[delete_server] rooms", err);
+    return "livekit_unreachable";
   }
 }
 

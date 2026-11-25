@@ -127,7 +127,11 @@ Deno.serve(async (req) => {
       .limit(1)
       .maybeSingle();
 
+    // A server nobody can join is a server nobody can delete either: only its
+    // owner may, and the owner is whoever redeems this invite. So a failure
+    // from here on takes the server with it, as the ones above do.
     if (roleError || !topRole) {
+      await supabase.from(DBSchema.servers.tableName).delete().eq(DBSchema.servers.id, server_id);
       return CustomResponse.error("Error reading server roles", EC.DB_ERROR, roleError);
     }
 
@@ -142,6 +146,7 @@ Deno.serve(async (req) => {
       });
 
     if (inviteError) {
+      await supabase.from(DBSchema.servers.tableName).delete().eq(DBSchema.servers.id, server_id);
       return CustomResponse.error("Error creating admin invite", EC.DB_ERROR, inviteError);
     }
 

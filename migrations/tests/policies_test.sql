@@ -507,24 +507,30 @@ END $$;
 
 DO $$
 BEGIN
-  -- Wrapping *for* someone else is the normal case; claiming someone else did
-  -- the wrapping is not.
+  -- Since 043 a member writes no keyring row directly, honest or not: every
+  -- write is `post_channel_keys`, which holds the rules about versions. A
+  -- member who could insert could mint version 2147483647 and stop the key
+  -- ever rotating again.
   BEGIN
     INSERT INTO channel_keyring (channel_id, key_version, user_id, wrapped_by,
                                  ephemeral_public_key, ciphertext, nonce)
     VALUES ('aaaa1111-0000-4000-8000-000000000001', 1,
             '11111111-aaaa-4aaa-8aaa-000000000001',
-            '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
-    RAISE EXCEPTION 'FAIL: a member forged wrapped_by';
+            '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+    RAISE EXCEPTION 'FAIL: a member wrote a keyring row directly';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
+  -- The same row as the function writes it, for what follows.
+  RESET ROLE;
   INSERT INTO channel_keyring (channel_id, key_version, user_id, wrapped_by,
                                ephemeral_public_key, ciphertext, nonce)
   VALUES ('aaaa1111-0000-4000-8000-000000000001', 1,
           '11111111-aaaa-4aaa-8aaa-000000000001',
           '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
-  RAISE NOTICE 'ok  keyring entries record who really wrapped them';
+
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  the keyring is written only through its function';
 END $$;
 
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -2297,13 +2303,16 @@ BEGIN
 END $$;
 
 -- A key, so there is something for the rotation marker to point past later.
+-- Written as `post_channel_keys` writes it, on the service role (043).
 DO $$
 BEGIN
+  RESET ROLE;
   INSERT INTO channel_keyring
     (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
   VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 1,
           '11111111-aaaa-4aaa-8aaa-000000000002',
           '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
+  EXECUTE 'SET LOCAL ROLE authenticated';
 
   INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
   VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 'secret-from-bob', 'n', 's', 1);
@@ -2372,16 +2381,18 @@ END $$;
 -- key *is* read access and no later policy edit can take one back.
 DO $$
 BEGIN
+  RESET ROLE;  -- the only role that writes it since 043
   BEGIN
     INSERT INTO channel_keyring
       (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
     VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 1,
             '11111111-aaaa-4aaa-8aaa-000000000001',
-            '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
+            '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
     RAISE EXCEPTION 'FAIL: a key was wrapped for somebody outside the room';
-  EXCEPTION WHEN insufficient_privilege OR raise_exception THEN
-    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_a_channel_member' THEN RAISE; END IF;
   END;
+  EXECUTE 'SET LOCAL ROLE authenticated';
   RAISE NOTICE 'ok  a key cannot be wrapped for a non-member';
 END $$;
 
@@ -2494,12 +2505,15 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a role grant did not reach the people holding it';
   END IF;
   -- ...and now the keyring will take her, which is the whole difference
-  -- between being allowed in and being able to read.
+  -- between being allowed in and being able to read. Written as the function
+  -- writes it (043).
+  RESET ROLE;
   INSERT INTO channel_keyring
     (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
   VALUES ('aaaa1111-0000-4000-8000-00000000ffff', 1,
           '11111111-aaaa-4aaa-8aaa-000000000001',
           '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
+  EXECUTE 'SET LOCAL ROLE authenticated';
   RAISE NOTICE 'ok  access by role reaches the keyring, not just the policy';
 END $$;
 
@@ -11904,6 +11918,75 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a public channel took a member list: %', v_result;
   END IF;
   RAISE NOTICE 'ok  members are added and removed by name, nobody else touched (042)';
+END $$;
+RESET ROLE;
+
+-- ============================================================
+-- 043: calls keep their region, and the sweep is spaced
+-- ============================================================
+
+DO $$
+DECLARE
+  -- Eta, from the 033 tests above: Ada and Ben.
+  v_server  UUID := 'a0330000-0000-4000-8000-000000000001';
+  v_channel UUID := 'aaaa1111-0000-4000-8000-0000000004a3';
+  v_owner   UUID := 'a0332222-0000-4000-8000-000000000001';
+  v_other   UUID := 'a0332222-0000-4000-8000-000000000002';
+  v_far     UUID;
+  v_def     UUID;
+  v_call    UUID;
+  v_got     JSONB;
+BEGIN
+  INSERT INTO channels (id, server_id, name, channel_type)
+  VALUES (v_channel, v_server, 'calls-043', 'voice');
+  INSERT INTO livekit_nodes (server_id, label, url)
+  VALUES (v_server, 'Frankfurt 043', 'ws://fra043:7880') RETURNING id INTO v_far;
+  INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
+  VALUES (v_far, 'APIfra', 'secret-fra');
+  SELECT id INTO v_def FROM livekit_nodes WHERE server_id = v_server AND is_default;
+
+  -- A row claimed a moment ago is kept: its room may not exist yet.
+  DELETE FROM voice_rooms WHERE channel_id = v_channel;
+  INSERT INTO voice_rooms (channel_id, node_id, opened_at) VALUES (v_channel, v_far, now());
+  PERFORM release_idle_voice_node(ARRAY[v_channel]);
+  IF NOT EXISTS (SELECT 1 FROM voice_rooms WHERE channel_id = v_channel) THEN
+    RAISE EXCEPTION 'FAIL: a call claimed a moment ago was let go';
+  END IF;
+  UPDATE voice_rooms SET opened_at = now() - interval '1 minute' WHERE channel_id = v_channel;
+  PERFORM release_idle_voice_node(ARRAY[v_channel]);
+  IF EXISTS (SELECT 1 FROM voice_rooms WHERE channel_id = v_channel) THEN
+    RAISE EXCEPTION 'FAIL: an ended call kept its region';
+  END IF;
+  RAISE NOTICE 'ok  the roster lets a call''s region go only once it is not new (043)';
+
+  -- An answered DM call stays where it is when asked to move home.
+  INSERT INTO dm_calls (caller_id, callee_id, answered_at, node_id)
+  VALUES (v_owner, v_other, now(), v_far) RETURNING id INTO v_call;
+  v_got := claim_dm_call_room(v_call, v_owner, NULL, true);
+  IF (v_got->'node'->>'id')::UUID IS DISTINCT FROM v_far THEN
+    RAISE EXCEPTION 'FAIL: an answered call was moved: %', v_got;
+  END IF;
+  -- One nobody has answered yet still goes home.
+  UPDATE dm_calls SET answered_at = NULL WHERE id = v_call;
+  v_got := claim_dm_call_room(v_call, v_owner, NULL, true);
+  IF (v_got->'node'->>'id')::UUID IS DISTINCT FROM v_def THEN
+    RAISE EXCEPTION 'FAIL: an unanswered call did not go home: %', v_got;
+  END IF;
+  RAISE NOTICE 'ok  a DM call is moved home only before it is answered (043)';
+
+  -- Once a minute, whoever asks.
+  DELETE FROM app.attachment_sweep_runs;
+  IF claim_attachment_sweep() IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: the first sweep was refused';
+  END IF;
+  IF claim_attachment_sweep() IS NOT FALSE THEN
+    RAISE EXCEPTION 'FAIL: a second sweep in the same minute ran';
+  END IF;
+  UPDATE app.attachment_sweep_runs SET last_at = now() - interval '2 minutes';
+  IF claim_attachment_sweep() IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: a sweep a minute later was refused';
+  END IF;
+  RAISE NOTICE 'ok  the attachment sweep runs at most once a minute (043)';
 END $$;
 RESET ROLE;
 

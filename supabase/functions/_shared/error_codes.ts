@@ -68,6 +68,7 @@ export const PERMISSION_DENIED = "permission_denied";
 export const LIMIT_INVALID = "limit_invalid"; // a limit is negative, or the size cap is out of range
 export const VOICE_CHANNEL_FULL = "voice_channel_full"; // max_voice_participants reached
 export const SERVER_FULL = "server_full"; // max_members reached (029)
+export const LIVEKIT_URL_INVALID = "livekit_url_invalid"; // not a ws:// or wss:// address, or a new one without its own key pair
 export const ICON_INVALID = "icon_invalid"; // icon_url is not a path in the server's own icon folder (021)
 
 // ── Generic ───────────────────────────────────────────────────────────────────

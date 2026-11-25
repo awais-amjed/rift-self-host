@@ -4,8 +4,9 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import { livekitRoomServiceForChannel } from "../_shared/livekit.ts";
-import { permissionSources } from "../_shared/moderation.ts";
+import DBSchema from "../_shared/schema.ts";
+import { connectionKind, livekitRoomServiceForChannel } from "../_shared/livekit.ts";
+import { livePermissionsFor } from "../_shared/moderation.ts";
 import { channelRights, NO_CALL_RIGHTS } from "../_shared/call_rights.ts";
 
 /**
@@ -100,7 +101,7 @@ Deno.serve(async (req) => {
       livekit_error: applied.error,
     });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
 });
 
@@ -112,9 +113,10 @@ Deno.serve(async (req) => {
  * separately must not be disconnected because this one was revoked.
  *
  * `updateParticipant` replaces the whole permission set atomically, so every
- * field has to be stated — omitting one clears it. A bot is never deafened or
- * muted by the moderation flags (nothing offers that for a bot), so the only
- * moving part is `canSubscribe`.
+ * field has to be stated — omitting one clears it. So the set is the one
+ * `moderate_user` pushes (`livePermissionsFor`), per connection kind: a bot
+ * a moderator muted or deafened stays so, and its share connection, if it
+ * has one, stays a share connection that never listens.
  */
 async function applyToLiveRoom(
   serverId: string,
@@ -138,22 +140,29 @@ async function applyToLiveRoom(
     // its microphone held back here too; every source would hand it back.
     // Its soundboard as the channel has it, as minted (`_shared/call_rights.ts`).
     const rights = (await channelRights(supabase, botId, channelId)) ?? NO_CALL_RIGHTS;
+    const { data: flags } = await supabase
+      .from(DBSchema.users.tableName)
+      .select(`${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}`)
+      .eq(DBSchema.users.id, botId)
+      .maybeSingle();
+    const isMuted = (flags as Record<string, any> | null)?.[DBSchema.users.isMuted] === true;
+    const isDeafened = (flags as Record<string, any> | null)?.[DBSchema.users.isDeafened] === true;
 
     for (const participant of mine) {
       await roomService.updateParticipant(channelId, participant.identity, {
-        permission: {
-          canSubscribe: listen,
-          canPublish: true,
-          canPublishData: rights.soundboard,
-          // Empty list means every source, the opposite encoding to an
-          // AccessToken grant's `undefined` — see `_shared/moderation.ts`.
-          canPublishSources: permissionSources(!rights.speak, false),
-        },
+        permission: livePermissionsFor(
+          connectionKind(participant.identity),
+          isMuted || !rights.speak,
+          isDeafened,
+          listen,
+          rights.soundboard,
+        ),
       });
     }
 
     return { updated: mine.length, error: null };
   } catch (err) {
-    return { updated: 0, error: String(err) };
+    console.error("[livekit]", err);
+    return { updated: 0, error: "livekit_unreachable" };
   }
 }

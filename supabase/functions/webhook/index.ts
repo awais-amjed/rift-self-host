@@ -143,6 +143,6 @@ Deno.serve(async (req) => {
 
     return CustomResponse.success({ message_id: row.message_id });
   } catch (err) {
-    return CustomResponse.error(`Unexpected error: ${err}`, EC.UNEXPECTED_ERROR, err, 500);
+    return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err, 500);
   }
 });
