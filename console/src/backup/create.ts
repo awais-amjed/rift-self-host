@@ -108,7 +108,14 @@ export function startBackup(
       const { schedule, problem } = parseSchedule(readEnvFile(projectDir));
       try {
         if (problem !== null) throw new Error(problem);
-        finish({ ...result, pruned: await pruneBackups(projectDir, schedule.keep) });
+        finish({
+          ...result,
+          pruned: await pruneBackups(
+            projectDir,
+            schedule.keep,
+            result.file.split("/").at(-1),
+          ),
+        });
       } catch (error) {
         console.error("[backup] deleting older backups:", error);
         finish({ ...result, pruned: [], pruneError: messageOf(error) });

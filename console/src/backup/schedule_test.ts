@@ -93,3 +93,8 @@ Deno.test("a failed scheduled backup waits an hour before trying again", () => {
   assert(!isDue(new Date(failedAt.getTime() + RETRY_MS - 1), daily, yesterday, failedAt));
   assert(isDue(new Date(failedAt.getTime() + RETRY_MS), daily, yesterday, failedAt));
 });
+
+Deno.test("a backup dated in the future does not stop the schedule", () => {
+  const now = at("2026-09-15T03:01:00Z");
+  assert(isDue(now, daily, at("2099-01-01T03:00:00Z"), null));
+});

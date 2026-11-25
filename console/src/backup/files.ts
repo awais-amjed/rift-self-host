@@ -193,9 +193,20 @@ export async function deleteBackup(projectDir: string, name: string): Promise<bo
  * scheduled backups off, and a backup made by hand on such a server is one
  * somebody wants.
  */
-export async function pruneBackups(projectDir: string, keep: number): Promise<string[]> {
+export async function pruneBackups(
+  projectDir: string,
+  keep: number,
+  /** The backup just made, which counts as one of [keep] and is never deleted. */
+  justMade?: string,
+): Promise<string[]> {
   if (keep <= 0) return [];
-  const doomed = (await listBackups(projectDir)).slice(keep);
+  const all = await listBackups(projectDir);
+  // By the time in their names, so backups copied in from a machine whose
+  // clock ran ahead sorted above the new one, and a schedule keeping that
+  // many deleted the backup it had just made.
+  const doomed = justMade !== undefined && all.some((backup) => backup.name === justMade)
+    ? all.filter((backup) => backup.name !== justMade).slice(keep - 1)
+    : all.slice(keep);
   for (const file of doomed) {
     await Deno.remove(join(projectDir, BACKUPS_DIR, file.name), { recursive: true });
   }

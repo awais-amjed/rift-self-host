@@ -151,6 +151,9 @@ export function nextSlot(now: Date, schedule: Schedule): Date {
   return slot;
 }
 
+/** How far ahead of now a backup's time may be and still count as made. */
+const CLOCK_SLACK_MS = 10 * 60 * 1000;
+
 /**
  * Whether a scheduled backup should start now.
  *
@@ -168,7 +171,12 @@ export function isDue(
 ): boolean {
   if (schedule.keep <= 0) return false;
   const slot = lastSlot(now, schedule);
-  if (newestBackup !== null && newestBackup >= slot) return false;
+  // A backup dated ahead of now (copied from a machine whose clock ran fast)
+  // is no sign that this slot was taken: counted, nothing was ever due again.
+  if (
+    newestBackup !== null && newestBackup >= slot &&
+    newestBackup.getTime() <= now.getTime() + CLOCK_SLACK_MS
+  ) return false;
   if (
     lastAttempt !== null && lastAttempt >= slot &&
     now.getTime() - lastAttempt.getTime() < RETRY_MS

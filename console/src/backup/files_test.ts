@@ -139,3 +139,22 @@ Deno.test("the start time is read from the name", () => {
   );
   assertEquals(startedAt("rift-backup-latest.tar.gz"), null);
 });
+
+Deno.test("the backup just made is never the one pruned", async () => {
+  const projectDir = await project([
+    "rift-backup-2099-01-01-0300.tar.gz",
+    "rift-backup-2099-01-02-0300.tar.gz",
+    "rift-backup-2026-09-12-0300.tar.gz",
+  ]);
+  try {
+    // Two copied in from a machine whose clock was decades ahead, and one just made.
+    assertEquals(
+      await pruneBackups(projectDir, 2, "rift-backup-2026-09-12-0300.tar.gz"),
+      [
+        "rift-backup-2099-01-01-0300.tar.gz",
+      ],
+    );
+  } finally {
+    await Deno.remove(projectDir, { recursive: true });
+  }
+});
