@@ -13024,4 +13024,80 @@ BEGIN
   RAISE NOTICE 'ok  a conversation is read off its own index, by the two in it (051)';
 END $$;
 
+-- ============================================================
+-- 37. The @ menu asks a private channel who is in it once (052)
+-- ============================================================
+-- Echo again. The private room had only e1; now e3 (banned) and e4 (the bot)
+-- sit in it by name, and e5 by a role the room is open to. e2 is in neither.
+-- The menu must offer exactly who it offered when it asked of each member.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"50505050-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO roles (id, server_id, name, position, permissions) VALUES
+  ('ee502222-0000-4000-8000-000000000001', 'ee500000-0000-4000-8000-000000000001', 'Room-052', 10, 0);
+INSERT INTO member_roles (user_id, role_id) VALUES
+  ('50505050-eeee-4eee-8eee-000000000005', 'ee502222-0000-4000-8000-000000000001');
+INSERT INTO channel_role_access (channel_id, role_id) VALUES
+  ('ee501111-0000-4000-8000-000000000002', 'ee502222-0000-4000-8000-000000000001');
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('ee501111-0000-4000-8000-000000000002', '50505050-eeee-4eee-8eee-000000000003'),
+  ('ee501111-0000-4000-8000-000000000002', '50505050-eeee-4eee-8eee-000000000004')
+ON CONFLICT (channel_id, user_id) DO NOTHING;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+CREATE FUNCTION pg_temp.sm52(p_q TEXT, p_channel UUID, p_bots BOOLEAN,
+                             p_banned BOOLEAN) RETURNS TEXT[] LANGUAGE sql AS $$
+  SELECT COALESCE(array_agg(s.username ORDER BY s.ordinality), '{}')
+    FROM search_members(p_q, p_channel, p_bots, p_banned, 25) WITH ORDINALITY s
+$$;
+GRANT EXECUTE ON FUNCTION pg_temp.sm52(TEXT, UUID, BOOLEAN, BOOLEAN) TO authenticated;
+
+DO $$
+DECLARE
+  room    CONSTANT UUID := 'ee501111-0000-4000-8000-000000000002';
+  general CONSTANT UUID := 'ee501111-0000-4000-8000-000000000001';
+BEGIN
+  PERFORM pg_temp.as50(1);
+  SET LOCAL ROLE authenticated;
+  -- Nothing typed: the room's people in name order, by name or by role.
+  IF pg_temp.sm52('', room, NULL, NULL) <> ARRAY['e1', 'e3', 'e4', 'e5']
+     OR pg_temp.sm52('', room, NULL, false) <> ARRAY['e1', 'e4', 'e5']
+     OR pg_temp.sm52('', room, false, false) <> ARRAY['e1', 'e5']
+     OR pg_temp.sm52('', room, true, NULL) <> ARRAY['e4']
+     OR pg_temp.sm52('', room, NULL, true) <> ARRAY['e3'] THEN
+    RAISE EXCEPTION 'FAIL: the @ menu in a private room offered %',
+      pg_temp.sm52('', room, NULL, NULL);
+  END IF;
+  -- Typed: a prefix, and a match only inside the name (the second phase).
+  IF pg_temp.sm52('e', room, NULL, false) <> ARRAY['e1', 'e4', 'e5']
+     OR pg_temp.sm52('5', room, NULL, false) <> ARRAY['e5']
+     OR pg_temp.sm52('2', room, NULL, false) <> '{}'::TEXT[] THEN
+    RAISE EXCEPTION 'FAIL: a search in a private room offered %',
+      pg_temp.sm52('e', room, NULL, false);
+  END IF;
+  -- A public channel and none are the whole server, as before.
+  IF pg_temp.sm52('', general, NULL, false) <> ARRAY['e1', 'e2', 'e4', 'e5']
+     OR pg_temp.sm52('2', NULL, NULL, false) <> ARRAY['e2'] THEN
+    RAISE EXCEPTION 'FAIL: the @ menu outside a private room offered %',
+      pg_temp.sm52('', general, NULL, false);
+  END IF;
+  RESET ROLE;
+
+  -- e2 cannot open the room, so its menu is empty, not the server.
+  PERFORM pg_temp.as50(2);
+  SET LOCAL ROLE authenticated;
+  IF pg_temp.sm52('', room, NULL, NULL) <> '{}'::TEXT[]
+     OR pg_temp.sm52('e', room, NULL, false) <> '{}'::TEXT[] THEN
+    RAISE EXCEPTION 'FAIL: the @ menu showed a private room to somebody outside it';
+  END IF;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+
+  IF has_function_privilege('anon',
+       'search_members(text, uuid, boolean, boolean, integer)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: search_members is open to anon';
+  END IF;
+  RAISE NOTICE 'ok  the @ menu asks a private channel who is in it once (052)';
+END $$;
+
 ROLLBACK;

@@ -539,6 +539,13 @@ files, each run once after it, and the list below grows with them.
    417 → 10 ms, `mark_all_read` 377 → 11 ms, `mark_read` on a conversation 43 → 1 ms; a page
    of a 100,000-message conversation 80 → 0.2 ms. The app asks a server without
    `dm_messages_page` the old way, after its `PGRST202`.
+32. **052_member_search.sql** — `search_members`, which the composer's @ menu asks, gathers a
+   private channel's audience once (`app.channel_audience`, as `list_members` does) instead of
+   asking `app.member_in_scope` of each member it walks past. Same members in the same order.
+   Measured Nov 26 2026 on 50,000 members, in a private channel of 201: the menu opening
+   with nothing typed 534 → 6 ms through PostgREST, "a" 904 → 35 ms (what it costs in a
+   public channel too). A private channel opened to a role of 38,000 pays about 10 ms more
+   for gathering that list.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
