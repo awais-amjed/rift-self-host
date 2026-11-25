@@ -42,8 +42,14 @@ export const serverRoutes: ApiRoutes = async (request, url, paths) => {
 
   if (path === "/api/servers") {
     const target = targetFromEnv();
-    const [servers, invites, local] = await Promise.all([
-      listServers(target).catch(() => []),
+    let servers;
+    try {
+      servers = await listServers(target);
+    } catch (error) {
+      // Not "No servers yet": a database that did not answer is not an empty one.
+      return failure("servers", error);
+    }
+    const [invites, local] = await Promise.all([
       listInvites(target).catch(() => []),
       readLocalTesting(target).catch(() => null),
     ]);
@@ -81,7 +87,7 @@ export const serverRoutes: ApiRoutes = async (request, url, paths) => {
       const local = await readLocalTesting(target).catch(() => null);
       return json({ link: inviteLinkFor(code, local) });
     } catch (error) {
-      return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+      return failure("servers/invite", error);
     }
   }
 

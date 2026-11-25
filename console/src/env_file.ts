@@ -36,6 +36,11 @@ export function parseEnv(text: string): Record<string, string> {
       value = value.slice(1, -1);
     } else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
       value = value.slice(1, -1);
+    } else {
+      // And, unquoted, ends it at a `#` after whitespace: `HTTP_PORT=8081 #
+      // caddy` is 8081 to compose, and was "8081 # caddy" here, which is not
+      // a port, so the console fell back to 80 while Caddy listened on 8081.
+      value = value.replace(/\s+#.*$/, "");
     }
 
     values[key] = value;

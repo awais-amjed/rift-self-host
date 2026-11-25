@@ -125,3 +125,11 @@ Deno.test("a null value removes every line for the key, and adds none", async ()
   assertEquals(await Deno.readTextFile(`${directory}/.env`), "B=2\nC=4\n");
   await Deno.remove(directory, { recursive: true });
 });
+
+Deno.test("a comment after a value ends it, as compose reads it", () => {
+  assertEquals(parseEnv("HTTP_PORT=8081 # caddy\nNAME=a#b\nQUOTED='x # y'\n"), {
+    HTTP_PORT: "8081",
+    NAME: "a#b",
+    QUOTED: "x # y",
+  });
+});

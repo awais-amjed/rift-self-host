@@ -228,6 +228,23 @@ async function publishedConsole(): Promise<(ConsoleAddress & { image: string }) 
   }
 }
 
+/** Where Docker published this console, once known: it cannot change while it runs. */
+let consoleBinding: string | null = null;
+
+/**
+ * The interface the console is published on, from Docker rather than `.env`:
+ * `.env` says what the next recreate will do, and the publish is fixed when
+ * the container is made. Reading `.env` let an operator who removed
+ * `CONSOLE_BIND` from a console still on 0.0.0.0 serve setup to the network
+ * with no password. Null when Docker cannot say.
+ */
+export async function consolePublishedOn(): Promise<string | null> {
+  if (consoleBinding !== null) return consoleBinding;
+  const published = await publishedConsole();
+  if (published !== null) consoleBinding = published.bind;
+  return consoleBinding;
+}
+
 /**
  * Recreate the console on the interface and port `.env` names, if it is not
  * already there. Returns where it is going, or null when it stays.

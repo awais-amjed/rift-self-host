@@ -13,7 +13,7 @@
  */
 import { encodeHex } from "jsr:@std/encoding@1/hex";
 
-/** How long a session lasts without being used. */
+/** How long a session lasts from sign-in. */
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const COOKIE_NAME = "rift_console";
@@ -27,14 +27,19 @@ const sessions = new Map<string, { expiry: number; hash: string }>();
 
 /** Start a session under the password [hash] and return its token. */
 export function openSession(hash: string): string {
+  // Expired ones go as new ones come, so the map does not keep every
+  // sign-in since the console started.
+  const now = Date.now();
+  for (const [token, session] of sessions) {
+    if (session.expiry < now) sessions.delete(token);
+  }
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   const token = encodeHex(bytes);
-  sessions.set(token, { expiry: Date.now() + SESSION_TTL_MS, hash });
+  sessions.set(token, { expiry: now + SESSION_TTL_MS, hash });
   return token;
 }
 
-/** Forget a session. */
 export function closeSession(token: string): void {
   sessions.delete(token);
 }
@@ -63,7 +68,8 @@ export function isAuthenticated(request: Request, hash: string): boolean {
     return false;
   }
 
-  session.expiry = Date.now() + SESSION_TTL_MS;
+  // Not extended: the cookie's Max-Age is set once, at sign-in, so a session
+  // here outliving it would only be one the browser no longer presents.
   return true;
 }
 

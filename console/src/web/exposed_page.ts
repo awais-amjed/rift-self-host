@@ -23,15 +23,18 @@ export function exposedPage(): string {
     or the other.</p>
   <h2>Either</h2>
   <p>Put it back on the loopback — remove <code>CONSOLE_BIND</code> from your
-     <code>.env</code>, or set it to <code>127.0.0.1</code> — and reach it
-     through a tunnel:</p>
+     <code>.env</code>, or set it to <code>127.0.0.1</code> — then recreate it,
+     since Docker keeps the address it was started with:</p>
+  <div class="secret"><div class="mono">docker compose up -d --force-recreate console</div></div>
+  <p>and reach it through a tunnel:</p>
   <div class="secret"><div class="mono">ssh -L 8080:localhost:8080 you@this-machine</div></div>
   <h2>Or</h2>
   <p>Give it a password before it is reachable, by putting one in
      <code>.env</code> beside your <code>docker-compose.yml</code>:</p>
   <div class="secret"><div class="mono">CONSOLE_PASSWORD=something-long-and-random</div></div>
   <p class="hint">Then <code>docker compose up -d --force-recreate console</code>.
-     It replaces that line with a hash when it starts.</p>
+     It replaces that line with a hash when it starts, and asks for it from
+     then on, setup included.</p>
 </div>`,
   );
 }

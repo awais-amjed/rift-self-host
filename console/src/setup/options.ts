@@ -11,6 +11,13 @@
  * most likely to run a Rift server are the two most likely to have something
  * on port 80 already: a VPS with another site, and a home machine.
  */
+import {
+  envTextProblem,
+  isBindAddress,
+  isHostname,
+  isIpv4,
+  MIN_SECRET_LENGTH,
+} from "./text_checks.ts";
 import { readEnvFile } from "../env_file.ts";
 
 /** Every value setup writes, with the type the form needs to render it. */
@@ -379,6 +386,12 @@ export function problemsWith(options: SetupOptions): string[] {
       );
     } else if (/^https?:\/\//i.test(options.localAddress)) {
       problems.push("Enter the address on its own, without http:// or https://.");
+    } else if (
+      !isIpv4(options.localAddress.trim()) && !isHostname(options.localAddress.trim())
+    ) {
+      problems.push(
+        "Enter the address on its own, such as 192.168.1.6: no port, path or spaces.",
+      );
     }
   } else if (domain.length === 0) {
     problems.push("A domain is required — it is what the certificate is issued for.");
@@ -386,6 +399,30 @@ export function problemsWith(options: SetupOptions): string[] {
     problems.push("Enter the domain on its own, without http:// or https://.");
   } else if (domain.includes("/")) {
     problems.push("Enter the domain on its own, without a path.");
+  } else if (!isHostname(domain)) {
+    problems.push(
+      "Enter a domain name such as chat.example.com: letters, digits, hyphens and dots, no port.",
+    );
+  }
+
+  if (!isBindAddress(options.consoleBind.trim())) {
+    problems.push(
+      "The console's interface must be an IP address, such as 127.0.0.1. A name " +
+        "makes Docker refuse to publish it, and the console would be gone.",
+    );
+  }
+  const nameProblem = envTextProblem("The server name", options.serverName);
+  if (nameProblem) problems.push(nameProblem);
+  const chosen = options.consolePassword.trim();
+  if (chosen.length > 0) {
+    const passwordProblem = envTextProblem("The console password", chosen);
+    if (passwordProblem) problems.push(passwordProblem);
+    else if (chosen.length < MIN_SECRET_LENGTH) {
+      problems.push(
+        `The console password must be at least ${MIN_SECRET_LENGTH} characters, ` +
+          "or leave it empty for a generated one.",
+      );
+    }
   }
 
   // 80 and 443 belong to whoever is terminating TLS. With an operator's own

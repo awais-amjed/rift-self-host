@@ -62,7 +62,7 @@ form.addEventListener("submit", async (event) => {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ passphrase: document.getElementById("passphrase").value }),
-  });
+  }).catch(() => null);
 
   await readStream(response, (event) => {
     if (event.step) mark(event.step, event.done);

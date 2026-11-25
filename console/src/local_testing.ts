@@ -29,6 +29,7 @@
  * their own: it is a console convenience, and a convenience does not earn a
  * migration on everybody's server.
  */
+import { isHostname, isIpv4 } from "./setup/text_checks.ts";
 import {
   FIELD_SEPARATOR,
   literal,
@@ -139,6 +140,11 @@ export function problemWithAddress(
   }
   if (trimmed.includes("/") || trimmed.includes(":")) {
     return "Enter the address on its own, without a port or a path.";
+  }
+  // It reaches LiveKit's command line through `sh -c`, and compose's
+  // interpolation: an address and nothing else.
+  if (!isIpv4(trimmed) && !isHostname(trimmed)) {
+    return "Enter the address on its own, such as 192.168.1.6: no spaces or symbols.";
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return "The port must be between 1 and 65535.";

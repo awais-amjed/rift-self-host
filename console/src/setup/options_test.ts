@@ -289,3 +289,24 @@ Deno.test("the largest file must be a whole number of MB", () => {
     assertEquals(problemsWith({ ...valid, maxFileMb }).length, 1, `${maxFileMb}`);
   }
 });
+
+Deno.test("what is typed reaches .env, YAML and a shell only as what it claims to be", () => {
+  const problems = (change: Partial<SetupOptions>) =>
+    problemsWith({ ...valid, ...change });
+  assertEquals(problems({}), []);
+  assert(problems({ domain: "chat.example.com:8443" }).length > 0);
+  assert(problems({ domain: "chat example.com" }).length > 0);
+  assert(problems({ consoleBind: "localhost" }).length > 0);
+  assertEquals(problems({ consoleBind: "0.0.0.0" }), []);
+  assertEquals(problems({ consoleBind: "::1" }), []);
+  const local = { ...valid, localTesting: true, domain: "" };
+  assertEquals(problemsWith({ ...local, localAddress: "192.168.1.6" }), []);
+  assert(problemsWith({ ...local, localAddress: "192.168.1.6:18000" }).length > 0);
+  assert(problemsWith({ ...local, localAddress: "1.2.3.4; reboot" }).length > 0);
+  assert(problems({ serverName: '"Quoted' }).length > 0);
+  assert(problems({ serverName: "Two\nlines" }).length > 0);
+  assert(problems({ serverName: "Team #1" }).length > 0);
+  assertEquals(problems({ serverName: "Team#1" }), []);
+  assert(problems({ consolePassword: "short" }).length > 0);
+  assertEquals(problems({ consolePassword: "long enough" }), []);
+});

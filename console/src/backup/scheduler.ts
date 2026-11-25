@@ -6,6 +6,7 @@
  * across a suspended laptop, and a check that finds nothing to do costs one
  * directory listing.
  */
+import { MIN_SECRET_LENGTH } from "../setup/text_checks.ts";
 import { currentOperation } from "../operation.ts";
 import { readEnvFile, updateSettings } from "../env_file.ts";
 import { type BackupOutcome, backupStatus, startBackup } from "./create.ts";
@@ -157,6 +158,9 @@ export async function saveSchedule(
   if (request.encrypt === true) {
     passphrase = typed || current;
     if (!passphrase) return "Type a passphrase to encrypt scheduled backups with.";
+    if (typed && typed.length < MIN_SECRET_LENGTH) {
+      return `The passphrase must be at least ${MIN_SECRET_LENGTH} characters.`;
+    }
   }
 
   const schedule: Schedule = { keep, every: request.every, hour, weekday, passphrase };

@@ -1,5 +1,5 @@
 import { applies, type OptionField, type SetupOptions } from "../setup/options.ts";
-import { shell, STREAM_SCRIPT } from "./shell.ts";
+import { escapeAttribute, shell, STREAM_SCRIPT } from "./shell.ts";
 
 /** One input, rendered from its [OptionField] and current value. */
 function optionInput(field: OptionField, value: unknown, shownNow: boolean): string {
@@ -30,7 +30,9 @@ function optionInput(field: OptionField, value: unknown, shownNow: boolean): str
   const shown = field.kind === "password" ? "" : String(value ?? "");
   return `<div class="field"${scope}${hide}>
     <label for="${field.key}">${field.label}</label>
-    <input id="${field.key}" name="${field.key}" type="${type}" value="${shown}"
+    <input id="${field.key}" name="${field.key}" type="${type}" value="${
+    escapeAttribute(shown)
+  }"
            data-kind="${field.kind}">
     ${field.hint ? `<p class="hint">${field.hint}</p>` : ""}
   </div>`;
@@ -186,7 +188,7 @@ form.addEventListener("submit", async (event) => {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options),
-  });
+  }).catch(() => null);
 
   await readStream(response, (event) => {
     if (event.step) mark(event.step + (event.detail ? "  (" + event.detail + ")" : ""), event.done);

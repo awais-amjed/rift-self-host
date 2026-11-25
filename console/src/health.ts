@@ -63,7 +63,7 @@ async function schemaCheck(
     }
     return { name, level: "ok", detail: `${plan.applied.length} migrations applied.` };
   } catch (error) {
-    return { name, level: "unknown", detail: String(error) };
+    return { name, level: "unknown", detail: readable(error) };
   }
 }
 
@@ -116,7 +116,7 @@ async function realtimeLimitsCheck(target: PostgresTarget): Promise<Check> {
         `${limits.maxEventsPerSecond} events/second, ${limits.maxConcurrentUsers} users.`,
     };
   } catch (error) {
-    return { name, level: "unknown", detail: String(error) };
+    return { name, level: "unknown", detail: readable(error) };
   }
 }
 
@@ -152,7 +152,7 @@ async function tableSecurityCheck(target: PostgresTarget): Promise<Check> {
     }
     return { name, level: "ok", detail: "No public table is missing RLS." };
   } catch (error) {
-    return { name, level: "unknown", detail: String(error) };
+    return { name, level: "unknown", detail: readable(error) };
   }
 }
 
@@ -172,6 +172,18 @@ async function cronCheck(target: PostgresTarget): Promise<Check> {
     }
     return { name, level: "ok", detail: `${count} scheduled.` };
   } catch (error) {
-    return { name, level: "unknown", detail: String(error) };
+    return { name, level: "unknown", detail: readable(error) };
   }
+}
+
+/**
+ * A check that could not run, in words for the page. psql's own text names the
+ * statement and the schema, which belongs in the log, not on a page.
+ */
+function readable(error: unknown): string {
+  console.error("[health]", error);
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith("psql:") || message.includes("ERROR:")
+    ? "Could not ask the database. See `docker compose logs console` for the reason."
+    : message;
 }

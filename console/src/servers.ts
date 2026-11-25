@@ -29,8 +29,10 @@ export interface ServerSummary {
 export async function listServers(target: PostgresTarget): Promise<ServerSummary[]> {
   const rows = await queryRows(
     target,
+    // A name is one line on the list: a newline or the field separator in
+    // one split the row and shifted every column after it.
     `SELECT s.id,
-            s.name,
+            regexp_replace(s.name, '[[:cntrl:]]', ' ', 'g'),
             (SELECT count(*) FROM users u WHERE u.server_id = s.id AND NOT u.is_bot),
             (SELECT count(*) FROM channels c WHERE c.server_id = s.id),
             s.created_at

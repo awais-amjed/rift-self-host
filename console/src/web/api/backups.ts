@@ -1,4 +1,5 @@
 /** The Backups tab's endpoints: making, listing, scheduling and fetching backups. */
+import { MIN_SECRET_LENGTH } from "../../setup/text_checks.ts";
 import { OperationBusy } from "../../operation.ts";
 import { backupStatus, startBackup } from "../../backup/create.ts";
 import { deleteBackup, diskUsage, listBackups, openBackup } from "../../backup/files.ts";
@@ -60,6 +61,13 @@ export const backupRoutes: ApiRoutes = async (request, url, paths) => {
       return json({ error: "Set the server up before backing it up." }, 409);
     }
     const { passphrase } = await request.json();
+    const typed = String(passphrase ?? "");
+    if (typed.length > 0 && typed.length < MIN_SECRET_LENGTH) {
+      return json({
+        error: `The passphrase must be at least ${MIN_SECRET_LENGTH} characters, ` +
+          "or leave it empty for an unencrypted backup.",
+      }, 400);
+    }
     try {
       startBackup(paths.projectDir, String(passphrase ?? ""));
       return json({ started: true }, 202);

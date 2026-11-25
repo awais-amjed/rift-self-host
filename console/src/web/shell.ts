@@ -87,6 +87,18 @@ function mark(step, done) {
 }
 
 async function readStream(response, onEvent) {
+  // A refusal (already running, already set up) is one JSON object with no
+  // newline after it, and a page that only read whole lines showed nothing.
+  const emit = (line) => {
+    if (!line.trim()) return;
+    try {
+      onEvent(JSON.parse(line));
+    } catch {
+      onEvent({ error: line.trim() });
+    }
+  };
+  if (response && response.status === 401) return location.reload();
+  if (!response || !response.body) return emit(JSON.stringify({ error: "No answer from the console." }));
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -97,9 +109,11 @@ async function readStream(response, onEvent) {
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\\n");
     buffer = lines.pop();
-    for (const line of lines) {
-      if (line.trim()) onEvent(JSON.parse(line));
-    }
+    for (const line of lines) emit(line);
+  }
+  emit(buffer + decoder.decode());
+  if (!response.ok && !buffer.trim()) {
+    emit(JSON.stringify({ error: "The console refused that (" + response.status + ")." }));
   }
 }
 `;
