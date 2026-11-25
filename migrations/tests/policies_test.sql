@@ -12721,4 +12721,161 @@ BEGIN
   RAISE NOTICE 'ok  the retention pass''s deletes ring nobody (048)';
 END $$;
 
+
+-- ============================================================
+-- 35. A page's reactions are counted once per message (050)
+-- ============================================================
+-- Its own server, Echo: e1 and e2 members, e3 banned, e4 a bot; a public
+-- room and a private one only e1 sits in. Each caller asks the computed
+-- column a page selects (`reaction_counts`) and the tally a ring asks
+-- (`message_reaction_tallies`), and must see exactly what the reaction
+-- policies would have shown them.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+INSERT INTO auth.users (id)
+SELECT ('50505050-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid
+  FROM generate_series(1, 4) i;
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('ee500000-0000-4000-8000-000000000001', 'Echo', 'ws://lan:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+SELECT ('50505050-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
+       'ee500000-0000-4000-8000-000000000001', 'e' || i, 'E' || i, 'pk-e' || i,
+       'sid-e' || i, 'chat-e' || i, i = 4
+  FROM generate_series(1, 4) i;
+UPDATE users SET is_banned = true WHERE id = '50505050-eeee-4eee-8eee-000000000003';
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"50505050-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('ee501111-0000-4000-8000-000000000001', 'ee500000-0000-4000-8000-000000000001', 'general', 'text', false),
+  ('ee501111-0000-4000-8000-000000000002', 'ee500000-0000-4000-8000-000000000001', 'room', 'text', true);
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('ee501111-0000-4000-8000-000000000002', '50505050-eeee-4eee-8eee-000000000001')
+ON CONFLICT (channel_id, user_id) DO NOTHING;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+-- 95001 public, three reactions; 95002 private; 95003 public, none; 95005
+-- the bot's own. 95101 a DM from e1 to e2.
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature, key_version)
+VALUES (95001, 'ee501111-0000-4000-8000-000000000001', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1),
+       (95002, 'ee501111-0000-4000-8000-000000000002', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1),
+       (95003, 'ee501111-0000-4000-8000-000000000001', '50505050-eeee-4eee-8eee-000000000001', 'c', 'n', 's', 1),
+       (95005, 'ee501111-0000-4000-8000-000000000001', '50505050-eeee-4eee-8eee-000000000004', 'c', 'n', 's', 1);
+INSERT INTO message_reactions (message_id, user_id, emoji) VALUES
+  (95001, '50505050-eeee-4eee-8eee-000000000001', '👍'),
+  (95001, '50505050-eeee-4eee-8eee-000000000002', '👍'),
+  (95001, '50505050-eeee-4eee-8eee-000000000001', '🎉'),
+  (95002, '50505050-eeee-4eee-8eee-000000000001', '✅'),
+  (95005, '50505050-eeee-4eee-8eee-000000000002', '👀');
+INSERT INTO dm_messages (id, sender_id, recipient_id, ciphertext, nonce, signature, key_version)
+VALUES (95101, '50505050-eeee-4eee-8eee-000000000001', '50505050-eeee-4eee-8eee-000000000002', 'c', 'n', 's', 1);
+INSERT INTO dm_message_reactions (message_id, user_id, emoji) VALUES
+  (95101, '50505050-eeee-4eee-8eee-000000000002', '❤');
+
+-- What one caller sees of one message, through the column.
+CREATE FUNCTION pg_temp.rc50(p_id BIGINT) RETURNS JSONB LANGUAGE sql AS $$
+  SELECT reaction_counts(m) FROM messages m WHERE m.id = p_id
+$$;
+CREATE FUNCTION pg_temp.as50(i INTEGER) RETURNS VOID LANGUAGE sql AS $$
+  SELECT set_config('request.jwt.claims', json_build_object(
+    'sub', '50505050-eeee-4eee-8eee-' || lpad(i::text, 12, '0'),
+    'role', 'authenticated')::text, true)
+$$;
+GRANT EXECUTE ON FUNCTION pg_temp.rc50(BIGINT), pg_temp.as50(INTEGER) TO authenticated;
+
+DO $$
+DECLARE
+  v      JSONB;
+  v_row  messages;
+BEGIN
+  -- Reading as the superuser here, so the row is in hand before the role
+  -- changes; e2 then hands it back with another message's id.
+  SELECT * INTO v_row FROM messages WHERE id = 95001;
+
+  PERFORM pg_temp.as50(2);
+  SET LOCAL ROLE authenticated;
+
+  -- The order is the collation's, so compared as a set.
+  v := reaction_counts(v_row);
+  IF jsonb_array_length(v) <> 2
+     OR NOT v @> '[{"emoji": "👍", "count": 2, "mine": true},
+                   {"emoji": "🎉", "count": 1, "mine": false}]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: the counts for a public message came back as %', v;
+  END IF;
+  IF message_reaction_tallies('channel', ARRAY[95001, 95002, 95003, 95001]::BIGINT[])
+     <> jsonb_build_object('95001', v) THEN
+    RAISE EXCEPTION 'FAIL: the tally disagrees with the column: %',
+      message_reaction_tallies('channel', ARRAY[95001, 95002, 95003]::BIGINT[]);
+  END IF;
+  IF reaction_counts((SELECT m FROM messages m WHERE m.id = 95003)) <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a message with no reactions is not an empty list';
+  END IF;
+  -- A private room e2 is not in: no counts, even for a row made up to look
+  -- like one e2 can read.
+  v_row.id := 95002;
+  IF reaction_counts(v_row) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a made-up row read the counts of a private message';
+  END IF;
+  IF app.reaction_counts_of('channel', 95002) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: the counts of a private message reached a non-member';
+  END IF;
+  IF (SELECT reaction_counts(d) FROM dm_messages d WHERE d.id = 95101)
+     <> '[{"emoji": "❤", "count": 1, "mine": true}]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a DM''s counts are wrong for its recipient';
+  END IF;
+  RESET ROLE;
+
+  -- e1 sits in the private room; e3 is banned; e4, a bot, sees only its own.
+  PERFORM pg_temp.as50(1);
+  SET LOCAL ROLE authenticated;
+  IF pg_temp.rc50(95002) IS DISTINCT FROM
+     '[{"emoji": "✅", "count": 1, "mine": true}]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a member of the private room lost its counts';
+  END IF;
+  IF pg_temp.rc50(95001) @> '[{"mine": false}]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: mine is not the caller''s own';
+  END IF;
+  RESET ROLE;
+
+  PERFORM pg_temp.as50(3);
+  SET LOCAL ROLE authenticated;
+  IF app.reaction_counts_of('channel', 95001) IS NOT NULL
+     OR message_reaction_tallies('channel', ARRAY[95001]::BIGINT[]) <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a banned member still reads the counts';
+  END IF;
+  RESET ROLE;
+
+  PERFORM pg_temp.as50(4);
+  SET LOCAL ROLE authenticated;
+  IF app.reaction_counts_of('channel', 95001) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a bot read the counts of a message not meant for it';
+  END IF;
+  IF app.reaction_counts_of('channel', 95005)
+     <> '[{"emoji": "👀", "count": 1, "mine": false}]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a bot lost the counts of its own message';
+  END IF;
+  IF app.reaction_counts_of('dm', 95101) IS NOT NULL
+     OR message_reaction_tallies('dm', ARRAY[95101]::BIGINT[]) <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a DM''s counts reached somebody outside it';
+  END IF;
+  RESET ROLE;
+
+  -- Somebody on another server.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
+  SET LOCAL ROLE authenticated;
+  IF app.reaction_counts_of('channel', 95001) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: another server''s member read the counts';
+  END IF;
+  RESET ROLE;
+  PERFORM set_config('request.jwt.claims', '', true);
+
+  IF has_function_privilege('anon', 'reaction_counts(messages)', 'EXECUTE')
+     OR has_function_privilege('anon', 'app.reaction_counts_of(read_scope, bigint)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: the reaction counts are open to anon';
+  END IF;
+  RAISE NOTICE 'ok  a page''s reactions are counted per message, for whoever may see it (050)';
+END $$;
+
 ROLLBACK;

@@ -392,7 +392,7 @@ silent re-login still triggers.
 | *(new)* webhooks | `create_webhook(p_channel_id, p_name)` mints one and returns its secret once; `select` and `delete` on `webhooks` list and revoke them. All three ask `app.can_manage_webhooks()`: `MANAGE_CHANNELS` and `MANAGE_WEBHOOKS` together, or an administrator (`forbidden`). Before Nov 22 2026 they asked only `MANAGE_CHANNELS` |
 | *(new)* giving and taking roles | `insert` and `delete` on `member_roles`, an administrator's (`app.may_assign_role`), never `@everyone` or the owner's role. A role is given only if it sits at or below the giver's own rank (their highest role's `position`), so the only admin can make a second one, and taken off anybody only if it sits below it, so one admin cannot take Admin off another. Before Nov 22 2026 the rank was not asked of either, apart from taking a role off yourself |
 | `update_profile`, `publish_chat_key` | `update` on your own row — the column grant covers only `display_name`, `chat_public_key`, `avatar_path` and `dm_policy` |
-| `toggle_reaction`, `list_reactions` | `insert`/`delete` keyed by `(message, user, emoji)`; a duplicate-key error *is* the "already reacted" answer |
+| `toggle_reaction`, `list_reactions` | `insert`/`delete` keyed by `(message, user, emoji)`; a duplicate-key error *is* the "already reacted" answer. Counts come from `message_reaction_tallies(p_scope, p_ids)` and, with a page of messages, from the computed column `reaction_counts` |
 | `moderate_user`, `set_user_permissions` | RPCs — RLS is row-level, so a policy allowing an admin to write another member's flags would also let them rewrite that member's identity. `moderate_user` kept the RPC but regained an edge function in front of it, which is the only thing that can reach LiveKit (above) |
 | `list_dm_conversations` | `dm_conversations(p_limit, p_before)` — `DISTINCT ON` instead of a thousand rows grouped in TypeScript, and since 041 a page of them rather than every peer you have ever messaged |
 | the `notifications` table | `unread_counts()` + `mark_read()` over `read_state`. `unread_counts()` answers `{channels, mentions, dms, prefs}`: per channel, how many messages are unread and how many of those name you or everyone (034; a server without `mentions` counts as though every unread message did). A cursor that moves forward rings `read` on its owner's user topic, once per statement: `{scope, scope_id, last_read_id}` when one cursor moved, `{}` when several did (`mark_all_read`). A write that moved nothing rings nothing. The reader's other devices count again where they still show something unread there. A new member starts with a cursor at the newest message of every public channel; a private channel's is made when they are seated in it (`channel_members_seed_cursor`, 1.9.1). Before 1.9.1 every channel got one, so a new member could read every private channel's id from their own cursors |
@@ -521,6 +521,14 @@ files, each run once after it, and the list below grows with them.
    hold 5.1 s → 6 ms, `@everyone` 6.4 s → 2 ms, with 100,000 messages sent → 1. A permission
    that moves every member's flag still takes 2–3 s: the cost of writing that many `users`
    rows, which 52 foreign keys point at.
+30. **050_reaction_counts.sql** — a message row has a computed column, `reaction_counts`
+   (`[{emoji, count, mine}]`, ordered by emoji; null for a message the caller may not see),
+   which the app selects with a page (`reactions:reaction_counts`) instead of embedding every
+   reaction row. The check of who may see the message is made once per message
+   (`app.reaction_counts_of`), and `message_reaction_tallies` uses the same. Measured Nov 25
+   2026 on a page of fifty messages with 2,600 reactions each: 220 ms and 3.3 MB → 22 ms and
+   45 KB; the tally for those fifty 455 → 17 ms. The app asks a server without the column the
+   old way, after its `42703`.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
