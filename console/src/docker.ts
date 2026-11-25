@@ -115,9 +115,9 @@ export function execFromFile(
  * Every service in the `full` profile this stack runs: not the console, and
  * not one it is configured to leave out.
  */
-export async function stackServices(): Promise<string[]> {
+export async function stackServices(files: string[] = []): Promise<string[]> {
   const skip = new Set([SELF, ...disabledServices()]);
-  return (await servicesIn(["full"])).filter((service) => !skip.has(service));
+  return (await servicesIn(["full"], files)).filter((service) => !skip.has(service));
 }
 
 /** Whether compose can read [file], with this project's `.env`. */
@@ -126,8 +126,19 @@ export function checkComposeFile(file: string): Promise<CommandResult> {
 }
 
 /** Download the image each of [services] names. */
-export function pullServices(services: string[]): Promise<CommandResult> {
-  return compose(["--profile", "full", "pull", "--quiet", ...services], 1_800_000);
+export function pullServices(
+  services: string[],
+  files: string[] = [],
+): Promise<CommandResult> {
+  return compose(
+    [...fileFlags(files), "--profile", "full", "pull", "--quiet", ...services],
+    1_800_000,
+  );
+}
+
+/** `-f` for each of [files]; none means compose's own choice of file. */
+function fileFlags(files: string[]): string[] {
+  return files.flatMap((file) => ["-f", file]);
 }
 
 /**
@@ -380,9 +391,15 @@ export function disabledServices(): string[] {
 }
 
 /** Every service in [profiles], as the compose file defines them. */
-export async function servicesIn(profiles: string[]): Promise<string[]> {
+export async function servicesIn(
+  profiles: string[],
+  files: string[] = [],
+): Promise<string[]> {
   const flags = profiles.flatMap((profile) => ["--profile", profile]);
-  const result = await compose([...flags, "config", "--services"], 30_000);
+  const result = await compose(
+    [...fileFlags(files), ...flags, "config", "--services"],
+    30_000,
+  );
   if (!result.ok) return [];
   return result.stdout.split("\n").map((line) => line.trim()).filter((line) =>
     line.length > 0

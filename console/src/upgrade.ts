@@ -34,7 +34,8 @@
  * for all the world like it had worked.
  */
 import { restartService, waitForSettled } from "./docker.ts";
-import { applyPlan, planMigrations } from "./migrations/runner.ts";
+import { applyPlan, type MigrationPlan, planMigrations } from "./migrations/runner.ts";
+import { compareVersions, isVersion } from "./update/releases.ts";
 import { isReachable, type PostgresTarget } from "./postgres.ts";
 import {
   functionSources,
@@ -70,6 +71,13 @@ export interface PendingWork {
    * so before this nothing counted as outstanding and every endpoint was gone.
    */
   missingEndpoints: string[];
+  /**
+   * Why this console must not apply itself here, when the database was
+   * brought to a newer release than it carries: an older image put back by
+   * hand. Applying would install older endpoints over a newer schema and
+   * record the older version. Null when it may.
+   */
+  databaseNewer: string | null;
   /**
    * Whether anything at all is outstanding.
    *
@@ -111,6 +119,7 @@ export async function pendingWork(
     functionSources(paths),
     paths.functionsTarget,
   );
+  const databaseNewer = newerDatabase(plan, applied, image);
 
   return {
     appliedVersion: applied,
@@ -118,11 +127,42 @@ export async function pendingWork(
     pendingMigrations,
     driftedMigrations,
     missingEndpoints,
-    needed: pendingMigrations.length > 0 ||
+    databaseNewer,
+    needed: databaseNewer === null && (
+      pendingMigrations.length > 0 ||
       driftedMigrations.length > 0 ||
       missingEndpoints.length > 0 ||
-      applied !== image,
+      applied !== image
+    ),
   };
+}
+
+/**
+ * Why [image] must not be applied over this database, or null. `runUpdate`
+ * refuses to move to an older release; this is the same refusal for an older
+ * image started by hand, which the start-up would otherwise apply.
+ */
+export function newerDatabase(
+  plan: MigrationPlan,
+  applied: string | null,
+  image: string,
+): string | null {
+  const unknown = plan.unknown ?? [];
+  if (unknown.length > 0) {
+    return `This database has migrations this console does not (${
+      unknown.join(", ")
+    }): ` +
+      `it was brought to a newer release than ${image}. Run that release's console ` +
+      "image; a release cannot be taken back.";
+  }
+  if (
+    applied !== null && isVersion(applied) && isVersion(image) &&
+    compareVersions(applied, image) > 0
+  ) {
+    return `This database is at ${applied}, newer than this console's ${image}. Run ` +
+      `the ${applied} console image; a release cannot be taken back.`;
+  }
+  return null;
 }
 
 /**
@@ -148,14 +188,22 @@ export async function applyUpgrade(
     throw new Error("The database is not reachable, so nothing was changed.");
   }
 
-  const installed = await step("Installing server endpoints", () =>
-    installFunctions(
-      functionSources(paths),
-      paths.functionsTarget,
-    ));
+  // Everything that can refuse, before anything changes: a newer database, or
+  // a migration edited since it ran (`applyPlan` refuses that before it runs
+  // anything).
+  const plan = await planMigrations(target, paths.migrationsDir);
+  const newer = newerDatabase(
+    plan,
+    await readState(target, APPLIED_VERSION),
+    imageVersion(),
+  );
+  if (newer !== null) throw new Error(newer);
 
+  // The schema before the endpoints. The other way round, a migration that
+  // failed on one server's data rolled back and left the new endpoints in
+  // place, calling functions it had not created, on every start after. Old
+  // endpoints on a new schema is the half-state that works: migrations add.
   const applied = await step("Applying the schema", async () => {
-    const plan = await planMigrations(target, paths.migrationsDir);
     const outcomes = await applyPlan(target, plan, {
       onProgress: (outcome) =>
         report({
@@ -168,6 +216,12 @@ export async function applyUpgrade(
     if (failure) throw new Error(`${failure.migration.name} failed:\n${failure.error}`);
     return outcomes.map((outcome) => outcome.migration.name);
   });
+
+  const installed = await step("Installing server endpoints", () =>
+    installFunctions(
+      functionSources(paths),
+      paths.functionsTarget,
+    ));
 
   // Only now, and only if compose is not still working on this project.
   const restarted = await step("Reloading endpoints", async () => {

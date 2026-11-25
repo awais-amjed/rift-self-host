@@ -40,6 +40,11 @@ export interface MigrationPlan {
    * accept the new checksums instead.
    */
   drifted: Migration[];
+  /**
+   * Recorded here, with no file in this image: the database was brought to a
+   * release newer than this console. Nothing may be applied over it.
+   */
+  unknown?: string[];
 }
 
 /** What happened to one migration during a run. */
@@ -87,13 +92,15 @@ export async function planMigrations(
     (await readLedger(target)).map((entry) => [entry.name, entry.checksum]),
   );
 
-  const plan: MigrationPlan = { applied: [], pending: [], drifted: [] };
+  const plan: MigrationPlan = { applied: [], pending: [], drifted: [], unknown: [] };
   for (const migration of onDisk) {
     const previous = recorded.get(migration.name);
     if (previous === undefined) plan.pending.push(migration);
     else if (previous !== migration.checksum) plan.drifted.push(migration);
     else plan.applied.push(migration);
   }
+  const names = new Set(onDisk.map((migration) => migration.name));
+  plan.unknown = [...recorded.keys()].filter((name) => !names.has(name)).sort();
   return plan;
 }
 

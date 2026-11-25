@@ -267,10 +267,17 @@ export async function turnOn(
     restore: already?.restore ?? await livekitUrls(target),
   };
 
-  // The containers move first, and the database only once they have. Publishing
-  // a port is the one step here that can fail — something else may hold it —
-  // and doing it first means a failure leaves the server exactly as it was
-  // rather than pointed at an address that never came up.
+  // The containers move before the servers' voice URLs do. Publishing a port
+  // is the one step here that can fail — something else may hold it — and
+  // doing it first means a failure leaves the server exactly as it was rather
+  // than pointed at an address that never came up.
+  //
+  // The row saying the switch is on goes in before the containers move: a
+  // console stopped between the two otherwise left Kong and LiveKit open on
+  // the network in plain HTTP with the dashboard showing the switch off, and
+  // nothing offering to turn it off. Now the dashboard shows it on, and
+  // turning it off puts everything back.
+  await writeState(target, LOCAL_TESTING, JSON.stringify(local));
   await writeOverride(projectDir(), localPublishing(local), maxFileBytesFromEnv());
   try {
     await recreate();
@@ -279,10 +286,11 @@ export async function turnOn(
     // Best effort: if this fails too the override is already gone, so
     // "Restart the stack" puts everything back.
     await recreate().catch(() => {});
+    if (already === null) await clearState(target, LOCAL_TESTING).catch(() => {});
+    else await writeState(target, LOCAL_TESTING, JSON.stringify(already)).catch(() => {});
     throw error;
   }
 
-  await writeState(target, LOCAL_TESTING, JSON.stringify(local));
   await setLivekitUrl(target, localLivekitUrl(local));
   return local;
 }

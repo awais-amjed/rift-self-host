@@ -31,6 +31,10 @@ WORKDIR /app
 COPY VERSION ./VERSION
 
 COPY console/deno.jsonc ./deno.jsonc
+# The lock, so the image is built from the versions tested, not whatever
+# jsr:@std/*@1 and npm:jose@5 resolve to on the day; --frozen fails the build
+# on anything it does not cover.
+COPY console/deno.lock ./deno.lock
 COPY console/src ./src
 COPY console/templates ./templates
 # The website's typefaces, which the console serves itself (src/web/fonts.ts).
@@ -52,7 +56,7 @@ COPY console/known-compose ./known-compose
 # Resolve and compile the dependency graph now, so a container that starts on a
 # machine with no outbound network still runs. Without this the first request
 # would try to fetch jose from npm.
-RUN deno cache /app/src/main.ts /app/src/migrations/cli.ts /app/src/reset_password.ts \
+RUN deno cache --frozen /app/src/main.ts /app/src/migrations/cli.ts /app/src/reset_password.ts \
   /app/src/update/cli.ts
 
 # `docker compose exec console reset-password`, for a lost console password.

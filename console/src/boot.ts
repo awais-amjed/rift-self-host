@@ -302,6 +302,7 @@ async function prepare(
   }
 
   const work = await pendingWork(target, paths);
+  if (work.databaseNewer !== null) say(work.databaseNewer);
   if (work.needed) {
     console.log(
       `Applying ${work.imageVersion} (this stack is at ` +

@@ -333,19 +333,35 @@ async function update(
   }
 
   if (next !== null) {
-    await step("Writing the new compose file", async () => {
-      const staged = join(dir, `.${COMPOSE_FILE}.check`);
-      await Deno.writeTextFile(staged, next);
-      try {
+    const staged = join(dir, `.${COMPOSE_FILE}.check`);
+    await Deno.writeTextFile(staged, next);
+    try {
+      await step("Checking the new compose file", async () => {
         const checked = await checkComposeFile(staged);
         if (!checked.ok) {
           throw new Error(
             `Compose cannot read the new file: ${composeProblem(checked.stderr)}`,
           );
         }
-      } finally {
-        await Deno.remove(staged).catch(() => {});
-      }
+      });
+      // Before the file is swapped, not after: the pull is the long step (up
+      // to half an hour), and a reboot in it used to leave the old console
+      // starting on the new file, moving services onto new images under old
+      // endpoints. Now the swap is a moment, with the images already here.
+      await step("Downloading the new images", async () => {
+        const files = [staged, ...await overrideFile(dir)];
+        const pulled = await pullServices(await stackServices(files), files);
+        if (!pulled.ok) {
+          throw new Error(
+            `Could not download the new images, so nothing was changed: ` +
+              composeProblem(pulled.stderr),
+          );
+        }
+      });
+    } finally {
+      await Deno.remove(staged).catch(() => {});
+    }
+    await step("Writing the new compose file", async () => {
       if (state === "edited") await setAside(dir, version);
       await replaceCompose(dir, next);
       await Deno.remove(join(dir, NEW_COMPOSE_FILE)).catch(() => {});
@@ -369,17 +385,18 @@ async function update(
   }
 
   const services = await stackServices();
-  await step("Downloading the new images", async () => {
-    const pulled = await pullServices(services);
-    if (!pulled.ok) {
-      // Nothing is running on the new file yet, so going back is clean.
-      if (next !== null) await replaceCompose(dir, previous!);
-      throw new Error(
-        `Could not download the new images, so nothing was changed: ` +
-          composeProblem(pulled.stderr),
-      );
-    }
-  });
+  // With an unchanged file the images are the console's own to fetch now.
+  if (next === null) {
+    await step("Downloading the new images", async () => {
+      const pulled = await pullServices(services);
+      if (!pulled.ok) {
+        throw new Error(
+          `Could not download the new images, so nothing was changed: ` +
+            composeProblem(pulled.stderr),
+        );
+      }
+    });
+  }
 
   const started = await step(
     "Starting the updated services",
@@ -397,6 +414,17 @@ async function update(
   });
 
   return { kind: "restarting", version, warning };
+}
+
+/** The operator's override beside the compose file, when there is one. */
+async function overrideFile(dir: string): Promise<string[]> {
+  const path = join(dir, "docker-compose.override.yml");
+  try {
+    await Deno.stat(path);
+    return [path];
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -19,6 +19,9 @@ export interface InstallReport {
   removed: string[];
 }
 
+/** The prefix of a function folder still being copied. */
+const INCOMING = ".installing-";
+
 /** Directories the runtime owns, which must survive a mirror. */
 const PRESERVED = new Set<string>([]);
 
@@ -49,9 +52,16 @@ export async function installFunctions(
   const installed: string[] = [];
   for (const source of sources) {
     for (const name of await entryNames(source)) {
+      // Copied whole beside the old one, then swapped in: removed first and
+      // copied in place, an install stopped midway left a function folder
+      // with half its files, which [missingFunctions] (by name) took for
+      // present on every start after.
       const destination = join(target, name);
+      const incoming = join(target, `${INCOMING}${name}`);
+      await Deno.remove(incoming, { recursive: true }).catch(() => {});
+      await copyTree(join(source, name), incoming);
       await Deno.remove(destination, { recursive: true }).catch(() => {});
-      await copyTree(join(source, name), destination);
+      await Deno.rename(incoming, destination);
       installed.push(name);
     }
   }
@@ -61,7 +71,8 @@ export async function installFunctions(
   for (const name of await entryNames(target)) {
     if (wanted.has(name)) continue;
     await Deno.remove(join(target, name), { recursive: true });
-    removed.push(name);
+    // A half-copied folder from a stopped install is not an endpoint.
+    if (!name.startsWith(INCOMING)) removed.push(name);
   }
 
   installed.sort();
