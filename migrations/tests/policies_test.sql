@@ -12581,4 +12581,144 @@ BEGIN
   RAISE NOTICE 'ok  a cap keeps the newest, and its deletes ring nobody (048)';
 END $$;
 
+-- ============================================================
+-- 34. A role edit writes only the rows it changes, and rings once (049)
+-- ============================================================
+-- On Delta: d1 and d2 are given a role, then it is recoloured, given a bit,
+-- and deleted; `@everyone` loses a bit. Each step is checked
+-- against `app.permissions_of`, and what was said is counted with a recorder
+-- in place of Realtime. Last, the retention pass's deletes (048) are checked
+-- to ring nobody, which needs the same recorder.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+CREATE FUNCTION pg_temp.drift49() RETURNS INTEGER LANGUAGE sql AS $$
+  SELECT count(*)::INTEGER
+    FROM users u, LATERAL (SELECT app.permissions_of(u.id) AS b) p
+   WHERE u.server_id = 'ee470000-0000-4000-8000-000000000001'
+     AND (u.is_server_admin, u.is_channel_manager, u.can_create_tokens)
+         IS DISTINCT FROM (
+           (p.b & app.perm('ADMINISTRATOR')) <> 0,
+           (p.b & (app.perm('ADMINISTRATOR') | app.perm('MANAGE_CHANNELS'))) <> 0,
+           (p.b & (app.perm('ADMINISTRATOR') | app.perm('CREATE_INVITE'))) <> 0)
+$$;
+
+DO $$
+DECLARE
+  v_server UUID := 'ee470000-0000-4000-8000-000000000001';
+  v_d1     UUID := '47474747-eeee-4eee-8eee-000000000001';
+  v_d2     UUID := '47474747-eeee-4eee-8eee-000000000002';
+  v_d3     UUID := '47474747-eeee-4eee-8eee-000000000003';
+  v_role   UUID;
+  v_xmin   TEXT[];
+  v_members INTEGER;
+  v_me      INTEGER;
+  v_n       INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+
+  PERFORM app.sync_permission_caches(
+    ARRAY(SELECT id FROM users WHERE server_id = v_server));
+  INSERT INTO roles (server_id, name, position, permissions)
+  VALUES (v_server, 'Helpers-049', 50, 0) RETURNING id INTO v_role;
+
+  -- Two handed out in one statement: the list once, each of them once.
+  DELETE FROM pg_temp.said;
+  INSERT INTO member_roles (user_id, role_id) VALUES (v_d1, v_role), (v_d2, v_role);
+  SELECT count(*) FILTER (WHERE event = 'members' AND topic = 'server:' || v_server),
+         count(*) FILTER (WHERE event = 'me')
+    INTO v_members, v_me FROM pg_temp.said;
+  IF v_members <> 1 OR v_me <> 2
+     OR (SELECT count(*) FROM pg_temp.said WHERE event = 'me'
+          AND topic IN ('user:' || v_d1, 'user:' || v_d2)) <> 2 THEN
+    RAISE EXCEPTION 'FAIL: two roles handed out rang members % and me % times', v_members, v_me;
+  END IF;
+
+  -- A colour writes nobody's row and rings the list once.
+  SELECT array_agg(xmin::TEXT ORDER BY id) INTO v_xmin FROM users WHERE server_id = v_server;
+  DELETE FROM pg_temp.said;
+  UPDATE roles SET color = '#123456' WHERE id = v_role;
+  IF (SELECT array_agg(xmin::TEXT ORDER BY id) FROM users WHERE server_id = v_server)
+     IS DISTINCT FROM v_xmin THEN
+    RAISE EXCEPTION 'FAIL: recolouring a role wrote its holders'' rows';
+  END IF;
+  SELECT count(*) FILTER (WHERE event = 'members'), count(*) FILTER (WHERE event = 'me')
+    INTO v_members, v_me FROM pg_temp.said;
+  IF v_members <> 1 OR v_me <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a colour rang members % and me % times', v_members, v_me;
+  END IF;
+
+  -- A bit: the holders move (d2, banned in section 32, holds nothing), nobody
+  -- else, each told once and the list once.
+  DELETE FROM pg_temp.said;
+  UPDATE roles SET permissions = app.perm('MANAGE_CHANNELS') WHERE id = v_role;
+  IF NOT (SELECT is_channel_manager FROM users WHERE id = v_d1)
+     OR (SELECT bool_or(is_channel_manager) FROM users WHERE id IN (v_d2, v_d3))
+     OR pg_temp.drift49() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a role given MANAGE_CHANNELS left the flags wrong';
+  END IF;
+  SELECT count(*) FILTER (WHERE event = 'members'), count(*) FILTER (WHERE event = 'me')
+    INTO v_members, v_me FROM pg_temp.said;
+  IF v_members <> 1 OR v_me <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a role''s bit rang members % and me % times', v_members, v_me;
+  END IF;
+
+  -- `@everyone` loses CREATE_INVITE: every member hears it once, and the
+  -- list is told once.
+  DELETE FROM pg_temp.said;
+  UPDATE roles SET permissions = permissions & ~app.perm('CREATE_INVITE')
+   WHERE server_id = v_server AND is_everyone;
+  IF (SELECT bool_or(can_create_tokens) FROM users WHERE server_id = v_server)
+     OR pg_temp.drift49() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: @everyone losing CREATE_INVITE left the flags wrong';
+  END IF;
+  SELECT count(*) FILTER (WHERE event = 'members'), count(*) FILTER (WHERE event = 'me')
+    INTO v_members, v_me FROM pg_temp.said;
+  SELECT count(*) INTO v_n FROM users WHERE server_id = v_server;
+  IF v_members <> 1 OR v_me <> v_n THEN
+    RAISE EXCEPTION 'FAIL: an @everyone bit rang members % and me % times (% members)',
+      v_members, v_me, v_n;
+  END IF;
+
+  -- Deleted: its holders lose what it gave, in the cascade's one statement.
+  DELETE FROM pg_temp.said;
+  DELETE FROM roles WHERE id = v_role;
+  IF (SELECT bool_or(is_channel_manager) FROM users WHERE id IN (v_d1, v_d2))
+     OR pg_temp.drift49() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: deleting a role left its holders'' flags behind';
+  END IF;
+  SELECT count(*) FILTER (WHERE event = 'members'), count(*) FILTER (WHERE event = 'me')
+    INTO v_members, v_me FROM pg_temp.said;
+  IF v_members > 2 OR v_me <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a deleted role rang members % and me % times', v_members, v_me;
+  END IF;
+  RAISE NOTICE 'ok  a role edit writes only the rows it moves and rings the list once (049)';
+
+  -- 048: a message the retention pass deletes rings nobody. #capped-048
+  -- keeps one; two more go in, and the pass takes them back out.
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+  SELECT 'ee471111-0000-4000-8000-000000000481', v_d1, 'r' || g, 'n', 's', 1
+    FROM generate_series(1, 2) AS g;
+  DELETE FROM pg_temp.said;
+  PERFORM app.enforce_retention();
+  IF (SELECT count(*) FROM messages
+       WHERE channel_id = 'ee471111-0000-4000-8000-000000000481') <> 1 THEN
+    RAISE EXCEPTION 'FAIL: the retention pass did not trim back to the cap';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_temp.said WHERE event = 'message_changed') THEN
+    RAISE EXCEPTION 'FAIL: the retention pass rang for messages it deleted';
+  END IF;
+
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  RAISE NOTICE 'ok  the retention pass''s deletes ring nobody (048)';
+END $$;
+
 ROLLBACK;

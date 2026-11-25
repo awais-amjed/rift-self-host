@@ -512,6 +512,15 @@ files, each run once after it, and the list below grows with them.
    history-cap edge by walking its index, rather than numbering every row; a retention delete
    rings nobody in channels too. Measured Nov 25 2026 on 5 million messages: a sweep 2.2 s →
    0.5 s for the daily whole pass and a few ms between, retention with nothing to do 14 ms.
+29. **049_role_edit_cost.sql** — editing a role writes only the members' rows whose
+   permission flags (`is_server_admin`, `is_channel_manager`, `can_create_tokens`, `is_owner`)
+   it moves, worked out in one statement (`app.sync_permission_caches`), and rings `members`
+   once rather than once per holder; a change to its permissions tells each holder `me`
+   once. Roles handed out or taken away, a deleted role's included, are handled a statement
+   at a time the same way. Measured Nov 25 2026 on 50,000 members: recolouring a role 40,000
+   hold 5.1 s → 6 ms, `@everyone` 6.4 s → 2 ms, with 100,000 messages sent → 1. A permission
+   that moves every member's flag still takes 2–3 s: the cost of writing that many `users`
+   rows, which 52 foreign keys point at.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
