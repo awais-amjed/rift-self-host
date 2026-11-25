@@ -546,6 +546,13 @@ files, each run once after it, and the list below grows with them.
    with nothing typed 534 → 6 ms through PostgREST, "a" 904 → 35 ms (what it costs in a
    public channel too). A private channel opened to a role of 38,000 pays about 10 ms more
    for gathering that list.
+33. **053_unread_channels.sql** — `unread_counts` runs as the server and works out the
+   caller's readable channels once (`app.visible_channels`), instead of `messages_select`
+   building them again for each of the few hundred statements its channel-by-channel count
+   makes. Each count asks of a row what that policy asks: not somebody else's ephemeral
+   reply, and for a bot only what was sent to it or sealed under a key version it was given.
+   Same counts. Measured Nov 26 2026 on 300 channels, for a member behind in 93: 157 → 17 ms
+   through PostgREST.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that

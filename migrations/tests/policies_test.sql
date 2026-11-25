@@ -13100,4 +13100,73 @@ BEGIN
   RAISE NOTICE 'ok  the @ menu asks a private channel who is in it once (052)';
 END $$;
 
+-- ============================================================
+-- 38. Unread counts gather the visible channels once (053)
+-- ============================================================
+-- Echo again: general is public; the room has e1, e3 (banned), e4 (the bot)
+-- and e5 (section 37). Rows the policy hides from some: an ephemeral reply
+-- the bot sent e1, a message to the bot, and one in the room sealed under a
+-- key version the bot was given. `unread_counts` now reads messages as the
+-- server, so each caller's counts are checked against the same count made
+-- through `messages_select`, as the caller, the way it used to be made.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+INSERT INTO messages (id, channel_id, sender_id, ciphertext, nonce, signature, key_version,
+                      ephemeral_for, to_bot)
+VALUES (95301, 'ee501111-0000-4000-8000-000000000001', '50505050-eeee-4eee-8eee-000000000004',
+        'c', 'n', 's', 1, '50505050-eeee-4eee-8eee-000000000001', NULL),
+       (95302, 'ee501111-0000-4000-8000-000000000001', '50505050-eeee-4eee-8eee-000000000001',
+        'c', 'n', 's', 1, NULL, '50505050-eeee-4eee-8eee-000000000004'),
+       (95303, 'ee501111-0000-4000-8000-000000000002', '50505050-eeee-4eee-8eee-000000000005',
+        'c', 'n', 's', 2, NULL, NULL);
+INSERT INTO bot_channel_keys (channel_id, bot_id, from_key_version) VALUES
+  ('ee501111-0000-4000-8000-000000000002', '50505050-eeee-4eee-8eee-000000000004', 2);
+
+-- The count as it was made: the channels `channels_select` shows, the rows
+-- `messages_select` shows, past the caller's cursor, capped.
+CREATE FUNCTION pg_temp.uc53() RETURNS JSONB LANGUAGE sql AS $$
+  SELECT COALESCE(jsonb_object_agg(x.id, x.n), '{}') FROM (
+    SELECT c.id, (SELECT count(*) FROM (
+             SELECT 1 FROM messages m
+              WHERE m.channel_id = c.id
+                AND m.id > COALESCE((SELECT r.last_read_id FROM read_state r
+                                      WHERE r.user_id = auth.uid() AND r.scope = 'channel'
+                                        AND r.scope_id = c.id), 0)
+                AND m.sender_id IS DISTINCT FROM auth.uid()
+                AND NOT m.is_interaction
+              LIMIT unread_cap()) q) AS n
+      FROM channels c) x
+   WHERE x.n > 0
+$$;
+GRANT EXECUTE ON FUNCTION pg_temp.uc53() TO authenticated;
+
+DO $$
+DECLARE
+  general CONSTANT TEXT := 'ee501111-0000-4000-8000-000000000001';
+  room    CONSTANT TEXT := 'ee501111-0000-4000-8000-000000000002';
+  v_got   JSONB;
+  v_want  JSONB;
+  i       INTEGER;
+BEGIN
+  FOR i IN 1..5 LOOP
+    PERFORM pg_temp.as50(i);
+    SET LOCAL ROLE authenticated;
+    v_got := unread_counts()->'channels';
+    v_want := pg_temp.uc53();
+    RESET ROLE;
+    IF v_got IS DISTINCT FROM v_want THEN
+      RAISE EXCEPTION 'FAIL: e%''s unread channels came back as %, not %', i, v_got, v_want;
+    END IF;
+    -- And the cases the rows above are for, spelled out.
+    IF (i = 2 AND v_got->>general <> '4')               -- not e1's ephemeral reply
+       OR (i = 2 AND v_got ? room)                      -- not a room e2 is outside
+       OR (i = 3 AND v_got <> '{}')                     -- banned: nothing
+       OR (i = 4 AND v_got <> jsonb_build_object(general, 1, room, 1)) THEN
+      RAISE EXCEPTION 'FAIL: e%''s unread channels came back as %', i, v_got;
+    END IF;
+  END LOOP;
+  PERFORM set_config('request.jwt.claims', '', true);
+  RAISE NOTICE 'ok  unread counts gather the visible channels once (053)';
+END $$;
+
 ROLLBACK;
