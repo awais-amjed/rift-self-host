@@ -36,7 +36,7 @@ export const statusRoutes: ApiRoutes = async (request, url, paths) => {
     const target = targetFromEnv();
     const [services, checks, local, proxy, rotations] = await Promise.all([
       serviceStatuses(),
-      runChecks(target, paths.migrationsDir).catch(() => []),
+      runChecks(target, paths.migrationsDir, paths.projectDir).catch(() => []),
       readLocalTesting(target).catch(() => null),
       ownProxyRoutes(paths.templateRoot).catch(() => null),
       lastRotated(target).catch(() => null),

@@ -8,9 +8,12 @@
  * `docker ps` says would be worth nothing; this is the part that is worth
  * something.
  */
-import { type PostgresTarget, queryRows } from "./postgres.ts";
+import { join } from "jsr:@std/path@1";
+import { parse } from "jsr:@std/yaml@1";
+import { FIELD_SEPARATOR, type PostgresTarget, queryRows } from "./postgres.ts";
 import { planMigrations } from "./migrations/runner.ts";
 import { currentLimits, DEFAULT_LIMITS } from "./setup/realtime.ts";
+import { LIVEKIT_WEBHOOK_URL } from "./setup/livekit_webhook.ts";
 
 /** How a check came out. */
 export type CheckLevel = "ok" | "warn" | "fail" | "unknown";
@@ -27,12 +30,14 @@ export interface Check {
 export async function runChecks(
   target: PostgresTarget,
   migrationsDir: string,
+  projectDir: string,
 ): Promise<Check[]> {
   const checks = await Promise.all([
     schemaCheck(target, migrationsDir),
     realtimeLimitsCheck(target),
     tableSecurityCheck(target),
     cronCheck(target),
+    webhooksCheck(target, projectDir),
   ]);
   return checks;
 }
@@ -174,6 +179,88 @@ async function cronCheck(target: PostgresTarget): Promise<Check> {
   } catch (error) {
     return { name, level: "unknown", detail: readable(error) };
   }
+}
+
+/**
+ * Does every voice node's webhook reach this server?
+ *
+ * Without it calls still work, which is why nobody notices: but a watcher
+ * whose app crashed keeps receiving until a roster read sweeps it, and a join
+ * with a token kept past a ban or the end of a DM call is never checked
+ * (`livekit_webhook`). The bundled LiveKit is read from its own file; a region
+ * is known only by whether its webhook has ever arrived (`webhook_heard_at`).
+ */
+async function webhooksCheck(target: PostgresTarget, projectDir: string): Promise<Check> {
+  const name = "Voice webhooks reach the server";
+  let yaml: string | null = null;
+  try {
+    yaml = await Deno.readTextFile(join(projectDir, "volumes/livekit/livekit.yaml"));
+  } catch {
+    // No bundled LiveKit file: only the regions can be asked about.
+  }
+  try {
+    const rows = await queryRows(
+      target,
+      "SELECT is_default, label FROM livekit_nodes WHERE webhook_heard_at IS NULL ORDER BY label",
+    );
+    const unheard = rows.map((row) => {
+      const [isDefault, label] = row.split(FIELD_SEPARATOR);
+      return { isDefault: isDefault === "t", label };
+    });
+    return webhooksVerdict(name, yaml === null ? null : postsHere(yaml), unheard);
+  } catch (error) {
+    return { name, level: "unknown", detail: readable(error) };
+  }
+}
+
+/** Whether the bundled LiveKit's [yaml] sends its webhook to this server. */
+export function postsHere(yaml: string): boolean {
+  try {
+    // deno-lint-ignore no-explicit-any
+    const urls = (parse(yaml) as any)?.webhook?.urls;
+    return Array.isArray(urls) && urls.includes(LIVEKIT_WEBHOOK_URL);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The check from what was read: whether the bundled LiveKit posts here (null
+ * with no file to read), and the nodes never heard from. A default node never
+ * heard from is passed over while the bundled file is right, since that is
+ * only a server that has held no call yet.
+ */
+export function webhooksVerdict(
+  name: string,
+  bundledPostsHere: boolean | null,
+  unheard: { isDefault: boolean; label: string }[],
+): Check {
+  if (bundledPostsHere === false) {
+    return {
+      name,
+      level: "warn",
+      detail: "The bundled LiveKit's livekit.yaml does not send its webhook to " +
+        "this server, so calls are not checked as people join. Put its webhook " +
+        "block back (see the troubleshooting guide) and restart LiveKit.",
+    };
+  }
+  const regions = [
+    ...new Set(
+      unheard.filter((node) => !(node.isDefault && bundledPostsHere)).map((node) =>
+        node.label
+      ),
+    ),
+  ];
+  if (regions.length > 0) {
+    return {
+      name,
+      level: "warn",
+      detail: `Never heard from: ${regions.join(", ")}. If calls have been held ` +
+        "there, its webhook is not reaching this server: check MAIN_SERVER in " +
+        "that region's .env.",
+    };
+  }
+  return { name, level: "ok", detail: "Every voice node's webhook has arrived." };
 }
 
 /**

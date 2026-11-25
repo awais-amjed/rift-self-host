@@ -35,7 +35,10 @@ import { reconcileConnections } from "../_shared/call_rights.ts";
  *     would mint differently is pushed what it would mint. A DM call's room
  *     is held to its call the same way (`checkDmJoin`).
  *
- * Every other event is answered at once and changes nothing.
+ * Each of those, once its signature checks out, also notes that the node's
+ * webhook reaches this server (`noteHeard`), so a node without one can be
+ * told apart from a node without calls. Every other event is answered at
+ * once and changes nothing.
  */
 
 const supabase = createClient(
@@ -186,6 +189,31 @@ async function nodesSigningWith(
   return [...found.values()];
 }
 
+/** When this worker last stamped each node, by address: see [noteHeard]. */
+const lastStamped = new Map<string, number>();
+const STAMP_EVERY_MS = 10 * 60 * 1000;
+
+/**
+ * Records that [url]'s webhook reaches this server (`livekit_nodes.
+ * webhook_heard_at`), which is how the app's region list tells a node with
+ * no webhook from one with no calls. At most once in ten minutes per worker,
+ * and the row is skipped when it was stamped that recently by another one,
+ * so a busy call costs no write per join. Every row with the address: the
+ * servers sharing the bundled LiveKit each have one. A server too old for
+ * the column, or a failed write, changes nothing about the event.
+ */
+async function noteHeard(url: string): Promise<void> {
+  const now = Date.now();
+  if (now - (lastStamped.get(url) ?? 0) < STAMP_EVERY_MS) return;
+  lastStamped.set(url, now);
+  const { error } = await supabase
+    .from("livekit_nodes")
+    .update({ webhook_heard_at: new Date(now).toISOString() })
+    .eq("url", url)
+    .or(`webhook_heard_at.is.null,webhook_heard_at.lt.${new Date(now - STAMP_EVERY_MS).toISOString()}`);
+  if (error) console.warn(`[livekit_webhook] could not note the node: ${error.code ?? error.message}`);
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return new Response(null, { status: 405 });
 
@@ -219,6 +247,7 @@ Deno.serve(async (req) => {
     } catch {
       continue;
     }
+    await noteHeard(node.url);
     const service = new RoomServiceClient(normaliseHost(node.url), apiKey, node.secret);
     // The join first: a watcher refused here has nothing left to sweep.
     const dmCall = DM_ROOM.exec(room)?.[1];

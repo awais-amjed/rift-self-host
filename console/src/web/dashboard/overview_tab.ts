@@ -71,6 +71,10 @@ const HEALTH_HELP = `
     database is open to outsiders. If this is ever red, act immediately.</li>
   <li><strong>Cleanup jobs scheduled</strong> — expired invites, old messages
     and orphaned attachments are cleared out. If not, they pile up.</li>
+  <li><strong>Voice webhooks reach the server</strong> — each LiveKit tells the
+    server who joins and leaves its calls, so a banned member or an ended DM
+    call can't be rejoined with an old token. A region added but never used
+    shows here until its first call.</li>
 </ul>`;
 
 const CONTAINERS_HELP = `

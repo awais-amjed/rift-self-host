@@ -12270,4 +12270,25 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── a node's webhook stamp is the server's to write ───────
+-- `livekit_webhook` writes it on the service role; an admin reads it with the
+-- rest of the row, and cannot set it to hide a node whose webhook never comes.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_heard TIMESTAMPTZ;
+BEGIN
+  SELECT webhook_heard_at INTO v_heard FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+  BEGIN
+    UPDATE livekit_nodes SET webhook_heard_at = now()
+     WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: an admin stamped a node''s webhook';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  an admin reads a node''s webhook stamp and cannot set it (046)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
