@@ -14,8 +14,8 @@ const supabase = createClient(
 const BATCH = 1000;
 
 /**
- * Applies the server's retention settings and removes the attachment blobs left
- * behind.
+ * Removes the attachment blobs left behind. The retention settings are applied
+ * by the hourly `rift-message-retention` job, not here (048).
  *
  * This exists because deleting a message frees almost nothing on its own.
  * `ciphertext` is capped at 16 KB, so the disk an operator worries about is
@@ -24,9 +24,9 @@ const BATCH = 1000;
  * "Use the Storage API instead", so the sweep has to end somewhere holding the
  * service key. That is here.
  *
- * The database decides *what* to remove — `sweep_attachments()` runs the
- * retention pass and returns the blobs whose messages are gone, found without
- * any message→blob linkage (see the migration). This function only carries out
+ * The database decides *what* to remove — `sweep_attachments()` returns
+ * deleted messages' files on every run, and once a day everything nobody holds
+ * (see the migrations). This function only carries out
  * the half SQL can't.
  *
  * Any member may call it, the way any member may call `sweep_channel_keys`:
@@ -44,8 +44,8 @@ Deno.serve(async (req) => {
     if (isAuthError(auth)) return auth;
 
     // A minute apart, whoever asks (`claim_attachment_sweep`): every app
-    // calls this as it opens a server, and each run is a pass over the whole
-    // database. Too soon is not a failure, just nothing to do yet.
+    // calls this as it opens a server, and once a day a run reads every file.
+    // Too soon is not a failure, just nothing to do yet.
     const { data: due, error: dueError } = await supabase.rpc("claim_attachment_sweep");
     if (dueError) {
       return CustomResponse.error("Error running the sweep", EC.DB_ERROR, dueError);

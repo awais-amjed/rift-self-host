@@ -1546,7 +1546,7 @@ BEGIN
 END $$;
 
 -- The sweep forgets a trashed file once it is gone. Run in a block that is
--- then undone, since the sweep runs the retention pass too.
+-- then undone.
 SET LOCAL storage.allow_delete_query = 'true';
 DO $$
 DECLARE v_left TEXT;
@@ -12460,6 +12460,125 @@ BEGIN
     RAISE EXCEPTION 'FAIL: the daily look did not mark every channel';
   END IF;
   RAISE NOTICE 'ok  only a key holder looks at a whole channel; the daily look marks all (047)';
+END $$;
+
+-- ============================================================
+-- 33. The sweep and the retention pass look things up (048)
+-- ============================================================
+-- The sweep no longer runs the retention pass; between whole passes, a day
+-- apart, it collects only deleted messages' files.
+
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+
+INSERT INTO channels (id, server_id, name, channel_type, history_cap) VALUES
+  ('ee471111-0000-4000-8000-000000000481', 'ee470000-0000-4000-8000-000000000001',
+   'capped-048', 'text', 1);
+INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature, key_version)
+SELECT 'ee471111-0000-4000-8000-000000000481', '47474747-eeee-4eee-8eee-000000000001',
+       'm' || g, 'n', 's', 1
+  FROM generate_series(1, 3) AS g;
+
+INSERT INTO storage.objects (bucket_id, name, owner, created_at) VALUES
+  -- A channel that does not exist: only a whole pass collects it.
+  ('chat-ee470000-0000-4000-8000-000000000001',
+   'cccc1111-0000-4000-8000-000000000481/dead.bin',
+   '47474747-eeee-4eee-8eee-000000000001', now() - interval '3 hours'),
+  -- A deleted message's file: every sweep collects it.
+  ('chat-ee470000-0000-4000-8000-000000000001',
+   'ee471111-0000-4000-8000-000000000481/trashed.bin',
+   '47474747-eeee-4eee-8eee-000000000001', now() - interval '3 hours'),
+  -- A conversation with files and no messages left: its files go.
+  ('chat-ee470000-0000-4000-8000-000000000001',
+   'dm_00000000-0000-4000-8000-0000000048a1_00000000-0000-4000-8000-0000000048a2/gone.bin',
+   '47474747-eeee-4eee-8eee-000000000001', now() - interval '3 hours');
+INSERT INTO attachment_trash (bucket, name) VALUES
+  ('chat-ee470000-0000-4000-8000-000000000001',
+   'ee471111-0000-4000-8000-000000000481/trashed.bin');
+
+DO $$
+DECLARE v_found TEXT;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM app.orphaned_attachments()
+                  WHERE object_name LIKE 'dm\_%0048a2/gone.bin') THEN
+    RAISE EXCEPTION 'FAIL: the files of a conversation with no messages left were kept';
+  END IF;
+
+  -- A whole pass was a moment ago: only the trash.
+  INSERT INTO app.attachment_sweep_runs (id, last_at, whole_at)
+  VALUES (true, now(), now())
+  ON CONFLICT (id) DO UPDATE SET whole_at = now();
+  SELECT sweep_attachments(100000)::TEXT INTO v_found;
+  IF v_found NOT LIKE '%000000000481/trashed.bin%' THEN
+    RAISE EXCEPTION 'FAIL: a sweep between whole passes left a deleted message''s file';
+  END IF;
+  IF v_found LIKE '%000000000481/dead.bin%' THEN
+    RAISE EXCEPTION 'FAIL: a sweep between whole passes read every file';
+  END IF;
+  IF (SELECT count(*) FROM messages
+       WHERE channel_id = 'ee471111-0000-4000-8000-000000000481') <> 3 THEN
+    RAISE EXCEPTION 'FAIL: the sweep ran the retention pass';
+  END IF;
+
+  -- A day later: everything, and the pass found something, so the next
+  -- sweep is a whole one too.
+  UPDATE app.attachment_sweep_runs SET whole_at = now() - interval '25 hours';
+  SELECT sweep_attachments(100000)::TEXT INTO v_found;
+  IF v_found NOT LIKE '%000000000481/dead.bin%'
+     OR v_found NOT LIKE '%000000000481/trashed.bin%' THEN
+    RAISE EXCEPTION 'FAIL: the daily whole pass missed a file';
+  END IF;
+  IF (SELECT whole_at FROM app.attachment_sweep_runs) > now() - interval '1 day' THEN
+    RAISE EXCEPTION 'FAIL: a whole pass that found files counted as done';
+  END IF;
+  RAISE NOTICE 'ok  the sweep leaves retention to its job and reads every file once a day (048)';
+END $$;
+
+-- A whole pass that finds nothing is done for a day. Undone afterwards: the
+-- files go only for this check.
+SET LOCAL storage.allow_delete_query = 'true';
+DO $$
+DECLARE v_done TEXT;
+BEGIN
+  BEGIN
+    DELETE FROM attachment_trash;
+    DELETE FROM storage.objects;
+    PERFORM sweep_attachments();
+    RAISE EXCEPTION USING ERRCODE = 'P0048', MESSAGE = (
+      SELECT (whole_at > now() - interval '1 minute')::TEXT
+        FROM app.attachment_sweep_runs);
+  EXCEPTION WHEN SQLSTATE 'P0048' THEN v_done := SQLERRM;
+  END;
+  IF v_done IS DISTINCT FROM 'true' THEN
+    RAISE EXCEPTION 'FAIL: a whole pass that found nothing was not recorded';
+  END IF;
+  RAISE NOTICE 'ok  a whole pass that finds nothing waits a day for the next (048)';
+END $$;
+SET LOCAL storage.allow_delete_query = 'false';
+
+-- The retention pass trims by count without numbering every row, and a
+-- channel message it deletes rings nobody.
+DO $$
+DECLARE v_before INTEGER := 0; v_after INTEGER := 0;
+BEGIN
+  IF app.realtime_ready() THEN
+    SELECT count(*) INTO v_before FROM realtime.messages WHERE event = 'message_changed';
+  END IF;
+  PERFORM app.enforce_retention();
+  IF (SELECT array_agg(ciphertext) FROM messages
+       WHERE channel_id = 'ee471111-0000-4000-8000-000000000481') <> ARRAY['m3'] THEN
+    RAISE EXCEPTION 'FAIL: a cap of 1 did not keep the newest message alone';
+  END IF;
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'ok  a cap keeps the newest (048); skip  Realtime has never run here';
+    RETURN;
+  END IF;
+  SELECT count(*) INTO v_after FROM realtime.messages WHERE event = 'message_changed';
+  IF v_after <> v_before THEN
+    RAISE EXCEPTION 'FAIL: the retention pass rang % times for messages it deleted',
+      v_after - v_before;
+  END IF;
+  RAISE NOTICE 'ok  a cap keeps the newest, and its deletes ring nobody (048)';
 END $$;
 
 ROLLBACK;
