@@ -32,7 +32,8 @@ import { reconcileConnections } from "../_shared/call_rights.ts";
  *     only the connection that is there. An app that kept its first token
  *     could leave and come back with it, unmuted; or banned, back in the
  *     call. So a join the token gate would refuse now is removed, and one it
- *     would mint differently is pushed what it would mint.
+ *     would mint differently is pushed what it would mint. A DM call's room
+ *     is held to its call the same way (`checkDmJoin`).
  *
  * Every other event is answered at once and changes nothing.
  */
@@ -60,10 +61,49 @@ function prompted(event: string, identity: string): boolean {
 
 /** A channel's call: rooms are named by channel id, a DM call `dm-<callId>`. */
 const CHANNEL_ROOM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const DM_ROOM = /^dm-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
-/** Joins worth checking: any connection to a channel's call. */
+/** Joins worth checking: any connection to a channel's call or a DM call. */
 function checked(event: string, room: string): boolean {
-  return event === "participant_joined" && CHANNEL_ROOM.test(room);
+  return event === "participant_joined" && (CHANNEL_ROOM.test(room) || DM_ROOM.test(room));
+}
+
+/**
+ * [identity], just joined the DM call [room], held to what `get_dm_call_token`
+ * would answer now: on the call (the caller from the first ring, the callee
+ * once they answered), the call not over, and still allowed to join calls and,
+ * for a share, to share. A DM call's token is good for an hour like any other,
+ * and LiveKit opens a room for one that is still in date, so a call that had
+ * ended came back with whoever still held a token for it; this was the one
+ * kind of room nothing checked.
+ *
+ * Unreadable leaves it as it is, as for a channel.
+ */
+async function checkDmJoin(
+  service: RoomServiceClient,
+  room: string,
+  callId: string,
+  identity: string,
+) {
+  const userId = identity.split("~")[0];
+  const ask = (name: string) =>
+    supabase.rpc("user_has_permission", { p_user: userId, p_name: name });
+  const [call, ...rights] = await Promise.all([
+    supabase
+      .from("dm_calls")
+      .select("caller_id, callee_id, answered_at, ended_at")
+      .eq("id", callId)
+      .maybeSingle(),
+    ask("CONNECT"),
+    ...(connectionKind(identity) === "share" ? [ask("SCREEN_SHARE")] : []),
+  ]);
+  if (call.error || rights.some((a) => a.error)) return;
+  const row = call.data as Record<string, any> | null;
+  const onCall = row !== null && row.ended_at === null &&
+    (userId === row.caller_id || (userId === row.callee_id && row.answered_at !== null));
+  if (!onCall || rights.some((a) => a.data !== true)) {
+    await service.removeParticipant(room, identity).catch(() => {});
+  }
 }
 
 /**
@@ -181,7 +221,9 @@ Deno.serve(async (req) => {
     }
     const service = new RoomServiceClient(normaliseHost(node.url), apiKey, node.secret);
     // The join first: a watcher refused here has nothing left to sweep.
-    if (checks) await checkJoin(service, room, identity);
+    const dmCall = DM_ROOM.exec(room)?.[1];
+    if (checks && dmCall) await checkDmJoin(service, room, dmCall, identity);
+    else if (checks) await checkJoin(service, room, identity);
     if (sweeps) await sweepOrphanedWatchers(service, room);
     return new Response(null, { status: 200 });
   }
