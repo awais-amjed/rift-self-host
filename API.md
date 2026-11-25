@@ -559,6 +559,10 @@ files, each run once after it, and the list below grows with them.
    writes in, the bound was 0 and every member's cursor was read and checked. Same people
    rung. Measured Nov 26 2026 with 2,475 of 47,981 members caught up: 45,506 cursors read
    and dropped → none, 11 → 8.5 ms.
+35. **055_member_counts_index.sql** — `idx_users_counted`, the members who are not banned by
+   server and bot, so `member_counts` (the sidebar header) is an index-only scan rather than a
+   read of every user. Measured Nov 26 2026 on 50,000 members: 7.4 → 3.4 ms through
+   PostgREST.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
