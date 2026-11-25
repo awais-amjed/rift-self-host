@@ -11743,4 +11743,83 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ============================================================
+-- 30. Sending a bot away names a bot (041)
+-- ============================================================
+-- Before 041 both answered `ok` for a person, and the edge functions then
+-- removed that person from the call or rewrote their permissions.
+
+RESET ROLE;
+-- On Eta, since Alpha is gone by now: ada is its Admin, ben a member, and
+-- this adds a bot.
+INSERT INTO auth.users (id) VALUES ('a0332222-0000-4000-8000-0000000000b9');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, is_bot)
+VALUES ('a0332222-0000-4000-8000-0000000000b9', 'a0330000-0000-4000-8000-000000000001',
+        'eta-bot', 'Eta Bot', 'pk-eta-bot', 'sid-eta-bot', true);
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000f1',
+   'a0330000-0000-4000-8000-000000000001', 'bot-booth', 'voice');
+INSERT INTO bot_voice_grants (channel_id, bot_id, granted_by)
+VALUES ('aaaa1111-0000-4000-8000-0000000000f1', 'a0332222-0000-4000-8000-0000000000b9',
+        'a0332222-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"a0332222-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := dismiss_bot_from_voice('a0332222-0000-4000-8000-000000000001',
+                                     'aaaa1111-0000-4000-8000-0000000000f1');
+  IF v_result->>'reason' <> 'no_such_bot' THEN
+    RAISE EXCEPTION 'FAIL: a member could send a person away from a call: %', v_result;
+  END IF;
+  v_result := dismiss_bot_from_voice('a0332222-0000-4000-8000-0000000000b9',
+                                     'aaaa1111-0000-4000-8000-0000000000f1');
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a member could no longer send a bot away: %', v_result;
+  END IF;
+  RAISE NOTICE 'ok  only a bot can be sent away from a call (041)';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"a0332222-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_result JSONB;
+BEGIN
+  v_result := revoke_bot_voice_listen('a0332222-0000-4000-8000-000000000002',
+                                      'aaaa1111-0000-4000-8000-0000000000f1');
+  IF v_result->>'reason' <> 'no_such_bot' THEN
+    RAISE EXCEPTION 'FAIL: an admin could take a person''s hearing as a bot''s: %', v_result;
+  END IF;
+  RAISE NOTICE 'ok  only a bot''s hearing can be taken that way (041)';
+END $$;
+
+-- A ban hides a listening bot without touching its grant, so the lists change
+-- with no row changing: the ban and the unban ring for themselves.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '{}', true); END $$;
+
+DO $$
+DECLARE v_before INTEGER; v_after INTEGER;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+  SELECT count(*) INTO v_before FROM realtime.messages
+   WHERE topic = 'server:a0330000-0000-4000-8000-000000000001' AND event = 'voice_bots';
+  UPDATE users SET is_banned = true WHERE id = 'a0332222-0000-4000-8000-0000000000b9';
+  UPDATE users SET is_banned = false WHERE id = 'a0332222-0000-4000-8000-0000000000b9';
+  SELECT count(*) INTO v_after FROM realtime.messages
+   WHERE topic = 'server:a0330000-0000-4000-8000-000000000001' AND event = 'voice_bots';
+  IF v_after - v_before <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a listening bot''s ban and unban rang % times, not twice',
+      v_after - v_before;
+  END IF;
+  RAISE NOTICE 'ok  a listening bot''s ban and unban tell the sidebar (041)';
+END $$;
+
 ROLLBACK;
