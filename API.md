@@ -214,7 +214,21 @@ which answer with one JSON value:
   minutes from taking it (017); a lease that ran out goes to somebody else
   asking before its last holder may take it back, a minute later. `get_channel_key` lists
   `members_missing` only to a caller who holds the current key and can take the
-  lease.
+  lease;
+- **only where something changed (047)**. A change that can make key work leaves
+  a mark: one person in one channel (`app.key_due_members` — joining, publishing a
+  chat key, a ban or unban, a seat, a role or a bot grant given or taken) or a
+  whole channel (`app.key_due_channels` — a new channel, a change to who may read
+  it, a rotation, whose new version everybody needs). `channel_key_work` looks only
+  at marked channels the caller can see, and a mark goes once what it points at is
+  settled for everybody, so a caller without the key cannot clear work only a
+  holder can do. A whole channel is looked at only by a holder of its current key,
+  a channel another call is looking at is skipped rather than waited on, and one
+  call stops after a second and a half with `more: true`. A daily job
+  (`rift-key-look`) marks every channel, so a change no trigger saw is found within
+  a day. Measured Nov 25 2026 on 50,000 members and 300 channels: a call with
+  nothing marked takes 3 ms where every call took 74 s before (and failed at the
+  8-second timeout through the API), and 40 at once finish in 0.4 s.
 
 **A rotation links the old key to the new one (013).** `post_channel_keys`
 takes an optional `link` (`{ciphertext, nonce}`) with a mint: the outgoing
@@ -489,6 +503,9 @@ files, each run once after it, and the list below grows with them.
    `set_channel_members`; a call's region claim renews its time; uploads named for a
    conversation the uploader is in; the console notice to the console's own server; the
    retention pass deletes DMs without ringing.
+27. **047_key_work_marks.sql** — the key sweep looks only where a change left a mark (see
+   `sweep_channel_keys` above), and each key version's mint time is kept
+   (`app.channel_key_minted`) so a removal's wait is not a scan of the version's rows.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that

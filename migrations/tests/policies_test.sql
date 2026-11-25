@@ -9530,6 +9530,9 @@ END $$;
 -- written in one transaction, and a younger key holds a removal back (014).
 UPDATE channel_keyring SET created_at = now() - interval '2 hours'
  WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 2;
+-- A version's age is read from when it was minted (047).
+UPDATE app.channel_key_minted SET minted_at = now() - interval '2 hours'
+ WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 2;
 UPDATE users SET is_banned = true WHERE id = '77777777-eeee-4eee-8eee-000000000003';
 
 DO $$
@@ -9751,6 +9754,8 @@ BEGIN
 
   UPDATE channel_keyring SET created_at = now() - interval '61 minutes'
    WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 4;
+  UPDATE app.channel_key_minted SET minted_at = now() - interval '61 minutes'
+   WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001' AND key_version = 4;
   DELETE FROM app.channel_key_leases;
   v_r := channel_key_work(v_ann);
   IF NOT v_r -> 'work' @> '[{"rotate": true, "link": true, "key_version": 4}]' THEN
@@ -9816,6 +9821,8 @@ INSERT INTO member_roles (user_id, role_id)
 SELECT '77777777-eeee-4eee-8eee-000000000001', id FROM roles
  WHERE server_id = 'eeee0000-0000-4000-8000-000000000001' AND name = 'Moderator';
 UPDATE channel_keyring SET created_at = now() - interval '2 hours'
+ WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001';
+UPDATE app.channel_key_minted SET minted_at = now() - interval '2 hours'
  WHERE channel_id = 'eeee1111-0000-4000-8000-000000000001';
 
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -12290,5 +12297,169 @@ BEGIN
   RAISE NOTICE 'ok  an admin reads a node''s webhook stamp and cannot set it (046)';
 END $$;
 RESET ROLE;
+
+
+-- ============================================================
+-- 32. The key sweep looks only where something changed (047)
+-- ============================================================
+-- Its own server, Delta: ann, ben and cat sealed into #general and a private
+-- room ann and ben sit in. Asked as the superuser, like section 20.
+RESET ROLE;
+
+INSERT INTO auth.users (id)
+SELECT ('47474747-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid
+  FROM generate_series(1, 5) i;
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('ee470000-0000-4000-8000-000000000001', 'Delta', 'ws://lan:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+SELECT ('47474747-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
+       'ee470000-0000-4000-8000-000000000001', 'd' || i, 'D' || i, 'pk-d' || i, 'sid-d' || i,
+       'chat-d' || i
+  FROM generate_series(1, 3) i;
+-- A private channel seats whoever made it, so ann makes them.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"47474747-eeee-4eee-8eee-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('ee471111-0000-4000-8000-000000000001', 'ee470000-0000-4000-8000-000000000001', 'general', 'text', false),
+  ('ee471111-0000-4000-8000-000000000002', 'ee470000-0000-4000-8000-000000000001', 'room', 'text', true);
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('ee471111-0000-4000-8000-000000000002', '47474747-eeee-4eee-8eee-000000000001'),
+  ('ee471111-0000-4000-8000-000000000002', '47474747-eeee-4eee-8eee-000000000002')
+ON CONFLICT (channel_id, user_id) DO NOTHING;
+
+CREATE FUNCTION pg_temp.seal47(p_channel UUID, v INTEGER, p_user UUID) RETURNS VOID
+  LANGUAGE sql AS $$
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES (p_channel, v, p_user, '47474747-eeee-4eee-8eee-000000000001', 'eph', 'ct', 'n')
+$$;
+SELECT pg_temp.seal47('ee471111-0000-4000-8000-000000000001', 1,
+                      ('47474747-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid)
+  FROM generate_series(1, 3) i;
+SELECT pg_temp.seal47('ee471111-0000-4000-8000-000000000002', 1,
+                      ('47474747-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid)
+  FROM generate_series(1, 2) i;
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '47474747-eeee-4eee-8eee-000000000001';
+  v_r   JSONB;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM app.key_due_channels
+                  WHERE channel_id = 'ee471111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a new channel was not marked for a look';
+  END IF;
+  v_r := channel_key_work(v_ann);
+  IF jsonb_array_length(v_r -> 'work') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a settled server had key work: %', v_r;
+  END IF;
+  IF EXISTS (SELECT 1 FROM app.key_due_channels f JOIN channels c ON c.id = f.channel_id
+              WHERE c.server_id = 'ee470000-0000-4000-8000-000000000001')
+     OR EXISTS (SELECT 1 FROM app.key_due_members d JOIN channels c ON c.id = d.channel_id
+                 WHERE c.server_id = 'ee470000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a look that found everything settled left its marks';
+  END IF;
+  RAISE NOTICE 'ok  a look that finds nothing to do clears its marks (047)';
+END $$;
+
+-- Dan joins with a key: marked in #general, not in the room he cannot read.
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES ('47474747-eeee-4eee-8eee-000000000004', 'ee470000-0000-4000-8000-000000000001',
+        'd4', 'D4', 'pk-d4', 'sid-d4', 'chat-d4');
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '47474747-eeee-4eee-8eee-000000000001';
+  v_dan CONSTANT UUID := '47474747-eeee-4eee-8eee-000000000004';
+  v_r   JSONB;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM app.key_due_members
+                  WHERE channel_id = 'ee471111-0000-4000-8000-000000000001' AND user_id = v_dan)
+     OR EXISTS (SELECT 1 FROM app.key_due_members
+                 WHERE channel_id = 'ee471111-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: a new member was marked in the wrong channels';
+  END IF;
+  v_r := channel_key_work(v_ann);
+  IF jsonb_array_length(v_r -> 'work') <> 1
+     OR (v_r -> 'work' -> 0 ->> 'rotate')::boolean
+     OR v_r -> 'work' -> 0 -> 'members_missing' <> jsonb_build_array(
+          jsonb_build_object('user_id', v_dan, 'chat_public_key', 'chat-d4')) THEN
+    RAISE EXCEPTION 'FAIL: a new member was not offered to a key holder alone: %', v_r;
+  END IF;
+  -- Dan cannot do it himself, and asking does not clear his mark.
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_dan);
+  IF jsonb_array_length(v_r -> 'work') <> 0
+     OR NOT EXISTS (SELECT 1 FROM app.key_due_members WHERE user_id = v_dan) THEN
+    RAISE EXCEPTION 'FAIL: somebody with no key cleared work only a holder can do';
+  END IF;
+  PERFORM pg_temp.seal47('ee471111-0000-4000-8000-000000000001', 1, v_dan);
+  v_r := channel_key_work(v_ann);
+  IF jsonb_array_length(v_r -> 'work') <> 0
+     OR EXISTS (SELECT 1 FROM app.key_due_members WHERE user_id = v_dan) THEN
+    RAISE EXCEPTION 'FAIL: a healed member stayed marked: %', v_r;
+  END IF;
+  RAISE NOTICE 'ok  a new member is a mark a key holder heals and clears (047)';
+END $$;
+
+-- Ben is banned. His keys are minutes old, so the change waits, and the mark
+-- with it; a day later it is due.
+UPDATE users SET is_banned = true WHERE id = '47474747-eeee-4eee-8eee-000000000002';
+
+DO $$
+DECLARE
+  v_ann CONSTANT UUID := '47474747-eeee-4eee-8eee-000000000001';
+  v_ben CONSTANT UUID := '47474747-eeee-4eee-8eee-000000000002';
+  v_r   JSONB;
+BEGIN
+  IF (SELECT count(*) FROM app.key_due_members WHERE user_id = v_ben) <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a ban was not marked everywhere the member held a key';
+  END IF;
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_ann);
+  IF v_r -> 'work' @> '[{"rotate": true}]'
+     OR (SELECT count(*) FROM app.key_due_members WHERE user_id = v_ben) <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a waiting change rotated early or dropped its mark: %', v_r;
+  END IF;
+  UPDATE app.channel_key_minted SET minted_at = now() - interval '2 days'
+   WHERE channel_id IN ('ee471111-0000-4000-8000-000000000001',
+                        'ee471111-0000-4000-8000-000000000002');
+  DELETE FROM app.channel_key_leases;
+  v_r := channel_key_work(v_ann);
+  IF NOT v_r -> 'work' @> jsonb_build_array(jsonb_build_object(
+           'channel_id', 'ee471111-0000-4000-8000-000000000001', 'rotate', true))
+     OR NOT v_r -> 'work' @> jsonb_build_array(jsonb_build_object(
+           'channel_id', 'ee471111-0000-4000-8000-000000000002', 'rotate', true)) THEN
+    RAISE EXCEPTION 'FAIL: a ban did not change the key where it was held: %', v_r;
+  END IF;
+  IF (SELECT count(*) FROM app.key_due_channels
+       WHERE channel_id IN ('ee471111-0000-4000-8000-000000000001',
+                            'ee471111-0000-4000-8000-000000000002')) <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a rotation did not mark its channel for everybody';
+  END IF;
+  RAISE NOTICE 'ok  a ban is a mark that changes the key once it is due (047)';
+END $$;
+
+-- Somebody without the current key leaves a whole-channel mark alone, and the
+-- daily look marks every channel.
+DO $$
+DECLARE
+  v_cat CONSTANT UUID := '47474747-eeee-4eee-8eee-000000000003';
+BEGIN
+  DELETE FROM app.channel_key_leases;
+  PERFORM pg_temp.seal47('ee471111-0000-4000-8000-000000000001', 2,
+                         '47474747-eeee-4eee-8eee-000000000001');
+  PERFORM channel_key_work(v_cat);
+  IF NOT EXISTS (SELECT 1 FROM app.key_due_channels
+                  WHERE channel_id = 'ee471111-0000-4000-8000-000000000001')
+     OR EXISTS (SELECT 1 FROM app.channel_key_leases WHERE holder = v_cat) THEN
+    RAISE EXCEPTION 'FAIL: a member without the key took or cleared a whole-channel look';
+  END IF;
+  DELETE FROM app.key_due_channels;
+  IF app.mark_all_key_channels() < 2 THEN
+    RAISE EXCEPTION 'FAIL: the daily look did not mark every channel';
+  END IF;
+  RAISE NOTICE 'ok  only a key holder looks at a whole channel; the daily look marks all (047)';
+END $$;
 
 ROLLBACK;
