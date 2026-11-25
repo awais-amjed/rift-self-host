@@ -563,6 +563,11 @@ files, each run once after it, and the list below grows with them.
    server and bot, so `member_counts` (the sidebar header) is an index-only scan rather than a
    read of every user. Measured Nov 26 2026 on 50,000 members: 7.4 → 3.4 ms through
    PostgREST.
+36. **056_member_fk_indexes.sql** — an index behind each reference to a member from a table
+   that grows with the members or what they write (who wrapped a keyring row, who sent a
+   message, whose reaction or vote, …), so the cascade from `delete_server` finds a member's
+   rows rather than reading each table whole. Measured Nov 26 2026 on 5,000,000 messages and
+   12,800,000 keyring rows: 3.5 s → 13 ms a member, for 125 MB of index.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
