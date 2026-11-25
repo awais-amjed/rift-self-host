@@ -6,6 +6,9 @@ const DBSchema = {
     name: "name",
     iconUrl: "icon_url",
     livekitUrl: "livekit_url",
+    // Set by `delete_server` (057): nobody is a member from then on, while
+    // `purge_deleted_servers` deletes the rows.
+    deletingSince: "deleting_since",
     // Operator limits. Both sweeps default to 0 = off; the
     // attachment cap is a size and therefore has a real default. There is no
     // daily message quota — a rate limit does not bound storage.

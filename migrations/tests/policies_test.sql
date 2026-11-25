@@ -9368,8 +9368,9 @@ BEGIN
   RAISE NOTICE 'ok  ownership moves once, and leaves an admin behind';
 END $$;
 
--- Ending it. Bob, now the owner, deletes Alpha; the cascade takes its members
--- with it, owner included — the one delete of an owner's row that is allowed.
+-- Ending it. Bob, now the owner, deletes Alpha. That marks it (057): from then
+-- on nobody is a member, and the purge takes its rows afterwards, members and
+-- owner included — the one delete of an owner's row that is allowed.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
 
@@ -9383,9 +9384,81 @@ BEGIN
   RAISE NOTICE 'ok  the owner can end the server';
 END $$;
 
+-- Bob again, at once: the server is no longer his to delete, or to read.
+DO $$
+BEGIN
+  IF app.server_id() IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: the owner is still a member of a server being deleted';
+  END IF;
+  BEGIN
+    PERFORM delete_server();
+    RAISE EXCEPTION 'FAIL: a server was deleted twice';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM NOT LIKE '%not_owner%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a server is deleted once';
+END $$;
+
+-- Alice, a member who did nothing: locked out of the server and of everybody
+-- in it the moment it is marked.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE v_n INTEGER;
+BEGIN
+  IF app.server_id() IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a member is still a member of a server being deleted';
+  END IF;
+  IF get_server_details() IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a server being deleted still describes itself';
+  END IF;
+  SELECT (SELECT count(*) FROM servers) + (SELECT count(*) FROM channels)
+       + (SELECT count(*) FROM messages) + (SELECT count(*) FROM roles)
+       + (SELECT count(*) FROM member_roles)
+       + (SELECT count(*) FROM users)
+    INTO v_n;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a member of a server being deleted still reads % of its rows', v_n;
+  END IF;
+  BEGIN
+    INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, key_version, signature)
+    VALUES ('aaaa1111-0000-4000-8000-000000000001', auth.uid(), 'x', 'n', 1, 's');
+    RAISE EXCEPTION 'FAIL: a member wrote to a server being deleted';
+  EXCEPTION WHEN insufficient_privilege OR check_violation OR raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  marked, nobody is a member any more';
+END $$;
+
 RESET ROLE;
 DO $$
 BEGIN
+  IF (SELECT deleting_since FROM servers
+       WHERE id = 'aaaa0000-0000-4000-8000-000000000001') IS NULL THEN
+    RAISE EXCEPTION 'FAIL: the server was not marked';
+  END IF;
+  IF EXISTS (SELECT 1 FROM invites WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001')
+     OR EXISTS (SELECT 1 FROM webhooks WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001')
+     OR EXISTS (SELECT 1 FROM listing_tokens WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a way into a server being deleted is still open';
+  END IF;
+
+  -- Out of time before the first piece: nothing goes, and it says so.
+  IF purge_deleted_servers(0) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: the purge did not count the server still waiting';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM users WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a purge with no time deleted members';
+  END IF;
+
+  IF purge_deleted_servers() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: the purge left the server waiting';
+  END IF;
+  IF current_setting('rift.purge', true) = 'on'
+     OR current_setting('rift.retention', true) = 'on' THEN
+    RAISE EXCEPTION 'FAIL: the purge left the rest of the transaction quiet';
+  END IF;
   IF EXISTS (SELECT 1 FROM servers WHERE id = 'aaaa0000-0000-4000-8000-000000000001') THEN
     RAISE EXCEPTION 'FAIL: the server is still there';
   END IF;

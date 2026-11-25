@@ -25,7 +25,10 @@ export interface ServerSummary {
   createdAt: string;
 }
 
-/** Every server on this stack, newest first. */
+/**
+ * Every server on this stack, newest first. Not one its owner has deleted
+ * whose rows are still being purged: it has no members, and is going.
+ */
 export async function listServers(target: PostgresTarget): Promise<ServerSummary[]> {
   const rows = await queryRows(
     target,
@@ -37,6 +40,7 @@ export async function listServers(target: PostgresTarget): Promise<ServerSummary
             (SELECT count(*) FROM channels c WHERE c.server_id = s.id),
             s.created_at
        FROM servers s
+      WHERE s.deleting_since IS NULL
       ORDER BY s.created_at DESC`,
   );
 
@@ -172,7 +176,7 @@ export async function mintInvite(
      SELECT s.id, encode(gen_random_bytes(8), 'hex'), r.id, ${uses}, 0
        FROM servers s
        JOIN roles r ON r.server_id = s.id AND r.is_everyone = TRUE
-      WHERE s.id = ${literal(serverId)}
+      WHERE s.id = ${literal(serverId)} AND s.deleting_since IS NULL
      RETURNING code`,
   );
   if (rows.length === 0) throw new Error("No such server on this stack.");

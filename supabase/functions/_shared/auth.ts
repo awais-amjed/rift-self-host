@@ -23,7 +23,7 @@ export interface AuthenticatedToken {
 /**
  * Verify the caller's GoTrue JWT and load their server permissions.
  * Returns a Response if the JWT is missing/invalid/expired, the caller isn't
- * registered on this server, or they're banned.
+ * registered on this server, the server is being deleted, or they're banned.
  *
  * The ban + permission check hits the DB on every call, so revocation on the
  * edge-function path stays instant even though the JWT itself is stateless
@@ -48,7 +48,10 @@ export async function authenticateToken(
   const { data, error } = await supabase
     .from(DBSchema.users.tableName)
     .select(
-      `${DBSchema.users.id}, ${DBSchema.users.serverId}, ${DBSchema.users.isServerAdmin}, ${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ${DBSchema.users.isBanned}`,
+      `${DBSchema.users.id}, ${DBSchema.users.serverId}, ${DBSchema.users.isServerAdmin}, ${DBSchema.users.isChannelManager}, ${DBSchema.users.canCreateTokens}, ${DBSchema.users.isBanned},` +
+        // Named: another table joins users to servers, and an unnamed embed
+        // is refused as ambiguous.
+        ` ${DBSchema.servers.tableName}!users_server_id_fkey(${DBSchema.servers.deletingSince})`,
     )
     .eq(DBSchema.users.id, authUid)
     .single();
@@ -59,6 +62,11 @@ export async function authenticateToken(
   }
 
   const u = data as Record<string, any>;
+  // A server being deleted (`delete_server`) has no members, whatever rows
+  // the purge has yet to reach: the same answer as once the row has gone.
+  if (u[DBSchema.servers.tableName]?.[DBSchema.servers.deletingSince]) {
+    return CustomResponse.error("User not found", EC.USER_NOT_FOUND);
+  }
   if (u[DBSchema.users.isBanned]) {
     return CustomResponse.error("User is banned", EC.USER_BANNED);
   }

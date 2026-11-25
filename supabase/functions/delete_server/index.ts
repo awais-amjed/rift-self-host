@@ -10,10 +10,14 @@ import { livekitRoomServices } from "../_shared/livekit.ts";
 /**
  * Delete a server: everything it holds, and everything holding it up.
  *
- * The row delete is the `delete_server` RPC, run with the caller's own JWT so
- * the database is what decides — it refuses anyone but the owner
- * and cascades to every table the server owns. What the cascade cannot
- * reach is done here with the service role, after the RPC has said yes:
+ * The `delete_server` RPC, run with the caller's own JWT so the database is
+ * what decides, refuses anyone but the owner and marks the server: from then
+ * on nobody is a member of it. Its rows go afterwards, in pieces, by
+ * `purge_deleted_servers` — every minute, and once from here straight after
+ * the mark, which is all a small server needs. Deleting them in the owner's
+ * request ran into its statement timeout past some 600 members, and the
+ * server could not be deleted at all. What the database cannot reach is done
+ * here with the service role, after the RPC has said yes:
  *
  *   * the LiveKit room of every voice channel, which disconnects whoever is
  *     still in one — the same reason `delete_channel` is an edge function;
@@ -22,11 +26,11 @@ import { livekitRoomServices } from "../_shared/livekit.ts";
  *   * each member's avatar, in the shared `avatars` bucket;
  *   * the server's icons, its folder of the shared `servers` bucket.
  *
- * Every one of those is best-effort and reported back, not swallowed: a
- * LiveKit that cannot be reached must not leave the owner with a server that
- * will not go away, and a storage object that outlives its server is a leak,
- * not a breach — the bucket's policies were keyed on a membership that no
- * longer exists.
+ * Every one of those, and the first purge, is best-effort and reported back,
+ * not swallowed: a LiveKit that cannot be reached must not leave the owner
+ * with a server that will not go away, and a storage object that outlives
+ * its server is a leak, not a breach — the bucket's policies were keyed on a
+ * membership that no longer exists.
  */
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -71,8 +75,10 @@ Deno.serve(async (req) => {
     if (roomError) errors.livekit = roomError;
     const storageError = await deleteStorage(auth.serverId, leftovers.avatarPaths);
     if (storageError) errors.storage = storageError;
+    const { pending, error: purgeError } = await purgeNow(auth.serverId);
+    if (purgeError) errors.purge = purgeError;
 
-    return CustomResponse.success({ server_id: auth.serverId, errors });
+    return CustomResponse.success({ server_id: auth.serverId, pending, errors });
   } catch (err) {
     return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
@@ -198,3 +204,24 @@ async function deleteStorage(serverId: string, avatarPaths: string[]): Promise<s
   }
   return failures.length === 0 ? null : failures.join("; ");
 }
+
+/**
+ * The purge's first pass, so a small server's rows are gone before this
+ * answers. Bounded well inside the API's statement timeout; whatever is left
+ * the minute's job finishes. `pending` is whether any of this server's rows
+ * are still waiting for it.
+ */
+async function purgeNow(serverId: string): Promise<{ pending: boolean; error?: string }> {
+  const { error } = await supabase.rpc("purge_deleted_servers", { p_seconds: PURGE_SECONDS });
+  const { data: left, error: readError } = await supabase
+    .from(DBSchema.servers.tableName)
+    .select(DBSchema.servers.id)
+    .eq(DBSchema.servers.id, serverId)
+    .maybeSingle();
+  return {
+    pending: readError !== null || left !== null,
+    error: error ? error.message : undefined,
+  };
+}
+
+const PURGE_SECONDS = 4;
