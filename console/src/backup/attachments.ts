@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "jsr:@std/path@1";
 import {
   looksSealed,
+  sealedFileFits,
   type SealKey,
   sealStream,
   type UnsealKeys,
@@ -107,6 +108,25 @@ export interface PreviousAttachments {
   entries: AttachmentEntry[];
 }
 
+/**
+ * Roughly how many bytes [collectAttachments] will write: the live files the
+ * previous backup does not already hold unchanged.
+ */
+export async function newAttachmentBytes(
+  source: string,
+  previous: PreviousAttachments | null,
+): Promise<number> {
+  const before = new Map(previous?.entries.map((entry) => [entry.path, entry]));
+  let bytes = 0;
+  for await (const object of liveObjects(source)) {
+    const known = before.get(object.path);
+    if (!known || known.size !== object.size || known.mtime !== object.mtime) {
+      bytes += object.size;
+    }
+  }
+  return bytes;
+}
+
 /** What collecting the attachments did. */
 export interface Collected {
   entries: AttachmentEntry[];
@@ -133,8 +153,20 @@ export async function collectAttachments(options: {
   const result: Collected = { entries: [], copied: 0, copiedBytes: 0, linked: 0 };
   let incoming = 0;
 
-  /** Count what [share] did; false when there was nothing to share. */
-  const shared = async (from: string, to: string): Promise<boolean> => {
+  /**
+   * Count what [share] did; false when there was nothing to share. A previous
+   * copy whose size is not what [plainBytes] makes is not shared: linked into
+   * every backup after it, one damaged file was damaged in all of them, and
+   * nothing noticed until a restore. The live file is copied instead.
+   */
+  const shared = async (
+    from: string,
+    to: string,
+    plainBytes: number,
+  ): Promise<boolean> => {
+    if (!await exists(to) && !await fits(from, plainBytes, seal !== undefined)) {
+      return false;
+    }
     const how = await share(from, to);
     if (how === "linked") result.linked++;
     if (how === "copied") {
@@ -151,6 +183,7 @@ export async function collectAttachments(options: {
       await shared(
         join(previous.directory, known.sha256),
         join(destination, known.sha256),
+        known.size,
       )
     ) {
       result.entries.push({ ...object, sha256: known.sha256 });
@@ -171,7 +204,8 @@ export async function collectAttachments(options: {
       // The same content under a second path: one file serves both.
       await Deno.remove(partial);
     } else if (
-      previous && await shared(join(previous.directory, copied.sha256), target)
+      previous &&
+      await shared(join(previous.directory, copied.sha256), target, copied.size)
     ) {
       // Moved or touched, not changed: the previous backup's copy will do.
       await Deno.remove(partial);
@@ -183,6 +217,16 @@ export async function collectAttachments(options: {
     result.entries.push({ ...object, size: copied.size, sha256: copied.sha256 });
   }
   return result;
+}
+
+/** Whether [path] is there and the size an attachment of [plainBytes] is kept at. */
+async function fits(path: string, plainBytes: number, sealed: boolean): Promise<boolean> {
+  try {
+    if (sealed) return await sealedFileFits(path, plainBytes);
+    return (await Deno.stat(path)).size === plainBytes;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -239,7 +283,22 @@ async function copyHashed(
     mode: 0o600,
   });
   await stream.pipeTo(output.writable);
+  await syncFile(to);
   return { sha256: hash.digest("hex"), size };
+}
+
+/**
+ * Ask the disk to hold [path] now. A backup is renamed into place as soon as
+ * it is written, and a power cut after that could otherwise leave it listed
+ * whole with files the disk never got.
+ */
+export async function syncFile(path: string): Promise<void> {
+  const file = await Deno.open(path, { read: true });
+  try {
+    await file.sync();
+  } finally {
+    file.close();
+  }
 }
 
 /**

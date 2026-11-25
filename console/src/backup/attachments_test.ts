@@ -232,3 +232,73 @@ Deno.test("the list survives a round trip and refuses paths that leave the volum
   }
   assert(isSafePath("stub/stub/avatars/me"));
 });
+
+Deno.test("a previous copy cut short is not shared again; the live file is copied", async () => {
+  const live = await volume({ "stub/stub/chat-1/a.bin/v1": "the whole upload" });
+  const backups = await Deno.makeTempDir();
+  try {
+    const first = await collectAttachments({
+      source: live,
+      destination: join(backups, "one"),
+      previous: null,
+    });
+    const file = first.entries[0].sha256;
+    // Damaged in the first backup after it was made.
+    await Deno.writeTextFile(join(backups, "one", file), "the who");
+
+    const second = await collectAttachments({
+      source: live,
+      destination: join(backups, "two"),
+      previous: { directory: join(backups, "one"), entries: first.entries },
+    });
+    assertEquals(second.linked, 0);
+    assertEquals(second.copied, 1);
+    assertEquals(await Deno.readTextFile(join(backups, "two", file)), "the whole upload");
+    assertNotEquals(
+      await inode(join(backups, "two", file)),
+      await inode(join(backups, "one", file)),
+    );
+  } finally {
+    await Deno.remove(live, { recursive: true });
+    await Deno.remove(backups, { recursive: true });
+  }
+});
+
+Deno.test("a sealed previous copy is shared only when it is the size it seals to", async () => {
+  const live = await volume({ "stub/stub/chat-1/a.bin/v1": "x".repeat(200) });
+  const backups = await Deno.makeTempDir();
+  const seal = await deriveSealKey("pass phrase", FAST);
+  try {
+    const first = await collectAttachments({
+      source: live,
+      destination: join(backups, "one"),
+      previous: null,
+      seal,
+    });
+    const file = first.entries[0].sha256;
+    const second = await collectAttachments({
+      source: live,
+      destination: join(backups, "two"),
+      previous: { directory: join(backups, "one"), entries: first.entries },
+      seal,
+    });
+    assertEquals(second.linked, 1);
+
+    const whole = await Deno.readFile(join(backups, "one", file));
+    await Deno.writeFile(
+      join(backups, "one", file),
+      whole.subarray(0, whole.length - 20),
+    );
+    const third = await collectAttachments({
+      source: live,
+      destination: join(backups, "three"),
+      previous: { directory: join(backups, "one"), entries: first.entries },
+      seal,
+    });
+    assertEquals(third.linked, 0);
+    assertEquals(third.copied, 1);
+  } finally {
+    await Deno.remove(live, { recursive: true });
+    await Deno.remove(backups, { recursive: true });
+  }
+});

@@ -5,6 +5,8 @@
  * on a fresh machine `docker compose up -d` brings up this container alone,
  * and it is what creates the conditions for the rest.
  */
+import { removeBackupLeftovers } from "./backup/create.ts";
+import { clearStaleLock, exclusively } from "./operation.ts";
 import { announce, LISTEN_PORT } from "./banner.ts";
 import { startScheduler } from "./backup/scheduler.ts";
 import { startTopicRuleWatch } from "./setup/topic_rules.ts";
@@ -42,10 +44,17 @@ async function main(): Promise<void> {
   // brought up, and the release this image carries applied. See boot.ts. Not
   // awaited: it waits for compose and for Postgres, and the console has to be
   // answering requests long before either.
+  // Whatever the last container was doing, it is doing it no longer.
+  clearStaleLock(defaultPaths().projectDir);
+  await removeBackupLeftovers(defaultPaths().projectDir).catch((error) =>
+    console.error("Could not clear an interrupted backup's files:", error)
+  );
   if (configured) {
-    void prepareStack(defaultPaths()).catch((error) =>
-      console.error("Could not prepare the stack:", error)
-    );
+    void exclusively(
+      defaultPaths().projectDir,
+      "getting the stack ready",
+      () => prepareStack(defaultPaths()),
+    ).catch((error) => console.error("Could not prepare the stack:", error));
   }
 
   // Started either way: each check asks whether setup has finished since. Never

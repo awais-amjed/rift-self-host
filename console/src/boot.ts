@@ -44,7 +44,11 @@ import {
   waitUntilReachable,
 } from "./postgres.ts";
 import { applyUpgrade, pendingWork } from "./upgrade.ts";
-import { backupPresent, restoreFromBackup } from "./backup/restore.ts";
+import {
+  backupPresent,
+  restoreFromBackup,
+  restoreInterrupted,
+} from "./backup/restore.ts";
 import { adminTarget } from "./setup/realtime.ts";
 import { repairAttachmentMetadata } from "./storage_repair.ts";
 import { recordFileCeiling, refreshAtBoot } from "./file_ceiling.ts";
@@ -212,7 +216,13 @@ async function prepare(
     throw new Error("Postgres did not come up. `docker compose logs db` will say why.");
   }
 
-  if (!await hasRiftSchema(target)) {
+  // A restore that stopped after its database committed is finished here: the
+  // schema is there, so the question below would otherwise skip it for good
+  // and the attachments would never go back.
+  const schemaThere = await hasRiftSchema(target);
+  const resuming = schemaThere && await restoreInterrupted(paths.projectDir) &&
+    await backupPresent(paths.projectDir);
+  if (!schemaThere || resuming) {
     // Realtime's own role, which a dump from a running server names as the
     // owner of Realtime's tables. Realtime creates it in one of its migrations,
     // and a restored database says those have all run — so without this the
@@ -229,8 +239,14 @@ async function prepare(
       return;
     }
 
-    console.log("Found a backup beside the compose file — restoring it.");
-    const restored = await restoreFromBackup(paths.projectDir, say);
+    console.log(
+      resuming
+        ? "Finishing the restore that stopped after loading the database."
+        : "Found a backup beside the compose file — restoring it.",
+    );
+    const restored = await restoreFromBackup(paths.projectDir, say, {
+      databaseLoaded: resuming,
+    });
     if (restored.databaseErrors.length > 0) {
       console.error(
         `Loading the database printed ${restored.databaseErrors.length} errors:`,

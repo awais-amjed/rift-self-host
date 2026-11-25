@@ -81,7 +81,7 @@ CMD ["deno", "run", \
   "--allow-env", \
   "--allow-read", \
   "--allow-write", \
-  "--allow-run=psql,docker", \
+  "--allow-run=psql,docker,df", \
   "/app/src/main.ts"]
 
 EXPOSE 8080

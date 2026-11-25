@@ -25,12 +25,9 @@ import {
   stackProject,
 } from "../../docker.ts";
 import { targetFromEnv } from "../../postgres.ts";
-import { type ApiRoutes, failure, json } from "../responses.ts";
+import { type ApiRoutes, exclusiveResponse, failure, json } from "../responses.ts";
 import { portSetting, setupWasLocal } from "../stack_state.ts";
 import { visibleSecrets } from "./security.ts";
-
-/** True while Apply this release is running. */
-let upgrading = false;
 
 export const statusRoutes: ApiRoutes = async (request, url, paths) => {
   const path = url.pathname;
@@ -69,22 +66,24 @@ export const statusRoutes: ApiRoutes = async (request, url, paths) => {
       }, 409);
     }
     const { on, address, port } = await request.json();
-    try {
-      if (on) {
-        const local = await turnOn(
-          targetFromEnv(),
-          String(address ?? ""),
-          Number(port ?? DEFAULT_API_PORT),
-        );
-        return json(describeLocal(local));
+    return await exclusiveResponse(paths.projectDir, "the LAN switch", async () => {
+      try {
+        if (on) {
+          const local = await turnOn(
+            targetFromEnv(),
+            String(address ?? ""),
+            Number(port ?? DEFAULT_API_PORT),
+          );
+          return json(describeLocal(local));
+        }
+        // The URL a server would have been given had the switch never been
+        // thrown — where anything created while it was on ends up.
+        await turnOff(targetFromEnv(), livekitUrl());
+        return json(describeLocal(null));
+      } catch (error) {
+        return failure("local-testing", error);
       }
-      // The URL a server would have been given had the switch never been
-      // thrown — where anything created while it was on ends up.
-      await turnOff(targetFromEnv(), livekitUrl());
-      return json(describeLocal(null));
-    } catch (error) {
-      return failure("local-testing", error);
-    }
+    });
   }
 
   if (path === "/api/version") {
@@ -94,41 +93,49 @@ export const statusRoutes: ApiRoutes = async (request, url, paths) => {
   }
 
   if (path === "/api/upgrade" && request.method === "POST") {
-    // Two applies at once would run the same migrations side by side.
-    if (preparingState().running) {
-      return json({
-        error:
-          "The console is still applying this release by itself. Wait for it to finish.",
-      }, 409);
-    }
-    if (upgrading) return json({ error: "The release is already being applied." }, 409);
-    upgrading = true;
-    try {
-      return json(await applyUpgrade(targetFromEnv(), paths));
-    } catch (error) {
-      return failure("upgrade", error);
-    } finally {
-      upgrading = false;
-    }
+    // Two applies at once would run the same migrations side by side; the
+    // start-up's own apply holds the same lock.
+    return await exclusiveResponse(
+      paths.projectDir,
+      "applying this release",
+      async () => {
+        try {
+          return json(await applyUpgrade(targetFromEnv(), paths));
+        } catch (error) {
+          return failure("upgrade", error);
+        }
+      },
+    );
   }
 
   if (path === "/api/restart" && request.method === "POST") {
-    try {
-      const result = await restartStack();
-      return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
-    } catch (error) {
-      return failure("restart", error);
-    }
+    return await exclusiveResponse(paths.projectDir, "restarting the stack", async () => {
+      try {
+        const result = await restartStack();
+        return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
+      } catch (error) {
+        return failure("restart", error);
+      }
+    });
   }
 
   if (path === "/api/restart-service" && request.method === "POST") {
     const { service } = await request.json();
-    const known = await servicesIn(["full", "studio"]);
+    // Not the console: recreating itself kills the compose run doing it
+    // halfway (docker.ts, moveConsoleIfChanged). Not Studio's profile either,
+    // which `up -d` would start rather than restart.
+    const known = (await servicesIn(["full"])).filter((name) => name !== "console");
     if (!known.includes(String(service))) {
       return json({ error: "No such service in this stack." }, 400);
     }
-    const result = await restartService(String(service));
-    return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
+    return await exclusiveResponse(
+      paths.projectDir,
+      `restarting ${service}`,
+      async () => {
+        const result = await restartService(String(service));
+        return json({ ok: result.ok, error: result.ok ? undefined : result.stderr });
+      },
+    );
   }
 
   return null;

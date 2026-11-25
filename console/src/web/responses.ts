@@ -1,5 +1,6 @@
 /** The response shapes every route shares. */
 import type { Paths } from "../setup/run.ts";
+import { acquire, OperationBusy } from "../operation.ts";
 
 /**
  * One area's endpoints: a response when the request is one of its paths,
@@ -41,6 +42,34 @@ export function failure(context: string, error: unknown): Response {
   return json({ error: clean }, 400);
 }
 
+/**
+ * Take the console's one lock for [name] ([acquire]), or the 409 that says what
+ * holds it. The caller releases it when its work ends.
+ */
+export function holdOrRefuse(projectDir: string, name: string): (() => void) | Response {
+  try {
+    return acquire(projectDir, name);
+  } catch (error) {
+    if (error instanceof OperationBusy) return json({ error: error.message }, 409);
+    throw error;
+  }
+}
+
+/** [work] under the lock for [name]; a 409 when something else holds it. */
+export async function exclusiveResponse<T extends Response | null>(
+  projectDir: string,
+  name: string,
+  work: () => Promise<T>,
+): Promise<T | Response> {
+  const release = holdOrRefuse(projectDir, name);
+  if (release instanceof Response) return release;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
 export function redirect(to: string, headers: HeadersInit = {}): Response {
   return new Response(null, { status: 303, headers: { Location: to, ...headers } });
 }
@@ -53,22 +82,49 @@ export function redirect(to: string, headers: HeadersInit = {}): Response {
  * loop on the other end. Setup and restore both pull images, which can take
  * minutes, and a request that returns nothing for that long reads as a hang.
  * An error thrown by [work] becomes the stream's last line.
+ *
+ * The work does not depend on anybody reading. A page closed, reloaded or cut
+ * off with its SSH tunnel cancels the stream, after which every `enqueue`
+ * throws, and that throw used to surface inside the work through its progress
+ * callback: a restore stopped between loading the database and putting the
+ * attachments back. Now a send to a closed page is dropped, and the work runs
+ * to its end, reported in the log and in the console's state as before.
  */
 export function progressStream(
   work: (send: (value: unknown) => void) => Promise<void>,
 ): Response {
   const encoder = new TextEncoder();
+  let open = true;
   const body = new ReadableStream({
-    async start(controller) {
-      const send = (value: unknown) =>
-        controller.enqueue(encoder.encode(JSON.stringify(value) + "\n"));
-      try {
-        await work(send);
-      } catch (error) {
-        send({ error: error instanceof Error ? error.message : String(error) });
-      } finally {
-        controller.close();
-      }
+    start(controller) {
+      const send = (value: unknown) => {
+        if (!open) return;
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(value) + "\n"));
+        } catch {
+          open = false;
+        }
+      };
+      // Not awaited: `start` holding the stream until the work ends is what
+      // tied the two together.
+      void (async () => {
+        try {
+          await work(send);
+        } catch (error) {
+          send({ error: error instanceof Error ? error.message : String(error) });
+        } finally {
+          if (open) {
+            try {
+              controller.close();
+            } catch {
+              // Cancelled meanwhile.
+            }
+          }
+        }
+      })();
+    },
+    cancel() {
+      open = false;
     },
   });
   return new Response(body, {

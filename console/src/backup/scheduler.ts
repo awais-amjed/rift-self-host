@@ -6,6 +6,7 @@
  * across a suspended laptop, and a check that finds nothing to do costs one
  * directory listing.
  */
+import { currentOperation } from "../operation.ts";
 import { readEnvFile, updateSettings } from "../env_file.ts";
 import { type BackupOutcome, backupStatus, startBackup } from "./create.ts";
 import { listBackups } from "./files.ts";
@@ -47,6 +48,8 @@ async function startIfDue(
   now: Date,
 ): Promise<void> {
   if (!isConfigured() || backupStatus().running !== null) return;
+  // A restore, rotation or update under way: the next check tries again.
+  if (currentOperation(projectDir) !== null) return;
   const { schedule } = parseSchedule(readEnvFile(projectDir));
   if (schedule === null) return;
   const newest = (await listBackups(projectDir))[0];

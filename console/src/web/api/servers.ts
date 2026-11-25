@@ -12,7 +12,7 @@ import {
 import { readLocalTesting } from "../../local_testing.ts";
 import { changeFileCeiling, readFileCeiling } from "../../file_ceiling.ts";
 import { targetFromEnv } from "../../postgres.ts";
-import { type ApiRoutes, failure, json } from "../responses.ts";
+import { type ApiRoutes, exclusiveResponse, failure, json } from "../responses.ts";
 
 export const serverRoutes: ApiRoutes = async (request, url, paths) => {
   const path = url.pathname;
@@ -20,14 +20,22 @@ export const serverRoutes: ApiRoutes = async (request, url, paths) => {
   if (path === "/api/files") {
     if (request.method === "POST") {
       const { mb } = await request.json();
-      try {
-        await changeFileCeiling(targetFromEnv(), paths.projectDir, Number(mb));
-      } catch (error) {
-        return json(
-          { error: error instanceof Error ? error.message : String(error) },
-          400,
-        );
-      }
+      const changed = await exclusiveResponse(
+        paths.projectDir,
+        "changing the file limit",
+        async () => {
+          try {
+            await changeFileCeiling(targetFromEnv(), paths.projectDir, Number(mb));
+            return null;
+          } catch (error) {
+            return json(
+              { error: error instanceof Error ? error.message : String(error) },
+              400,
+            );
+          }
+        },
+      );
+      if (changed !== null) return changed;
     }
     return json(await readFileCeiling(paths.projectDir));
   }

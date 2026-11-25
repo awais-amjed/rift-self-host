@@ -36,6 +36,34 @@ const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 const MIDDLE = new Uint8Array([0]);
 const FINAL = new Uint8Array([1]);
 
+/**
+ * The size [plainBytes] seal to, in frames of [chunkBytes]: the header, then
+ * one frame per chunk (at least one) of a length, the ciphertext and its tag.
+ */
+export function sealedSize(plainBytes: number, chunkBytes: number): number {
+  const frames = Math.max(1, Math.ceil(plainBytes / chunkBytes));
+  return HEADER_BYTES + frames * (4 + TAG_BYTES) + plainBytes;
+}
+
+/**
+ * Whether the sealed file at [path] is the size [plainBytes] seal to, under
+ * the chunk size its own header names. A cheap check that it was not cut
+ * short or written over, which opening it would otherwise be the first to find.
+ */
+export async function sealedFileFits(path: string, plainBytes: number): Promise<boolean> {
+  const file = await Deno.open(path);
+  try {
+    const head = new Uint8Array(HEADER_BYTES);
+    const read = await file.read(head);
+    if (read !== HEADER_BYTES || !looksSealed(head)) return false;
+    const chunkBytes = new DataView(head.buffer).getUint32(MAGIC.length + SALT_BYTES + 4);
+    if (chunkBytes === 0) return false;
+    return (await file.stat()).size === sealedSize(plainBytes, chunkBytes);
+  } finally {
+    file.close();
+  }
+}
+
 /** Anything wrong with a sealed backup, in a sentence for the person restoring it. */
 export class SealError extends Error {}
 

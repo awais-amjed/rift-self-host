@@ -2,7 +2,7 @@
 import { setting } from "../../env_file.ts";
 import { livekitUrl, publicUrl } from "../../servers.ts";
 import { isRotationKind, rotate } from "../../rotation.ts";
-import { type ApiRoutes, failure, json } from "../responses.ts";
+import { type ApiRoutes, exclusiveResponse, failure, json } from "../responses.ts";
 import { isConfigured } from "../stack_state.ts";
 
 export const securityRoutes: ApiRoutes = async (request, url, paths) => {
@@ -16,11 +16,13 @@ export const securityRoutes: ApiRoutes = async (request, url, paths) => {
     if (!isRotationKind(kind)) {
       return json({ error: "Nothing by that name can be replaced." }, 400);
     }
-    try {
-      return json({ kind, rotatedAt: await rotate(kind, paths) });
-    } catch (error) {
-      return failure(`rotate ${kind}`, error);
-    }
+    return await exclusiveResponse(paths.projectDir, "replacing keys", async () => {
+      try {
+        return json({ kind, rotatedAt: await rotate(kind, paths) });
+      } catch (error) {
+        return failure(`rotate ${kind}`, error);
+      }
+    });
   }
 
   return null;

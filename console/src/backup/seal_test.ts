@@ -1,5 +1,11 @@
 import { assertEquals, assertNotEquals, assertRejects } from "jsr:@std/assert@1";
-import { deriveSealKey, SealError, sealStream, unsealStream } from "./seal.ts";
+import {
+  deriveSealKey,
+  sealedSize,
+  SealError,
+  sealStream,
+  unsealStream,
+} from "./seal.ts";
 
 /** Quick enough for a test, and small enough chunks to exercise several frames. */
 const FAST = { iterations: 1000, chunkBytes: 64 };
@@ -80,4 +86,13 @@ Deno.test("files sealed with one derived key each open with the passphrase", asy
   assertEquals(await unseal(a), sample(200));
   assertEquals(await unseal(b), sample(200));
   await assertRejects(() => unseal(a, "wrong"), SealError);
+});
+
+Deno.test("sealedSize is the size sealing gives", async () => {
+  for (const length of [0, 1, 63, 64, 65, 128, 129, 1000]) {
+    assertEquals(
+      (await seal(sample(length))).length,
+      sealedSize(length, FAST.chunkBytes),
+    );
+  }
 });

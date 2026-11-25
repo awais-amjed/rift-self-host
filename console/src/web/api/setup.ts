@@ -8,7 +8,7 @@ import { optionsFromEnv } from "../../setup/options.ts";
 import { runSetup, type SetupProgress } from "../../setup/run.ts";
 import { openSealedBackup, sealedBackupPresent } from "../../backup/restore.ts";
 import { prepareStack, tracked } from "../../boot.ts";
-import { type ApiRoutes, json, progressStream } from "../responses.ts";
+import { type ApiRoutes, holdOrRefuse, json, progressStream } from "../responses.ts";
 import { isConfigured } from "../stack_state.ts";
 import { moveConsoleIfChanged } from "../../docker.ts";
 
@@ -43,48 +43,57 @@ export const setupRoutes: ApiRoutes = async (request, url, paths) => {
       return json({ error: "Setup is already running. Wait for it to finish." }, 409);
     }
     const options = await request.json();
+    const release = holdOrRefuse(paths.projectDir, "setting the server up");
+    if (release instanceof Response) return release;
     running = true;
     return progressStream(async (send) => {
-      // Anything the page did not send falls back to the .env-or-default
-      // set, so a caller posting only a domain still gets a whole stack.
-      let result;
       try {
-        result = await runSetup(
-          { ...optionsFromEnv(paths.projectDir), ...options },
-          targetFromEnv(),
-          paths,
-          (progress: SetupProgress) => {
-            // The log too, which the page tells the operator to read when a
-            // step fails.
-            if (!progress.done) {
-              console.log(
-                `[setup] ${progress.step}${
-                  progress.detail ? ` (${progress.detail})` : ""
-                }`,
-              );
-            }
-            send(progress);
-          },
-        );
-      } catch (error) {
-        console.error("[setup] stopped:", error instanceof Error ? error.message : error);
-        throw error;
+        // Anything the page did not send falls back to the .env-or-default
+        // set, so a caller posting only a domain still gets a whole stack.
+        let result;
+        try {
+          result = await runSetup(
+            { ...optionsFromEnv(paths.projectDir), ...options },
+            targetFromEnv(),
+            paths,
+            (progress: SetupProgress) => {
+              // The log too, which the page tells the operator to read when a
+              // step fails.
+              if (!progress.done) {
+                console.log(
+                  `[setup] ${progress.step}${
+                    progress.detail ? ` (${progress.detail})` : ""
+                  }`,
+                );
+              }
+              send(progress);
+            },
+          );
+        } catch (error) {
+          console.error(
+            "[setup] stopped:",
+            error instanceof Error ? error.message : error,
+          );
+          throw error;
+        } finally {
+          running = false;
+        }
+        console.log("[setup] finished");
+        // The log's last word was otherwise the startup banner's "no password
+        // yet", printed before setup could possibly have made one. The password
+        // itself goes to the page alone.
+        announce({ configured: true });
+        // Decided before the answer is sent, carried out a few seconds after.
+        const moving = await moveConsoleIfChanged();
+        send({
+          inviteLink: result.server.inviteLink,
+          serverId: result.server.serverId,
+          consolePassword: result.secrets.consolePassword,
+          consoleMovingTo: moving,
+        });
       } finally {
-        running = false;
+        release();
       }
-      console.log("[setup] finished");
-      // The log's last word was otherwise the startup banner's "no password
-      // yet", printed before setup could possibly have made one. The password
-      // itself goes to the page alone.
-      announce({ configured: true });
-      // Decided before the answer is sent, carried out a few seconds after.
-      const moving = await moveConsoleIfChanged();
-      send({
-        inviteLink: result.server.inviteLink,
-        serverId: result.server.serverId,
-        consolePassword: result.secrets.consolePassword,
-        consoleMovingTo: moving,
-      });
     });
   }
 
@@ -101,16 +110,23 @@ export const setupRoutes: ApiRoutes = async (request, url, paths) => {
       );
     }
     const { passphrase } = await request.json();
+    // One restore at a time, and nothing else meanwhile: a second tab's press
+    // wrote the same files over the first's, and a backup could be made of a
+    // database half loaded.
+    const release = holdOrRefuse(paths.projectDir, "restoring a backup");
+    if (release instanceof Response) return release;
     // A wrong passphrase fails before anything is written, so the page can
     // simply ask again.
     return progressStream(async (send) => {
-      send({ step: "Opening the backup", done: false });
-      // Tracked like the start-up that follows, so a scheduled backup cannot
-      // begin once `.env` is out and the database is not yet in.
-      await tracked(() => openSealedBackup(paths.projectDir, String(passphrase ?? "")));
-      send({ step: "Opening the backup", done: true });
-      await prepareStack(paths, (step) => send({ step, done: false }));
-      send({ restored: true });
+      try {
+        send({ step: "Opening the backup", done: false });
+        await tracked(() => openSealedBackup(paths.projectDir, String(passphrase ?? "")));
+        send({ step: "Opening the backup", done: true });
+        await prepareStack(paths, (step) => send({ step, done: false }));
+        send({ restored: true });
+      } finally {
+        release();
+      }
     });
   }
 

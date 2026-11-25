@@ -15,6 +15,7 @@
  * because the console writes those back from the database on every start
  * (see storage_repair.ts) and nothing is lost.
  */
+import { acquire } from "../operation.ts";
 import { join } from "jsr:@std/path@1";
 import { execToFile } from "../docker.ts";
 import { readEnvFile } from "../env_file.ts";
@@ -35,10 +36,14 @@ import {
 import {
   collectAttachments,
   formatIndex,
+  newAttachmentBytes,
   parseIndex,
   type PreviousAttachments,
   STORAGE_VOLUME,
+  syncFile,
 } from "./attachments.ts";
+import { queryRows, targetFromEnv } from "../postgres.ts";
+import { adminTarget } from "../setup/realtime.ts";
 import { type BackupFile, BACKUPS_DIR, listBackups, pruneBackups } from "./files.ts";
 import { parseSchedule } from "./schedule.ts";
 import { deriveSealKey } from "./seal.ts";
@@ -89,6 +94,9 @@ export function startBackup(
   scheduled = false,
 ): void {
   if (running !== null) throw new Error("A backup is already being made.");
+  // Not during a restore, a rotation or an update: each changes the database
+  // or `.env` under the dump, and a restore's database is half there.
+  const release = acquire(projectDir, "making a backup");
   running = "Starting";
   const finish = (outcome: Omit<BackupOutcome, "scheduled" | "finishedAt">) => {
     last = { ...outcome, scheduled, finishedAt: new Date().toISOString() };
@@ -112,6 +120,7 @@ export function startBackup(
     })
     .finally(() => {
       running = null;
+      release();
     });
 }
 
@@ -156,10 +165,76 @@ async function previousAttachments(
   }
 }
 
+/** Files beside the compose file that are the operator's, not the console's. */
+const OPERATOR_FILES = ["docker-compose.override.yml"] as const;
+
+/** Spare room kept on top of what a backup is expected to write. */
+const MARGIN_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Refuse before writing anything when the disk the backups go to has no room.
+ * The dump is no bigger than the database; an encrypted backup holds it twice
+ * for a while (in the clear, then sealed); new attachments are copied whole.
+ * The disk is usually Postgres's too, and a backup that fills it stops the
+ * server it was protecting. Skipped when `df` cannot say.
+ */
+async function checkRoom(
+  directory: string,
+  encrypted: boolean,
+  previous: Awaited<ReturnType<typeof previousAttachments>>,
+): Promise<void> {
+  const free = await freeBytes(directory);
+  if (free === null) return;
+  const rows = await queryRows(
+    adminTarget(targetFromEnv()),
+    "SELECT pg_database_size('postgres')",
+  ).catch(() => [] as string[]);
+  const database = Number(rows[0] ?? 0);
+  const attachments = await newAttachmentBytes(STORAGE_VOLUME, previous).catch(() => 0);
+  const needed = database * (encrypted ? 2 : 1) + attachments + MARGIN_BYTES;
+  if (needed > free) {
+    const gb = (bytes: number) => (bytes / 1024 ** 3).toFixed(1);
+    throw new Error(
+      `Not enough disk space for a backup: it needs about ${gb(needed)} GB and ` +
+        `${gb(free)} GB is free. Delete older backups or free some space first.`,
+    );
+  }
+}
+
+/** Bytes free where [directory] is, from `df`, or null when it cannot say. */
+export async function freeBytes(directory: string): Promise<number | null> {
+  try {
+    const { code, stdout } = await new Deno.Command("df", {
+      args: ["-Pk", directory],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (code !== 0) return null;
+    return parseDfAvailable(new TextDecoder().decode(stdout));
+  } catch {
+    return null;
+  }
+}
+
+/** The available kilobytes on `df -Pk`'s second line, in bytes. */
+export function parseDfAvailable(output: string): number | null {
+  const fields = output.trim().split("\n").at(1)?.trim().split(/\s+/);
+  const available = Number(fields?.[3]);
+  return fields && fields.length >= 6 && Number.isFinite(available)
+    ? available * 1024
+    : null;
+}
+
 /**
  * What a backup interrupted by the console stopping left behind: one runs at
  * a time, so any found when starting another is dead, and can hold gigabytes.
+ * Also cleared as the console starts ([removeBackupLeftovers]): an encrypted
+ * one's scratch holds the database dump and `.env` in the clear.
  */
+export async function removeBackupLeftovers(projectDir: string): Promise<void> {
+  await removeLeftovers(join(projectDir, BACKUPS_DIR));
+}
+
 async function removeLeftovers(directory: string): Promise<void> {
   try {
     for await (const entry of Deno.readDir(directory)) {
@@ -219,6 +294,10 @@ async function makeBackup(
     const at = (path: string) => join(encrypted ? scratch : work, path);
     await Deno.mkdir(at("backup"), { recursive: true, mode: 0o700 });
 
+    running = "Checking the disk";
+    const previous = await previousAttachments(projectDir, backups, passphrase);
+    await checkRoom(directory, encrypted, previous);
+
     running = "Dumping the database";
     await dump(
       "db",
@@ -241,7 +320,7 @@ async function makeBackup(
     const collected = await collectAttachments({
       source: STORAGE_VOLUME,
       destination: join(work, ATTACHMENT_DIR),
-      previous: await previousAttachments(projectDir, backups, passphrase),
+      previous,
       seal,
     });
     await Deno.writeTextFile(at(ATTACHMENT_INDEX), formatIndex(collected.entries), {
@@ -278,10 +357,25 @@ async function makeBackup(
       join(projectDir, "docker-compose.yml"),
       join(work, "docker-compose.yml"),
     );
+    // The operator's own additions to the stack, which a restore otherwise
+    // starts without. The console's own override is written again from
+    // `.env` on the first start, so either way the folder runs as it is.
+    for (const own of OPERATOR_FILES) {
+      try {
+        await Deno.copyFile(join(projectDir, own), join(work, own));
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) throw error;
+      }
+    }
     await Deno.writeTextFile(
       join(work, "RESTORE.txt"),
       restoreInstructions(manifest, name),
     );
+    for (
+      const written of [DATABASE_DUMP, ATTACHMENT_INDEX, MANIFEST, ".env", SEALED_FILE]
+    ) {
+      await syncFile(join(work, written)).catch(() => {});
+    }
     await Deno.rename(work, final);
 
     const listed = (await listBackups(projectDir)).find((backup) => backup.name === name);

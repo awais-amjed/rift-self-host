@@ -1,4 +1,5 @@
 /** The Backups tab's endpoints: making, listing, scheduling and fetching backups. */
+import { OperationBusy } from "../../operation.ts";
 import { backupStatus, startBackup } from "../../backup/create.ts";
 import { deleteBackup, diskUsage, listBackups, openBackup } from "../../backup/files.ts";
 import { saveSchedule, scheduleStatus } from "../../backup/scheduler.ts";
@@ -63,6 +64,7 @@ export const backupRoutes: ApiRoutes = async (request, url, paths) => {
       startBackup(paths.projectDir, String(passphrase ?? ""));
       return json({ started: true }, 202);
     } catch (error) {
+      if (error instanceof OperationBusy) return json({ error: error.message }, 409);
       return failure("backup", error);
     }
   }

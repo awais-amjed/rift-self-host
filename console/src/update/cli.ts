@@ -16,6 +16,8 @@
  * so the terminal's last line is the handover, and the new console's log
  * (`docker compose logs -f console`) has the rest.
  */
+import { projectDir } from "../docker.ts";
+import { exclusively, OperationBusy } from "../operation.ts";
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { isConfigured } from "../web/stack_state.ts";
 import { runUpdate, updateStatus } from "./run.ts";
@@ -98,12 +100,22 @@ async function main(): Promise<number> {
     if (!confirm("Update now?")) return 1;
   }
 
-  const outcome = await runUpdate(
-    { version, compose: choices[0] },
-    (progress) => {
-      if (!progress.done) console.log(`→ ${progress.step}`);
-    },
-  );
+  let outcome;
+  try {
+    outcome = await exclusively(projectDir(), "updating", () =>
+      runUpdate(
+        { version, compose: choices[0] },
+        (progress) => {
+          if (!progress.done) console.log(`→ ${progress.step}`);
+        },
+      ));
+  } catch (error) {
+    if (error instanceof OperationBusy) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
 
   switch (outcome.kind) {
     case "current":
