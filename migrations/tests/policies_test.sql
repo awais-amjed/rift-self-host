@@ -11822,4 +11822,89 @@ BEGIN
   RAISE NOTICE 'ok  a listening bot''s ban and unban tell the sidebar (041)';
 END $$;
 
+-- ============================================================
+-- 31. Changing a private channel's members by name (042)
+-- ============================================================
+-- `set_channel_members` removed whoever the list left out, so a list read
+-- wrong became a channel emptied. This one touches only who it names.
+
+RESET ROLE;
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000f4',
+   'a0330000-0000-4000-8000-000000000001', 'quiet-room', 'voice', true),
+  ('aaaa1111-0000-4000-8000-0000000000f5',
+   'a0330000-0000-4000-8000-000000000001', 'open-room', 'text', false);
+INSERT INTO channel_members (channel_id, user_id, can_manage) VALUES
+  ('aaaa1111-0000-4000-8000-0000000000f4', 'a0332222-0000-4000-8000-000000000001', true),
+  ('aaaa1111-0000-4000-8000-0000000000f4', 'a0332222-0000-4000-8000-000000000002', false),
+  ('aaaa1111-0000-4000-8000-0000000000f4', 'a0332222-0000-4000-8000-000000000003', false);
+SET LOCAL ROLE authenticated;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"a0332222-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM change_channel_members('aaaa1111-0000-4000-8000-0000000000f4',
+      '{}'::UUID[], ARRAY['a0332222-0000-4000-8000-000000000003']::UUID[]);
+    RAISE EXCEPTION 'FAIL: a member without the manage bit removed somebody';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  only whoever runs a private channel changes its members (042)';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"a0332222-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+
+DO $$
+DECLARE
+  v_room CONSTANT UUID := 'aaaa1111-0000-4000-8000-0000000000f4';
+  v_result JSONB;
+  v_seats  UUID[];
+BEGIN
+  -- Removing one person leaves everybody it does not name, and nobody is
+  -- named to stay.
+  v_result := change_channel_members(v_room, '{}'::UUID[],
+    ARRAY['a0332222-0000-4000-8000-000000000003']::UUID[]);
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: removing one member was refused: %', v_result;
+  END IF;
+  RESET ROLE;
+  SELECT array_agg(user_id ORDER BY user_id) INTO v_seats
+    FROM channel_members WHERE channel_id = v_room;
+  IF v_seats IS DISTINCT FROM ARRAY['a0332222-0000-4000-8000-000000000001',
+                                    'a0332222-0000-4000-8000-000000000002']::UUID[] THEN
+    RAISE EXCEPTION 'FAIL: removing cal left %', v_seats;
+  END IF;
+  SET LOCAL ROLE authenticated;
+
+  -- Adding back and removing another in one call; a bot named to be added is
+  -- not seated.
+  v_result := change_channel_members(v_room,
+    ARRAY['a0332222-0000-4000-8000-000000000003',
+          'a0332222-0000-4000-8000-0000000000b9']::UUID[],
+    ARRAY['a0332222-0000-4000-8000-000000000002']::UUID[]);
+  IF v_result->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an add and a remove together were refused: %', v_result;
+  END IF;
+  RESET ROLE;
+  SELECT array_agg(user_id ORDER BY user_id) INTO v_seats
+    FROM channel_members WHERE channel_id = v_room;
+  IF v_seats IS DISTINCT FROM ARRAY['a0332222-0000-4000-8000-000000000001',
+                                    'a0332222-0000-4000-8000-000000000003']::UUID[] THEN
+    RAISE EXCEPTION 'FAIL: adding cal and removing ben left %', v_seats;
+  END IF;
+  SET LOCAL ROLE authenticated;
+
+  v_result := change_channel_members('aaaa1111-0000-4000-8000-0000000000f5',
+    ARRAY['a0332222-0000-4000-8000-000000000002']::UUID[], '{}'::UUID[]);
+  IF v_result->>'reason' <> 'no_such_channel' THEN
+    RAISE EXCEPTION 'FAIL: a public channel took a member list: %', v_result;
+  END IF;
+  RAISE NOTICE 'ok  members are added and removed by name, nobody else touched (042)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
