@@ -15236,4 +15236,254 @@ BEGIN
   RAISE NOTICE 'ok  a server''s member count is kept by its members'' changes (076)';
 END $$;
 
+-- ── 077: sealed keys are stored by a database call ─────────
+-- `store_channel_keys` keeps `post_channel_keys`' rules and refusals, and
+-- `store_key_work` stores a pass with one answer a job.
+RESET ROLE;
+DO $$
+DECLARE
+  s  UUID := '77770000-0000-4000-8000-000000000001';
+  s2 UUID := '77770000-0000-4000-8000-000000000002';
+BEGIN
+  INSERT INTO servers (id, name, livekit_url) VALUES
+    (s, 'Keyed', 'ws://lan:7880'), (s2, 'Other', 'ws://lan:7880');
+  INSERT INTO auth.users (id) VALUES
+    ('77777777-0000-4000-8000-000000000001'), ('77777777-0000-4000-8000-000000000002'),
+    ('77777777-0000-4000-8000-000000000003'), ('77777777-0000-4000-8000-000000000004'),
+    ('77777777-0000-4000-8000-000000000005'), ('77777777-0000-4000-8000-000000000006'),
+    ('77777777-0000-4000-8000-0000000000b1'), ('77777777-0000-4000-8000-0000000000b2'),
+    ('77777777-0000-4000-8000-000000000009');
+  INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                     chat_public_key, is_bot, is_banned)
+  VALUES
+    ('77777777-0000-4000-8000-000000000001', s, 'k77ann', 'Ann', 'pk-a', 'sid-77a', 'c-a', false, false),
+    ('77777777-0000-4000-8000-000000000002', s, 'k77ben', 'Ben', 'pk-b', 'sid-77b', 'c-b', false, false),
+    ('77777777-0000-4000-8000-000000000003', s, 'k77cy',  'Cy',  'pk-c', 'sid-77c', 'c-c', false, false),
+    ('77777777-0000-4000-8000-000000000004', s, 'k77dee', 'Dee', 'pk-d', 'sid-77d', 'c-d', false, true),
+    ('77777777-0000-4000-8000-000000000005', s, 'k77eve', 'Eve', 'pk-e', 'sid-77e', 'c-e', false, false),
+    ('77777777-0000-4000-8000-000000000006', s, 'k77fay', 'Fay', 'pk-f', 'sid-77f', 'c-f', false, false),
+    ('77777777-0000-4000-8000-0000000000b1', s, 'k77bot', 'Bot', 'pk-x', 'sid-77x', 'c-x', true, false),
+    ('77777777-0000-4000-8000-0000000000b2', s, 'k77bit', 'Bit', 'pk-y', 'sid-77y', 'c-y', true, false),
+    ('77777777-0000-4000-8000-000000000009', s2, 'k77oz', 'Oz', 'pk-o', 'sid-77o', 'c-o', false, false);
+  INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+    ('77770000-0000-4000-8000-0000000000c1', s,  'k77-text', 'text', false),
+    ('77770000-0000-4000-8000-0000000000c2', s,  'k77-room', 'text', true),
+    ('77770000-0000-4000-8000-0000000000c3', s2, 'k77-away', 'text', false);
+  INSERT INTO channel_members (channel_id, user_id) VALUES
+    ('77770000-0000-4000-8000-0000000000c2', '77777777-0000-4000-8000-000000000001'),
+    ('77770000-0000-4000-8000-0000000000c2', '77777777-0000-4000-8000-000000000002');
+  INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+  VALUES ('77770000-0000-4000-8000-0000000000c1', '77777777-0000-4000-8000-0000000000b1',
+          '77777777-0000-4000-8000-000000000001', 2);
+END $$;
+
+-- An entry sealed for [p_user], with [p_ct] as its ciphertext.
+CREATE FUNCTION pg_temp.e77(p_user TEXT, p_ct TEXT DEFAULT 'ct') RETURNS JSONB
+  LANGUAGE sql AS $$
+  SELECT jsonb_build_object('user_id', '77777777-0000-4000-8000-' || p_user,
+                            'ephemeral_public_key', 'epk', 'ciphertext', p_ct, 'nonce', 'n')
+$$;
+
+-- `store_channel_keys` as [p_as]: its answer, or the code it refused with.
+CREATE FUNCTION pg_temp.sk77(p_as TEXT, p_channel TEXT, p_version INTEGER,
+                             p_entries JSONB, p_mint BOOLEAN, p_link JSONB DEFAULT NULL)
+  RETURNS JSONB LANGUAGE plpgsql AS $$
+DECLARE v JSONB;
+BEGIN
+  PERFORM set_config('request.jwt.claims', json_build_object(
+    'sub', '77777777-0000-4000-8000-' || p_as, 'role', 'authenticated')::TEXT, true);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  BEGIN
+    v := store_channel_keys(('77770000-0000-4000-8000-0000000000' || p_channel)::uuid,
+                            p_version, p_entries, p_mint, p_link);
+  EXCEPTION WHEN OTHERS THEN
+    v := to_jsonb(CASE WHEN SQLSTATE = 'P0001' THEN SQLERRM ELSE SQLSTATE END);
+  END;
+  EXECUTE 'RESET ROLE';
+  PERFORM set_config('request.jwt.claims', '', true);
+  RETURN v;
+END $$;
+
+-- The same for `store_key_work`.
+CREATE FUNCTION pg_temp.kw77(p_as TEXT, p_jobs JSONB) RETURNS JSONB
+  LANGUAGE plpgsql AS $$
+DECLARE v JSONB;
+BEGIN
+  PERFORM set_config('request.jwt.claims', json_build_object(
+    'sub', '77777777-0000-4000-8000-' || p_as, 'role', 'authenticated')::TEXT, true);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  BEGIN
+    v := store_key_work(p_jobs);
+  EXCEPTION WHEN OTHERS THEN
+    v := to_jsonb(CASE WHEN SQLSTATE = 'P0001' THEN SQLERRM ELSE SQLSTATE END);
+  END;
+  EXECUTE 'RESET ROLE';
+  PERFORM set_config('request.jwt.claims', '', true);
+  RETURN v;
+END $$;
+
+DO $$
+DECLARE
+  v JSONB;
+  c1 UUID := '77770000-0000-4000-8000-0000000000c1';
+  c2 UUID := '77770000-0000-4000-8000-0000000000c2';
+  ann UUID := '77777777-0000-4000-8000-000000000001';
+  big JSONB;
+BEGIN
+  IF has_function_privilege('anon',
+       'public.store_channel_keys(uuid, integer, jsonb, boolean, jsonb)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.store_key_work(jsonb)', 'EXECUTE')
+     OR NOT has_function_privilege('authenticated', 'public.store_key_work(jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: the key writes are not members-only';
+  END IF;
+
+  -- A first version, sealed by Ann to three. What an entry says of its sealer
+  -- is not read: the row says the caller.
+  v := pg_temp.sk77('000000000001', 'c1', 1, jsonb_build_array(
+         pg_temp.e77('000000000001', 'ct-ann') || '{"wrapped_by":"77777777-0000-4000-8000-000000000003"}',
+         pg_temp.e77('000000000002', 'ct-ann'), pg_temp.e77('000000000003', 'ct-ann')), true);
+  IF v <> jsonb_build_object('channel_id', c1, 'key_version', 1,
+                             'entries_stored', 3, 'link_stored', false)
+     OR (SELECT count(*) FROM channel_keyring
+          WHERE channel_id = c1 AND key_version = 1 AND wrapped_by = ann) <> 3 THEN
+    RAISE EXCEPTION 'FAIL: a first version was stored as %', v;
+  END IF;
+
+  -- Minting it again, or skipping one, is the race lost.
+  IF pg_temp.sk77('000000000002', 'c1', 1, jsonb_build_array(pg_temp.e77('000000000005')), true)
+       <> '"keyring_conflict"'
+     OR pg_temp.sk77('000000000001', 'c1', 3, jsonb_build_array(pg_temp.e77('000000000005')), true)
+       <> '"keyring_conflict"'
+     OR pg_temp.sk77('000000000001', 'c1', 2, jsonb_build_array(pg_temp.e77('000000000005')), false)
+       <> '"keyring_conflict"' THEN
+    RAISE EXCEPTION 'FAIL: a version minted twice, skipped, or healed before it exists was taken';
+  END IF;
+
+  -- Cy heals Eve, and Ben, whom Ann sealed already: Ben's row stays Ann's.
+  v := pg_temp.sk77('000000000003', 'c1', 1, jsonb_build_array(
+         pg_temp.e77('000000000005', 'ct-cy'), pg_temp.e77('000000000002', 'ct-cy')), false);
+  IF v ->> 'entries_stored' <> '2'
+     OR (SELECT ciphertext FROM channel_keyring WHERE channel_id = c1 AND key_version = 1
+            AND user_id = '77777777-0000-4000-8000-000000000002') <> 'ct-ann'
+     OR (SELECT ciphertext FROM channel_keyring WHERE channel_id = c1 AND key_version = 1
+            AND user_id = '77777777-0000-4000-8000-000000000005') <> 'ct-cy' THEN
+    RAISE EXCEPTION 'FAIL: a heal did not fill only the gap: %', v;
+  END IF;
+
+  -- Fay holds nothing, so seals nothing; Dee is banned; Oz is not here.
+  IF pg_temp.sk77('000000000006', 'c1', 1, jsonb_build_array(pg_temp.e77('000000000006')), false)
+       <> '"permission_denied"'
+     OR pg_temp.sk77('000000000004', 'c1', 1, jsonb_build_array(pg_temp.e77('000000000006')), false)
+       <> '"user_banned"'
+     OR pg_temp.sk77('000000000009', 'c1', 1, jsonb_build_array(pg_temp.e77('000000000006')), false)
+       <> '"channel_not_found"' THEN
+    RAISE EXCEPTION 'FAIL: a heal from somebody without the key, banned, or elsewhere was taken';
+  END IF;
+
+  -- Sealed for: somebody on another server, a banned member, a bot with no
+  -- grant, a granted bot before its version.
+  IF pg_temp.sk77('000000000001', 'c1', 1, jsonb_build_array(pg_temp.e77('000000000009')), false)
+       <> '"user_not_found"'
+     OR pg_temp.sk77('000000000001', 'c1', 1, jsonb_build_array(pg_temp.e77('000000000004')), false)
+       <> '"not_a_channel_member"'
+     OR pg_temp.sk77('000000000001', 'c1', 1, jsonb_build_array(pg_temp.e77('0000000000b2')), false)
+       <> '"permission_denied"'
+     OR pg_temp.sk77('000000000001', 'c1', 1, jsonb_build_array(pg_temp.e77('0000000000b1')), false)
+       <> '"permission_denied"' THEN
+    RAISE EXCEPTION 'FAIL: a key was sealed for somebody who may not hold it';
+  END IF;
+
+  -- Malformed batches.
+  big := (SELECT jsonb_agg(pg_temp.e77('000000000002')) FROM generate_series(1, 501));
+  IF pg_temp.sk77('000000000001', 'c1', 0, jsonb_build_array(pg_temp.e77('000000000002')), false)
+       <> '"envelope_invalid"'
+     OR pg_temp.sk77('000000000001', 'c1', 1, '[]', false) <> '"missing_fields"'
+     OR pg_temp.sk77('000000000001', 'c1', 1, big, false) <> '"missing_fields"'
+     OR pg_temp.sk77('000000000001', 'c1', 1, '[{"user_id":"nope","ciphertext":"c","nonce":"n","ephemeral_public_key":"e"}]', false)
+       <> '"envelope_invalid"'
+     OR pg_temp.sk77('000000000001', 'c1', 1,
+          jsonb_build_array(pg_temp.e77('000000000002', repeat('x', 16385))), false)
+       <> '"envelope_invalid"'
+     OR pg_temp.sk77('000000000001', 'c1', 1,
+          jsonb_build_array(pg_temp.e77('000000000002') - 'nonce'), false)
+       <> '"envelope_invalid"' THEN
+    RAISE EXCEPTION 'FAIL: a malformed batch was taken';
+  END IF;
+
+  -- A private room: Cy, outside it, is told it is not there, before anything
+  -- about its versions.
+  IF pg_temp.sk77('000000000001', 'c2', 1, jsonb_build_array(
+         pg_temp.e77('000000000001'), pg_temp.e77('000000000002')), true) ->> 'entries_stored' <> '2'
+     OR pg_temp.sk77('000000000003', 'c2', 9, jsonb_build_array(pg_temp.e77('000000000003')), true)
+       <> '"channel_not_found"'
+     OR pg_temp.sk77('000000000001', 'c2', 1, jsonb_build_array(pg_temp.e77('000000000003')), false)
+       <> '"not_a_channel_member"'
+     OR pg_temp.sk77('000000000001', 'c3', 1, jsonb_build_array(pg_temp.e77('000000000009')), true)
+       <> '"channel_not_found"' THEN
+    RAISE EXCEPTION 'FAIL: a private room or another server''s channel was written to';
+  END IF;
+
+  -- A rotation to the granted bot's version: no link across its grant. The
+  -- next one links.
+  v := pg_temp.sk77('000000000001', 'c1', 2, jsonb_build_array(
+         pg_temp.e77('000000000001'), pg_temp.e77('0000000000b1')), true,
+         '{"ciphertext":"lnk","nonce":"n"}');
+  IF v ->> 'entries_stored' <> '2' OR (v ->> 'link_stored')::boolean THEN
+    RAISE EXCEPTION 'FAIL: a rotation at a bot''s grant was answered %', v;
+  END IF;
+  v := pg_temp.sk77('000000000001', 'c1', 3, jsonb_build_array(pg_temp.e77('000000000001')), true,
+         '{"ciphertext":"lnk","nonce":"n"}');
+  IF NOT (v ->> 'link_stored')::boolean
+     OR NOT EXISTS (SELECT 1 FROM app.channel_key_links
+                     WHERE channel_id = c1 AND key_version = 3 AND sealed_by = ann) THEN
+    RAISE EXCEPTION 'FAIL: a rotation''s link was not stored: %', v;
+  END IF;
+  -- Ben held version 1, not 2: he cannot mint 3's successor.
+  IF pg_temp.sk77('000000000002', 'c1', 4, jsonb_build_array(pg_temp.e77('000000000002')), true)
+       <> '"permission_denied"' THEN
+    RAISE EXCEPTION 'FAIL: a rotation from somebody without the version before was taken';
+  END IF;
+  -- An app older than 012 says neither: one past is a mint.
+  IF pg_temp.sk77('000000000001', 'c1', 4, jsonb_build_array(pg_temp.e77('000000000001')), NULL)
+       ->> 'key_version' <> '4' THEN
+    RAISE EXCEPTION 'FAIL: a batch that does not say what it is was refused';
+  END IF;
+  RAISE NOTICE 'ok  store_channel_keys keeps post_channel_keys'' rules (077)';
+
+  -- A pass: each job on its own, answered in the order sent.
+  v := pg_temp.kw77('000000000001', jsonb_build_array(
+    jsonb_build_object('channel_id', c2, 'key_version', 2, 'mint', true,
+                       'entries', jsonb_build_array(pg_temp.e77('000000000001'))),
+    jsonb_build_object('channel_id', c1, 'key_version', 4, 'mint', true,
+                       'entries', jsonb_build_array(pg_temp.e77('000000000002'))),
+    jsonb_build_object('channel_id', '77770000-0000-4000-8000-0000000000c3',
+                       'key_version', 1, 'mint', true,
+                       'entries', jsonb_build_array(pg_temp.e77('000000000009'))),
+    jsonb_build_object('key_version', 1, 'mint', false, 'entries', '[]'::jsonb),
+    jsonb_build_object('channel_id', c1, 'key_version', 4, 'mint', false,
+                       'entries', jsonb_build_array(pg_temp.e77('000000000002')))));
+  IF jsonb_array_length(v -> 'results') <> 5
+     OR v #>> '{results,0,success}' <> 'true' OR v #>> '{results,0,channel_id}' <> c2::text
+     OR v #>> '{results,1,code}' <> 'keyring_conflict'
+     OR v #>> '{results,2,code}' <> 'channel_not_found'
+     OR v #>> '{results,3,code}' <> 'missing_fields'
+     OR v #>> '{results,4,success}' <> 'true'
+     OR NOT EXISTS (SELECT 1 FROM channel_keyring WHERE channel_id = c2 AND key_version = 2)
+     OR NOT EXISTS (SELECT 1 FROM channel_keyring WHERE channel_id = c1 AND key_version = 4
+                       AND user_id = '77777777-0000-4000-8000-000000000002') THEN
+    RAISE EXCEPTION 'FAIL: a pass was answered %', v;
+  END IF;
+
+  -- Refused whole: a banned caller, nothing to do, more than a pass holds.
+  IF pg_temp.kw77('000000000004', jsonb_build_array(jsonb_build_object('channel_id', c1)))
+       <> '"user_banned"'
+     OR pg_temp.kw77('000000000001', '[]') <> '"missing_fields"'
+     OR pg_temp.kw77('000000000001', jsonb_build_array(
+          jsonb_build_object('channel_id', c1, 'key_version', 4, 'mint', false, 'entries', big)))
+       <> '"missing_fields"' THEN
+    RAISE EXCEPTION 'FAIL: a pass that should have been refused whole was not';
+  END IF;
+  RAISE NOTICE 'ok  store_key_work stores a pass, one answer a job (077)';
+END $$;
+
 ROLLBACK;
