@@ -15841,4 +15841,111 @@ DO $$ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 082: a DM call's questions in one call ──────────────────
+-- `dm_call_join_facts` refuses in `get_dm_call_token`'s order, claims the
+-- region the caller measured, names its key, writes the claim only when it
+-- moves, and a watch claims nothing.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('82828282-0000-4000-8000-000000000001'),  -- ann, calling
+  ('82828282-0000-4000-8000-000000000002'),  -- cal, called
+  ('82828282-0000-4000-8000-000000000003'),  -- kim, on neither end
+  ('82828282-0000-4000-8000-000000000004');  -- bea, banned
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('82820000-0000-4000-8000-000000000001', 'Ring', 'ws://ring.test:7880');
+INSERT INTO server_secrets VALUES
+  ('82820000-0000-4000-8000-000000000001', 'key-ring', 'secret-ring');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_banned)
+VALUES
+  ('82828282-0000-4000-8000-000000000001', '82820000-0000-4000-8000-000000000001',
+   'ann82', 'Ann', 'pk-ann82', 'sid-ann82', 'chat-ann82', false),
+  ('82828282-0000-4000-8000-000000000002', '82820000-0000-4000-8000-000000000001',
+   'cal82', 'Cal', 'pk-cal82', 'sid-cal82', 'chat-cal82', false),
+  ('82828282-0000-4000-8000-000000000003', '82820000-0000-4000-8000-000000000001',
+   'kim82', 'Kim', 'pk-kim82', 'sid-kim82', 'chat-kim82', false),
+  ('82828282-0000-4000-8000-000000000004', '82820000-0000-4000-8000-000000000001',
+   'bea82', 'Bea', 'pk-bea82', 'sid-bea82', 'chat-bea82', true);
+INSERT INTO dm_calls (id, caller_id, callee_id) VALUES
+  ('82820000-0000-4000-8000-0000000000d1', '82828282-0000-4000-8000-000000000001',
+   '82828282-0000-4000-8000-000000000002');
+INSERT INTO dm_calls (id, caller_id, callee_id, answered_at, ended_at, outcome) VALUES
+  ('82820000-0000-4000-8000-0000000000d2', '82828282-0000-4000-8000-000000000003',
+   '82828282-0000-4000-8000-000000000001', now(), now(), 'completed');
+INSERT INTO livekit_nodes (id, server_id, label, url) VALUES
+  ('82820000-0000-4000-8000-0000000000f1', '82820000-0000-4000-8000-000000000001',
+   'Far 082', 'ws://far082.test:7880');
+INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
+VALUES ('82820000-0000-4000-8000-0000000000f1', 'key-far82', 'secret-far82');
+
+DO $$
+DECLARE
+  v_ann  UUID := '82828282-0000-4000-8000-000000000001';
+  v_cal  UUID := '82828282-0000-4000-8000-000000000002';
+  v_kim  UUID := '82828282-0000-4000-8000-000000000003';
+  v_bea  UUID := '82828282-0000-4000-8000-000000000004';
+  v_call UUID := '82820000-0000-4000-8000-0000000000d1';
+  v_far  UUID := '82820000-0000-4000-8000-0000000000f1';
+  v_got  JSONB;
+  v_at   TID;
+BEGIN
+  IF has_function_privilege('authenticated', 'public.dm_call_join_facts(uuid,uuid,text,uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.dm_call_join_facts(uuid,uuid,text,uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: a member may read a DM call''s LiveKit keys';
+  END IF;
+
+  IF dm_call_join_facts(v_call, '82828282-0000-4000-8000-0000000000ff', 'voice')->>'reason' <> 'user_not_found'
+     OR dm_call_join_facts(v_call, v_bea, 'voice')->>'reason' <> 'user_banned'
+     OR dm_call_join_facts(v_call, v_kim, 'voice')->>'reason' <> 'call_not_found'
+     OR dm_call_join_facts(v_call, v_cal, 'voice')->>'reason' <> 'call_not_found'
+     OR dm_call_join_facts('82820000-0000-4000-8000-0000000000d2', v_ann, 'voice')->>'reason' <> 'call_not_found'
+     OR dm_call_join_facts('82820000-0000-4000-8000-0000000000dd', v_ann, 'voice')->>'reason' <> 'call_not_found' THEN
+    RAISE EXCEPTION 'FAIL: a DM call''s refusals are out of order';
+  END IF;
+
+  -- A watch before anybody is in claims nothing.
+  v_got := dm_call_join_facts(v_call, v_ann, 'watch', v_far);
+  IF v_got->>'reason' <> 'ok' OR (v_got->'node'->>'is_default')::boolean IS NOT TRUE
+     OR (SELECT node_id FROM dm_calls WHERE id = v_call) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: a watch claimed a DM call''s region: %', v_got - 'credentials';
+  END IF;
+
+  v_got := dm_call_join_facts(v_call, v_ann, 'voice', v_far);
+  IF v_got->>'reason' <> 'ok' OR v_got->>'display_name' <> 'Ann'
+     OR v_got->'node'->>'id' <> v_far::text OR v_got->'node'->>'api_key' <> 'key-far82'
+     OR v_got->'credentials'->>'api_key' <> 'key-ring'
+     OR (v_got->>'screen_share')::boolean IS NOT TRUE
+     OR (SELECT node_id FROM dm_calls WHERE id = v_call) IS DISTINCT FROM v_far THEN
+    RAISE EXCEPTION 'FAIL: the caller''s join is wrong: %', v_got - 'credentials';
+  END IF;
+
+  -- Answered: the callee goes where the call is, whatever they measured, and
+  -- the row is not written again.
+  UPDATE dm_calls SET answered_at = now() WHERE id = v_call;
+  SELECT ctid INTO v_at FROM dm_calls WHERE id = v_call;
+  v_got := dm_call_join_facts(v_call, v_cal, 'voice', NULL);
+  IF v_got->>'reason' <> 'ok' OR v_got->'node'->>'id' <> v_far::text
+     OR (SELECT ctid FROM dm_calls WHERE id = v_call) <> v_at THEN
+    RAISE EXCEPTION 'FAIL: the callee''s join moved or rewrote the call: %', v_got - 'credentials';
+  END IF;
+  IF claim_dm_call_room(v_call, v_cal)->>'allowed' <> 'true'
+     OR (SELECT ctid FROM dm_calls WHERE id = v_call) <> v_at THEN
+    RAISE EXCEPTION 'FAIL: claim_dm_call_room rewrote a claim that did not move';
+  END IF;
+
+  -- Sharing takes SCREEN_SHARE, from the server's roles.
+  UPDATE roles SET permissions = permissions & ~app.perm('SCREEN_SHARE')
+   WHERE server_id = '82820000-0000-4000-8000-000000000001';
+  IF dm_call_join_facts(v_call, v_cal, 'share')->>'reason' <> 'no_share'
+     OR (dm_call_join_facts(v_call, v_cal, 'voice')->>'screen_share')::boolean THEN
+    RAISE EXCEPTION 'FAIL: a member without SCREEN_SHARE may share in a DM call';
+  END IF;
+  UPDATE roles SET permissions = permissions & ~app.perm('CONNECT')
+   WHERE server_id = '82820000-0000-4000-8000-000000000001';
+  IF dm_call_join_facts(v_call, v_cal, 'voice')->>'reason' <> 'no_connect' THEN
+    RAISE EXCEPTION 'FAIL: a member without CONNECT may join a DM call';
+  END IF;
+  RAISE NOTICE 'ok  a DM call''s join is one call, in the function''s order (082)';
+END $$;
+
 ROLLBACK;
