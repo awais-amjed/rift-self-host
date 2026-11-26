@@ -13495,7 +13495,8 @@ BEGIN
     RAISE EXCEPTION 'FAIL: the member no longer hears about their own row';
   END IF;
 
-  -- A role handed out names who got it.
+  -- A role handed out names who got it (and, since 069, says it is about
+  -- roles).
   DELETE FROM pg_temp.said;
   INSERT INTO roles (server_id, name, position, permissions)
   VALUES ('62620000-0000-4000-8000-000000000001', 'ring-test', 90, 0)
@@ -13503,7 +13504,7 @@ BEGIN
   DELETE FROM pg_temp.said;
   INSERT INTO member_roles (user_id, role_id) VALUES (v_rob, v_role);
   SELECT count(*) INTO v_told FROM pg_temp.said
-   WHERE event = 'members' AND payload = jsonb_build_object('ids', jsonb_build_array(v_rob));
+   WHERE event = 'members' AND payload - 'roles' = jsonb_build_object('ids', jsonb_build_array(v_rob));
   IF v_told <> 1 THEN
     RAISE EXCEPTION 'FAIL: a role given rang members % times naming rob, not once', v_told;
   END IF;
@@ -14484,6 +14485,74 @@ BEGIN
   DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
   DROP TABLE pg_temp.said;
   RAISE NOTICE 'ok  swap_role_positions swaps two roles or neither, and rings once (068)';
+END $$;
+
+-- ── 069: a ring about roles says so ─────────────────────────
+-- Every `members` ring a role makes carries `roles: true`, which the DM list
+-- lets go; a member's own row rings without it.
+DO $$
+DECLARE
+  v_srv  UUID := '68680000-0000-4000-8000-000000000001';
+  v_ada  UUID := '68686868-0000-4000-8000-000000000001';
+  v_bob  UUID := '68686868-0000-4000-8000-000000000002';
+  v_low  UUID := '68680000-0000-4000-8000-0000000000a1';
+  v_new  UUID;
+  v_ring JSONB;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  IF has_function_privilege('authenticated', 'app.roles_ring(uuid[])', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: app.roles_ring is reachable';
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+
+  -- Renamed: no one named, about roles.
+  UPDATE roles SET name = 'Low 069' WHERE id = v_low;
+  SELECT payload INTO v_ring FROM pg_temp.said WHERE event = 'members';
+  IF v_ring IS DISTINCT FROM '{"roles": true}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a role renamed rang %', v_ring;
+  END IF;
+
+  -- Made: the same.
+  DELETE FROM pg_temp.said;
+  INSERT INTO roles (server_id, name, position) VALUES (v_srv, 'New 069', 60)
+  RETURNING id INTO v_new;
+  SELECT payload INTO v_ring FROM pg_temp.said WHERE event = 'members';
+  IF v_ring IS DISTINCT FROM '{"roles": true}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a role made rang %', v_ring;
+  END IF;
+
+  -- Given to Bob: Bob named, about roles.
+  DELETE FROM pg_temp.said;
+  INSERT INTO member_roles (user_id, role_id) VALUES (v_bob, v_new);
+  SELECT payload INTO v_ring FROM pg_temp.said WHERE event = 'members';
+  IF v_ring IS DISTINCT FROM jsonb_build_object('ids', jsonb_build_array(v_bob), 'roles', true) THEN
+    RAISE EXCEPTION 'FAIL: a role given rang %', v_ring;
+  END IF;
+
+  -- Its bits, held by Bob: the same.
+  DELETE FROM pg_temp.said;
+  UPDATE roles SET permissions = app.perm('CREATE_INVITE') WHERE id = v_new;
+  SELECT payload INTO v_ring FROM pg_temp.said WHERE event = 'members';
+  IF v_ring IS DISTINCT FROM jsonb_build_object('ids', jsonb_build_array(v_bob), 'roles', true) THEN
+    RAISE EXCEPTION 'FAIL: a held role''s bits rang %', v_ring;
+  END IF;
+
+  -- Ada renamed herself: her row, not a role.
+  DELETE FROM pg_temp.said;
+  UPDATE users SET display_name = 'Ada 069' WHERE id = v_ada;
+  SELECT payload INTO v_ring FROM pg_temp.said WHERE event = 'members';
+  IF v_ring IS DISTINCT FROM jsonb_build_object('ids', jsonb_build_array(v_ada)) THEN
+    RAISE EXCEPTION 'FAIL: a member renamed rang %', v_ring;
+  END IF;
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  RAISE NOTICE 'ok  a ring about roles says so, and a member''s own does not (069)';
 END $$;
 
 ROLLBACK;

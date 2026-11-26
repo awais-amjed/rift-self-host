@@ -150,6 +150,9 @@ have moved, as a role's name or colour), and rings only when something
 `member_directory` shows moved; the app re-reads only those it holds, with
 `members_refresh`, after a wait that grows with the server's size so its
 members do not all ask in the same instant. It never says who made the change.
+Since 069 a ring a role made (given, taken, made, deleted, renamed, recoloured,
+moved or given bits) also carries `"roles": true`: no `users` row moved, so
+the DM list, which draws no roles, lets it go.
 
 **Deleting a channel evicts whoever is in it, twice over.** LiveKit does the
 real work: `delete_channel` drops the room, which disconnects every device in
@@ -641,6 +644,9 @@ files, each run once after it, and the list below grows with them.
    or neither, and a role's name, colour or place rings `members` once a statement. Measured
    Nov 26 2026 through PostgREST: a move with the reads after it 67.7 → 46.7 ms (six requests →
    four), and one ring instead of two.
+49. **069_role_rings_marked.sql** — a `members` ring about roles carries `"roles": true`
+   (`app.roles_ring`), so an app's DM list, which draws no roles, does not read its
+   conversations again: on a server of 50,000, one role renamed was 50,000 such reads.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
