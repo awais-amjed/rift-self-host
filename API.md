@@ -194,7 +194,7 @@ bot is eligible only from its grant.
 
 `post_channel_keys` also refuses a batch that seals to a **bot** with no
 `bot_channel_keys` grant to that channel at that version — the same rule
-`refuse_ineligible_keyring` puts on the row, named here so one ineligible
+`refuse_ineligible_keyring` puts on the insert, named here so one ineligible
 recipient does not come back as a database error for every real member beside
 it. It has to be the grant and not the bot flag: the sweep seals the next
 version to everyone eligible, so a blanket refusal fails the **rotation**, and a
@@ -668,6 +668,12 @@ files, each run once after it, and the list below grows with them.
    `ring_channel_members` and `ring_devices` post through `app.push_tokens`. Measured Nov 26
    2026 on 50,000 members, 48,000 caught up in the channel: 116 ms → 8 ms with 3,000 members
    holding a device; 135 ms with 25,000.
+53. **073_keyring_key_and_check.sql** — `channel_keyring` loses its primary key on `id`, a random
+   UUID nothing reads, whose index every sealed key went into at a random place; the unique
+   `(channel_id, key_version, user_id)` stays the key, and `id` stays as a column.
+   `refuse_ineligible_keyring` runs once a statement over the rows written, with the same three
+   refusals; a row an upsert skips is no longer asked about. Measured Nov 26 2026 on 12.8 M
+   keyring rows: a 500-key batch 106 ms → 11 ms (median of ten).
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that

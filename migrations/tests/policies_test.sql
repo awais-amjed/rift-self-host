@@ -14831,4 +14831,169 @@ BEGIN
   RAISE NOTICE 'ok  a push ring wakes the devices its targets hold, for all % messages (072)', v_n;
 END $$;
 
+
+-- ── 073: a sealed key costs one index, checked once ─────────
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'channel_keyring'::regclass AND contype = 'u'
+                    AND pg_get_constraintdef(oid) = 'UNIQUE (channel_id, key_version, user_id)') THEN
+    RAISE EXCEPTION 'FAIL: the keyring lost its key on channel, version and member';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_index i
+               JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+              WHERE i.indrelid = 'channel_keyring'::regclass AND a.attname = 'id') THEN
+    RAISE EXCEPTION 'FAIL: the keyring still keeps an index on id';
+  END IF;
+  RAISE NOTICE 'ok  the keyring is keyed by channel, version and member alone (073)';
+END $$;
+
+-- The check once a statement must refuse exactly what `app.channel_eligible`
+-- and a bot's grant refuse, row by row: every channel here, against every
+-- member of its server and one outsider, as the one sealed for and as the
+-- sealer.
+DO $$
+DECLARE
+  c       RECORD;
+  u       RECORD;
+  v_sealer UUID;
+  v_got   TEXT;
+  v_want  TEXT;
+  v_n     INTEGER := 0;
+  v_out   UUID;
+BEGIN
+  RESET ROLE;
+  SELECT id INTO v_out FROM users ORDER BY id LIMIT 1;
+  FOR c IN SELECT ch.id, ch.server_id FROM channels ch LOOP
+    SELECT x.id INTO v_sealer FROM users x
+     WHERE NOT x.is_bot AND app.channel_eligible(c.id, x.id)
+     ORDER BY x.id LIMIT 1;
+    CONTINUE WHEN v_sealer IS NULL;
+    FOR u IN SELECT x.id, x.is_bot FROM users x
+              WHERE x.server_id = c.server_id OR x.id = v_out LOOP
+      -- Sealed for them.
+      v_want := CASE
+        WHEN u.is_bot AND NOT EXISTS (SELECT 1 FROM bot_channel_keys g
+                                       WHERE g.channel_id = c.id AND g.bot_id = u.id)
+          THEN 'bot_cannot_hold_channel_key'
+        WHEN u.is_bot THEN 'written'
+        WHEN app.channel_eligible(c.id, u.id) THEN 'written'
+        ELSE 'not_a_channel_member' END;
+      BEGIN
+        INSERT INTO channel_keyring
+          (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+        VALUES (c.id, 7073, u.id, v_sealer, 'eph', 'ct', 'n');
+        RAISE EXCEPTION 'written';
+      EXCEPTION WHEN raise_exception THEN v_got := SQLERRM;
+      END;
+      IF v_got IS DISTINCT FROM v_want THEN
+        RAISE EXCEPTION 'FAIL: a key sealed for % in % was %, not %', u.id, c.id, v_got, v_want;
+      END IF;
+      -- Sealed by them.
+      v_want := CASE WHEN app.channel_eligible(c.id, u.id) THEN 'written'
+                     ELSE 'wrapper_not_a_channel_member' END;
+      BEGIN
+        INSERT INTO channel_keyring
+          (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+        VALUES (c.id, 7073, v_sealer, u.id, 'eph', 'ct', 'n');
+        RAISE EXCEPTION 'written';
+      EXCEPTION WHEN raise_exception THEN v_got := SQLERRM;
+      END;
+      IF v_got IS DISTINCT FROM v_want THEN
+        RAISE EXCEPTION 'FAIL: a key sealed by % in % was %, not %', u.id, c.id, v_got, v_want;
+      END IF;
+      v_n := v_n + 1;
+    END LOOP;
+  END LOOP;
+  IF v_n < 50 THEN
+    RAISE EXCEPTION 'FAIL: the keyring comparison compared only % pairs', v_n;
+  END IF;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  the keyring refuses what each row''s check refused, for % pairs (073)', v_n;
+END $$;
+
+-- One bad row refuses the batch; a grant counts from its version; a row an
+-- upsert skips is not written, so not asked.
+DO $$
+DECLARE
+  v_ch     UUID;
+  v_sealer UUID;
+  v_ok     UUID;
+  v_bad    UUID;
+  v_bot    UUID;
+  v_from   INTEGER;
+  v_got    TEXT;
+BEGIN
+  RESET ROLE;
+  SELECT ch.id, s.id, m.id, o.id INTO v_ch, v_sealer, v_ok, v_bad
+    FROM channels ch
+    JOIN users s ON s.server_id = ch.server_id AND NOT s.is_bot
+                AND app.channel_eligible(ch.id, s.id)
+    JOIN users m ON m.server_id = ch.server_id AND NOT m.is_bot AND m.id <> s.id
+                AND app.channel_eligible(ch.id, m.id)
+    JOIN users o ON NOT o.is_bot AND NOT app.channel_eligible(ch.id, o.id)
+   LIMIT 1;
+  IF v_bad IS NULL THEN
+    RAISE EXCEPTION 'FAIL: no channel here to try a mixed batch in';
+  END IF;
+  BEGIN
+    INSERT INTO channel_keyring
+      (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES (v_ch, 7074, v_sealer, v_sealer, 'e', 'c', 'n'),
+           (v_ch, 7074, v_ok,     v_sealer, 'e', 'c', 'n'),
+           (v_ch, 7074, v_bad,    v_sealer, 'e', 'c', 'n');
+    RAISE EXCEPTION 'FAIL: a batch with an outsider in it was written';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_a_channel_member' THEN RAISE; END IF;
+  END;
+  IF EXISTS (SELECT 1 FROM channel_keyring WHERE channel_id = v_ch AND key_version = 7074) THEN
+    RAISE EXCEPTION 'FAIL: part of a refused batch stayed';
+  END IF;
+
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES (v_ch, 7074, v_ok, v_sealer, 'e', 'c', 'n');
+  -- The same row again, skipped, beside a new one: written, the duplicate kept.
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES (v_ch, 7074, v_ok, v_sealer, 'e2', 'c2', 'n2'),
+         (v_ch, 7074, v_sealer, v_sealer, 'e', 'c', 'n')
+  ON CONFLICT (channel_id, key_version, user_id) DO NOTHING;
+  IF (SELECT count(*) FROM channel_keyring WHERE channel_id = v_ch AND key_version = 7074) <> 2
+     OR (SELECT ciphertext FROM channel_keyring
+          WHERE channel_id = v_ch AND key_version = 7074 AND user_id = v_ok) <> 'c' THEN
+    RAISE EXCEPTION 'FAIL: an upsert beside an existing row did not keep it and add the new';
+  END IF;
+
+  -- A bot with a grant: from its version on, not before.
+  SELECT g.bot_id, g.from_key_version, g.channel_id INTO v_bot, v_from, v_ch
+    FROM bot_channel_keys g JOIN users b ON b.id = g.bot_id
+   WHERE g.from_key_version > 1 LIMIT 1;
+  IF v_bot IS NULL THEN
+    SELECT g.bot_id, g.channel_id INTO v_bot, v_ch FROM bot_channel_keys g LIMIT 1;
+    IF v_bot IS NULL THEN
+      RAISE EXCEPTION 'FAIL: no bot grant here to try';
+    END IF;
+    UPDATE bot_channel_keys SET from_key_version = 7080
+     WHERE bot_id = v_bot AND channel_id = v_ch;
+    v_from := 7080;
+  END IF;
+  SELECT x.id INTO v_sealer FROM users x
+   WHERE NOT x.is_bot AND app.channel_eligible(v_ch, x.id) ORDER BY x.id LIMIT 1;
+  BEGIN
+    INSERT INTO channel_keyring
+      (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES (v_ch, v_from - 1, v_bot, v_sealer, 'e', 'c', 'n');
+    RAISE EXCEPTION 'FAIL: a bot was sealed a version from before its grant';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'bot_key_version_before_grant' THEN RAISE; END IF;
+  END;
+  INSERT INTO channel_keyring
+    (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+  VALUES (v_ch, v_from + 7000, v_bot, v_sealer, 'e', 'c', 'n');
+  DELETE FROM channel_keyring WHERE key_version IN (7074, v_from + 7000);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  one bad row refuses its batch; a bot''s grant counts from its version (073)';
+END $$;
+
 ROLLBACK;
