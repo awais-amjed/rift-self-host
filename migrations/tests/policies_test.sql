@@ -15971,4 +15971,47 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 084: a voice_bots ring is one read ──────────────────────
+-- `voice_bots()` answers what the two views answer, under the same policies:
+-- 081's open and shut channels, with Ear granted in both, a summon in the
+-- shut one, and Ben outside it.
+RESET ROLE;
+INSERT INTO bot_voice_summons (channel_id, bot_id, summoned_by) VALUES
+  ('81810000-0000-4000-8000-0000000000c2', '81818181-0000-4000-8000-000000000003',
+   '81818181-0000-4000-8000-000000000001');
+DO $$
+BEGIN
+  IF has_function_privilege('anon', 'public.voice_bots()', 'EXECUTE')
+     OR NOT has_function_privilege('authenticated', 'public.voice_bots()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: voice_bots is not a member''s alone';
+  END IF;
+END $$;
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"81818181-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE
+  v JSONB := voice_bots();
+BEGIN
+  IF jsonb_array_length(v->'listeners') <> 2 OR jsonb_array_length(v->'summons') <> 1
+     OR v->'summons'->0->>'bot_name' <> 'Ear'
+     OR v->'listeners' <> (SELECT jsonb_agg(jsonb_build_object('channel_id', channel_id,
+                                   'bot_id', bot_id, 'bot_name', bot_name) ORDER BY bot_name)
+                             FROM voice_listeners) THEN
+    RAISE EXCEPTION 'FAIL: voice_bots answered a member %', v;
+  END IF;
+END $$;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"81818181-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE
+  v JSONB := voice_bots();
+BEGIN
+  IF jsonb_array_length(v->'listeners') <> 1 OR v->'summons' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: voice_bots showed a private channel''s bots to an outsider: %', v;
+  END IF;
+  RAISE NOTICE 'ok  voice_bots answers both views, under their policies (084)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
