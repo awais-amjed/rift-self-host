@@ -16014,4 +16014,131 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 085: a kick's or a move's questions in one call ──────────
+-- `voice_moderation_facts` refuses in `kick_user`'s and `move_user`'s order,
+-- answers the regions with their keys (a region with none left out), and the
+-- rooms the caller manages, a private one only to its own managers.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('85858585-0000-4000-8000-000000000001'),  -- ada, admin
+  ('85858585-0000-4000-8000-000000000002'),  -- mo, moderator
+  ('85858585-0000-4000-8000-000000000003'),  -- mel, member
+  ('85858585-0000-4000-8000-000000000004'),  -- bea, banned
+  ('85858585-0000-4000-8000-000000000005');  -- abe, another admin
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('85850000-0000-4000-8000-000000000001', 'Order', 'ws://order.test:7880');
+INSERT INTO server_secrets VALUES
+  ('85850000-0000-4000-8000-000000000001', 'key-order', 'secret-order');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_banned)
+VALUES
+  ('85858585-0000-4000-8000-000000000001', '85850000-0000-4000-8000-000000000001',
+   'ada85', 'Ada', 'pk-ada85', 'sid-ada85', 'chat-ada85', false),
+  ('85858585-0000-4000-8000-000000000002', '85850000-0000-4000-8000-000000000001',
+   'mo85', 'Mo', 'pk-mo85', 'sid-mo85', 'chat-mo85', false),
+  ('85858585-0000-4000-8000-000000000003', '85850000-0000-4000-8000-000000000001',
+   'mel85', 'Mel', 'pk-mel85', 'sid-mel85', 'chat-mel85', false),
+  ('85858585-0000-4000-8000-000000000004', '85850000-0000-4000-8000-000000000001',
+   'bea85', 'Bea', 'pk-bea85', 'sid-bea85', 'chat-bea85', true),
+  ('85858585-0000-4000-8000-000000000005', '85850000-0000-4000-8000-000000000001',
+   'abe85', 'Abe', 'pk-abe85', 'sid-abe85', 'chat-abe85', false);
+INSERT INTO member_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u JOIN roles r ON r.server_id = u.server_id
+ WHERE u.server_id = '85850000-0000-4000-8000-000000000001'
+   AND ((r.name = 'Admin' AND u.username IN ('ada85', 'abe85'))
+     OR (r.name = 'Moderator' AND u.username = 'mo85'));
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('85850000-0000-4000-8000-0000000000c1', '85850000-0000-4000-8000-000000000001',
+   'open', 'voice', false),
+  ('85850000-0000-4000-8000-0000000000c2', '85850000-0000-4000-8000-000000000001',
+   'shut', 'voice', true),
+  ('85850000-0000-4000-8000-0000000000c3', '85850000-0000-4000-8000-000000000001',
+   'talk', 'text', false);
+INSERT INTO livekit_nodes (id, server_id, label, url) VALUES
+  ('85850000-0000-4000-8000-0000000000f1', '85850000-0000-4000-8000-000000000001',
+   'Far 085', 'ws://far085.test:7880'),
+  ('85850000-0000-4000-8000-0000000000f2', '85850000-0000-4000-8000-000000000001',
+   'Bare 085', 'ws://bare085.test:7880');
+INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
+VALUES ('85850000-0000-4000-8000-0000000000f1', 'key-far85', 'secret-far85');
+
+DO $$
+DECLARE
+  v_ada  UUID := '85858585-0000-4000-8000-000000000001';
+  v_mo   UUID := '85858585-0000-4000-8000-000000000002';
+  v_mel  UUID := '85858585-0000-4000-8000-000000000003';
+  v_bea  UUID := '85858585-0000-4000-8000-000000000004';
+  v_abe  UUID := '85858585-0000-4000-8000-000000000005';
+  v_open UUID := '85850000-0000-4000-8000-0000000000c1';
+  v_shut UUID := '85850000-0000-4000-8000-0000000000c2';
+  v_talk UUID := '85850000-0000-4000-8000-0000000000c3';
+  v_got  JSONB;
+BEGIN
+  IF has_function_privilege('authenticated', 'public.voice_moderation_facts(uuid,uuid,uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.voice_moderation_facts(uuid,uuid,uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: a member may read a server''s LiveKit keys';
+  END IF;
+
+  IF voice_moderation_facts('85858585-0000-4000-8000-0000000000ff', v_mel)->>'reason' <> 'user_not_found'
+     OR voice_moderation_facts(v_bea, v_mel)->>'reason' <> 'user_banned'
+     OR voice_moderation_facts(v_mel, v_mo)->>'reason' <> 'not_allowed'
+     OR voice_moderation_facts(v_mel, v_mo, v_open)->>'reason' <> 'not_allowed'
+     OR voice_moderation_facts(v_ada, v_ada)->>'reason' <> 'self'
+     OR voice_moderation_facts(v_ada, '85858585-0000-4000-8000-0000000000ff')->>'reason' <> 'target_not_found'
+     OR voice_moderation_facts(v_ada, '11111111-aaaa-4aaa-8aaa-000000000002')->>'reason' <> 'target_not_found'
+     OR voice_moderation_facts(v_mo, v_abe)->>'reason' <> 'target_admin'
+     OR voice_moderation_facts(v_mo, v_abe, v_open)->>'reason' <> 'target_admin'
+     OR voice_moderation_facts(v_ada, v_mel, '85850000-0000-4000-8000-0000000000cc')->>'reason' <> 'channel_not_found'
+     OR voice_moderation_facts(v_ada, v_mel, 'aaaa1111-0000-4000-8000-000000000001')->>'reason' <> 'channel_not_found'
+     OR voice_moderation_facts(v_ada, v_mel, v_talk)->>'reason' <> 'not_voice'
+     OR voice_moderation_facts(v_mo, v_mel, v_shut)->>'reason' <> 'channel_not_found' THEN
+    RAISE EXCEPTION 'FAIL: a kick''s or a move''s refusals are out of order';
+  END IF;
+
+  -- An admin may move themselves.
+  IF voice_moderation_facts(v_ada, v_ada, v_open)->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: an admin may not move themselves';
+  END IF;
+
+  v_got := voice_moderation_facts(v_mo, v_mel);
+  IF v_got->>'reason' <> 'ok'
+     OR jsonb_array_length(v_got->'nodes') <> 2
+     OR (v_got->'nodes'->0->>'is_default')::boolean IS NOT TRUE
+     OR v_got->'nodes'->0->>'api_key' <> 'key-order'
+     OR v_got->'nodes'->1->>'label' <> 'Far 085'
+     OR v_got->'nodes'->1->>'api_key' <> 'key-far85'
+     OR NOT v_got->'rooms' @> jsonb_build_array(v_open, v_talk)
+     OR v_got->'rooms' @> jsonb_build_array(v_shut) THEN
+    RAISE EXCEPTION 'FAIL: a kick''s regions or rooms are wrong: %', v_got->'rooms';
+  END IF;
+
+  -- A private channel answers to its own managers, an admin included.
+  IF voice_moderation_facts(v_ada, v_mel)->'rooms' @> jsonb_build_array(v_shut) THEN
+    RAISE EXCEPTION 'FAIL: a private channel answers to a server-wide permission';
+  END IF;
+  INSERT INTO channel_members (channel_id, user_id, can_manage) VALUES (v_shut, v_mo, true);
+  IF NOT voice_moderation_facts(v_mo, v_mel)->'rooms' @> jsonb_build_array(v_shut)
+     OR voice_moderation_facts(v_mo, v_mel, v_shut)->>'reason' <> 'ok' THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s manager cannot reach its call';
+  END IF;
+
+  -- The same rooms `channel_manageable_by` gives.
+  IF (SELECT count(*) FROM channels c
+       WHERE c.server_id = '85850000-0000-4000-8000-000000000001'
+         AND channel_manageable_by(c.id, v_mo)
+             <> (voice_moderation_facts(v_mo, v_mel)->'rooms' @> to_jsonb(c.id))) > 0 THEN
+    RAISE EXCEPTION 'FAIL: voice_moderation_facts disagrees with channel_manageable_by';
+  END IF;
+
+  DELETE FROM server_secrets WHERE server_id = '85850000-0000-4000-8000-000000000001';
+  IF voice_moderation_facts(v_mo, v_mel)->>'reason' <> 'credentials_missing' THEN
+    RAISE EXCEPTION 'FAIL: a server with no LiveKit key was answered';
+  END IF;
+  UPDATE servers SET deleting_since = now() WHERE id = '85850000-0000-4000-8000-000000000001';
+  IF voice_moderation_facts(v_mo, v_mel)->>'reason' <> 'user_not_found' THEN
+    RAISE EXCEPTION 'FAIL: a server being deleted still has staff';
+  END IF;
+  RAISE NOTICE 'ok  a kick''s or a move''s checks are one call, in the functions'' order (085)';
+END $$;
+
 ROLLBACK;

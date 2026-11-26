@@ -1,16 +1,12 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
 import { ParticipantInfo } from "livekit-server-sdk";
-import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
-import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import {
-  livekitRoomServices,
-  manageableRooms,
-  roomParticipantsAcross,
-} from "../_shared/livekit.ts";
+import { extractBearerToken } from "../_shared/auth.ts";
+import { verifyJwt } from "../_shared/jwt.ts";
+import { roomParticipantsAcross, roomServicesFrom } from "../_shared/livekit.ts";
 
 /**
  * Disconnect a member from the voice channel they are in.
@@ -36,6 +32,38 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The answer for a refusal `voice_moderation_facts` gave, in the words and
+ * codes this function always answered with, or null for `ok`.
+ */
+function refusal(reason: string): Response | null {
+  switch (reason) {
+    case "ok":
+      return null;
+    case "user_not_found":
+      return CustomResponse.error("User not found", EC.USER_NOT_FOUND);
+    case "user_banned":
+      return CustomResponse.error("User is banned", EC.USER_BANNED);
+    case "not_allowed":
+      return CustomResponse.error("Not allowed to disconnect members", EC.PERMISSION_DENIED);
+    case "self":
+      return CustomResponse.error("You cannot disconnect yourself", EC.PERMISSION_DENIED);
+    case "target_not_found":
+      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND);
+    case "target_admin":
+      return CustomResponse.error("Admins cannot be disconnected", EC.PERMISSION_DENIED);
+    case "credentials_missing":
+      return CustomResponse.error(
+        "LiveKit credentials not configured for this server",
+        EC.SERVER_CREDENTIALS_MISSING,
+      );
+    default:
+      return CustomResponse.error("Unexpected error", EC.DB_ERROR);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -44,59 +72,45 @@ Deno.serve(async (req) => {
   try {
     const { target_user_id } = await req.json();
     const token = extractBearerToken(req);
+    if (!token) {
+      return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
+    }
+    const userId = await verifyJwt(token);
+    if (!userId) {
+      return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
+    }
 
-    const auth = await authenticateToken(supabase, token);
-    if (isAuthError(auth)) return auth;
-
-    if (!target_user_id) {
+    if (typeof target_user_id !== "string" || target_user_id.length === 0) {
       return CustomResponse.error("Missing required field: target_user_id", EC.MISSING_FIELDS);
     }
-
-    // Nothing is written down, so there is no RPC to defer the rules to and
-    // the checks live here. They match `moderate_user`'s deliberately: the
-    // same people may do it, and to the same people.
-    if (!auth.isServerAdmin && !auth.isChannelManager) {
-      return CustomResponse.error("Not allowed to disconnect members", EC.PERMISSION_DENIED);
-    }
-    if (target_user_id === auth.userId) {
-      return CustomResponse.error("You cannot disconnect yourself", EC.PERMISSION_DENIED);
+    if (!UUID.test(target_user_id)) {
+      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND);
     }
 
-    // Scoped to this server: without it, a member id from anywhere would let a
-    // staff member reach into a call they have no standing in.
-    const { data: targetData, error: targetError } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(`${DBSchema.users.id}, ${DBSchema.users.isServerAdmin}`)
-      .eq(DBSchema.users.id, target_user_id)
-      .eq(DBSchema.users.serverId, auth.serverId)
-      .single();
-
-    if (targetError || !targetData) {
-      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND, targetError);
+    // Nothing is written down, so there is no RPC that does the act; the one
+    // asked here answers the checks, which match `moderate_user`'s
+    // deliberately — the same people may do it, and to the same people — and
+    // where to look. One call where there were eight or more.
+    const { data: facts, error: factsError } = await supabase.rpc("voice_moderation_facts", {
+      p_caller: userId,
+      p_target: target_user_id,
+    });
+    if (factsError || !facts) {
+      return CustomResponse.error("Unexpected error", EC.DB_ERROR, factsError);
     }
-    if ((targetData as Record<string, any>)[DBSchema.users.isServerAdmin] === true) {
-      return CustomResponse.error("Admins cannot be disconnected", EC.PERMISSION_DENIED);
-    }
+    const refused = refusal((facts as Record<string, any>).reason);
+    if (refused) return refused;
 
     // A server may hold calls on more than one LiveKit, and a member kicked
     // out of one must not be left sitting in another. Each node is asked; the
     // ones not holding a given room answer empty.
-    const services = await livekitRoomServices(supabase, auth.serverId);
-    if (services.length === 0) {
-      return CustomResponse.error(
-        "LiveKit credentials not configured for this server",
-        EC.SERVER_CREDENTIALS_MISSING,
-      );
-    }
+    const services = roomServicesFrom((facts as Record<string, any>).nodes);
+    if (services.length === 0) return refusal("credentials_missing")!;
 
-    const { data: channels } = await supabase
-      .from(DBSchema.channels.tableName)
-      .select(DBSchema.channels.id)
-      .eq(DBSchema.channels.serverId, auth.serverId);
-
-    const channelIds = (channels ?? []).map(
-      (c) => (c as Record<string, any>)[DBSchema.channels.id] as string,
-    );
+    // Only from a call the caller manages, the only rooms asked about. A call
+    // they do not manage answers as if the target were not in voice at all,
+    // since a private one is not theirs to know about.
+    const channelIds = ((facts as Record<string, any>).rooms ?? []) as string[];
     if (channelIds.length === 0) {
       return CustomResponse.error("That member isn't in a voice channel", EC.USER_NOT_IN_VOICE);
     }
@@ -119,14 +133,9 @@ Deno.serve(async (req) => {
     // The service comes back with each roster so the removal is sent to the
     // node that actually has them.
     const rosters = await roomParticipantsAcross(services, rooms);
-    const found = rosters.flatMap(({ room, participants, service }) =>
+    const toRemove = rosters.flatMap(({ room, participants, service }) =>
       connectionsOf(participants, target_user_id).map((identity) => ({ room, identity, service }))
     );
-    // Only from a call the caller manages. A call they do not answers as if
-    // the target were not in voice at all, since a private one is not theirs
-    // to know about.
-    const mine = await manageableRooms(supabase, found.map(({ room }) => room), auth.userId);
-    const toRemove = found.filter(({ room }) => mine.has(room));
     // Each on its own: one connection that has already gone must not stop
     // the rest being removed.
     const results = await Promise.allSettled(

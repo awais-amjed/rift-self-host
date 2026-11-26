@@ -354,6 +354,29 @@ export async function livekitRoomServices(
 }
 
 /**
+ * [livekitRoomServices], from the regions a facts RPC answered with their
+ * keys (`voice_moderation_facts`): the same list, with no reads of its own.
+ */
+export function roomServicesFrom(
+  nodes: unknown,
+): { node: LiveKitNode; service: RoomServiceClient }[] {
+  if (!Array.isArray(nodes)) return [];
+  return nodes.flatMap((raw: Record<string, any>) => {
+    if (!raw?.url || !raw?.api_key || !raw?.api_secret) return [];
+    const node: LiveKitNode = {
+      id: raw.id ?? "",
+      url: raw.url,
+      label: raw.label ?? "",
+      isDefault: raw.is_default === true,
+    };
+    return [{
+      node,
+      service: new RoomServiceClient(normaliseHost(node.url), raw.api_key, raw.api_secret),
+    }];
+  });
+}
+
+/**
  * Who is in each of [rooms], asked of every node.
  *
  * The same answer shape as [roomParticipants], merged: a room lives on one
@@ -455,30 +478,6 @@ export async function callNodeOf(
   if (!pair) return null;
 
   return { url, pair };
-}
-
-/**
- * Which of [rooms] (channel ids) [userId] manages, by `channel_manageable_by`.
- *
- * For a kick or a move, which search every call on the server to find the
- * target. The server-wide permission says who may do either at all; this says
- * where. Without it a channel manager reached into a private call they are not
- * in, and learned from the answer whether the target was there.
- */
-export async function manageableRooms(
-  supabase: SupabaseClient,
-  rooms: string[],
-  userId: string,
-): Promise<Set<string>> {
-  const unique = [...new Set(rooms)];
-  const answers = await Promise.all(unique.map(async (room) => {
-    const { data, error } = await supabase.rpc("channel_manageable_by", {
-      p_channel: room,
-      p_user: userId,
-    });
-    return !error && data === true ? room : null;
-  }));
-  return new Set(answers.filter((room): room is string => room !== null));
 }
 
 /**

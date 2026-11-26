@@ -1,17 +1,12 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
 import { DataPacket_Kind, ParticipantInfo } from "livekit-server-sdk";
-import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
-import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
-import {
-  livekitRoomServices,
-  manageableRooms,
-  roomParticipantsAcross,
-  voiceUserId,
-} from "../_shared/livekit.ts";
+import { extractBearerToken } from "../_shared/auth.ts";
+import { verifyJwt } from "../_shared/jwt.ts";
+import { roomParticipantsAcross, roomServicesFrom, voiceUserId } from "../_shared/livekit.ts";
 
 /**
  * Pull a member from the voice channel they're in into another one.
@@ -46,6 +41,43 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The answer for a refusal `voice_moderation_facts` gave, in the words and
+ * codes this function always answered with, or null for `ok`.
+ */
+function refusal(reason: string): Response | null {
+  switch (reason) {
+    case "ok":
+      return null;
+    case "user_not_found":
+      return CustomResponse.error("User not found", EC.USER_NOT_FOUND);
+    case "user_banned":
+      return CustomResponse.error("User is banned", EC.USER_BANNED);
+    case "not_allowed":
+      return CustomResponse.error("Not allowed to move members", EC.PERMISSION_DENIED);
+    case "target_not_found":
+      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND);
+    case "target_admin":
+      return CustomResponse.error("Admins cannot be moved", EC.PERMISSION_DENIED);
+    case "channel_not_found":
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    case "not_voice":
+      return CustomResponse.error(
+        "Members can only be moved into a voice channel",
+        EC.CHANNEL_TYPE_INVALID,
+      );
+    case "credentials_missing":
+      return CustomResponse.error(
+        "LiveKit credentials not configured for this server",
+        EC.SERVER_CREDENTIALS_MISSING,
+      );
+    default:
+      return CustomResponse.error("Unexpected error", EC.DB_ERROR);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -54,9 +86,13 @@ Deno.serve(async (req) => {
   try {
     const { target_user_id, channel_id } = await req.json();
     const token = extractBearerToken(req);
-
-    const auth = await authenticateToken(supabase, token);
-    if (isAuthError(auth)) return auth;
+    if (!token) {
+      return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
+    }
+    const userId = await verifyJwt(token);
+    if (!userId) {
+      return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
+    }
 
     if (!target_user_id || !channel_id) {
       return CustomResponse.error(
@@ -64,75 +100,44 @@ Deno.serve(async (req) => {
         EC.MISSING_FIELDS,
       );
     }
+    if (typeof target_user_id !== "string" || !UUID.test(target_user_id)) {
+      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND);
+    }
+    if (typeof channel_id !== "string" || !UUID.test(channel_id)) {
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    }
 
     // Moving people is moderation, so it follows the moderation permission:
-    // channel managers and admins. There is no RPC to defer to — nothing is
-    // written down — so the check is here.
-    if (!auth.isServerAdmin && !auth.isChannelManager) {
-      return CustomResponse.error("Not allowed to move members", EC.PERMISSION_DENIED);
+    // channel managers and admins, never onto an administrator (as for a
+    // kick), only somebody of this server, and only into a voice channel of
+    // this server the caller manages — a room name is just a channel id, so
+    // without that this would push someone into another server's call. There
+    // is no RPC that does the act — nothing is written down — so the one
+    // asked here answers the checks and where to look, in one call where
+    // there were eight or more.
+    const { data: facts, error: factsError } = await supabase.rpc("voice_moderation_facts", {
+      p_caller: userId,
+      p_target: target_user_id,
+      p_destination: channel_id,
+    });
+    if (factsError || !facts) {
+      return CustomResponse.error("Unexpected error", EC.DB_ERROR, factsError);
     }
-
-    // Never an administrator, as for a kick (`kick_user`): moving the owner
-    // out of a call is the same power over them. And only somebody of this
-    // server.
-    const { data: targetData, error: targetError } = await supabase
-      .from(DBSchema.users.tableName)
-      .select(`${DBSchema.users.id}, ${DBSchema.users.isServerAdmin}`)
-      .eq(DBSchema.users.id, target_user_id)
-      .eq(DBSchema.users.serverId, auth.serverId)
-      .maybeSingle();
-    if (targetError || !targetData) {
-      return CustomResponse.error("Member not found", EC.USER_NOT_FOUND, targetError);
-    }
-    if (
-      target_user_id !== auth.userId &&
-      (targetData as Record<string, any>)[DBSchema.users.isServerAdmin] === true
-    ) {
-      return CustomResponse.error("Admins cannot be moved", EC.PERMISSION_DENIED);
-    }
-
-    // The destination has to be a voice channel *on this server*: the caller
-    // supplies it, and a room name is just a channel id, so without the
-    // server_id filter this would be a way to push someone into another
-    // server's call.
-    const { data: channelData, error: channelError } = await supabase
-      .from(DBSchema.channels.tableName)
-      .select(`${DBSchema.channels.id}, ${DBSchema.channels.channelType}`)
-      .eq(DBSchema.channels.id, channel_id)
-      .eq(DBSchema.channels.serverId, auth.serverId)
-      .single();
-
-    if (channelError || !channelData) {
-      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND, channelError);
-    }
-    if ((channelData as Record<string, any>)[DBSchema.channels.channelType] !== "voice") {
-      return CustomResponse.error(
-        "Members can only be moved into a voice channel",
-        EC.CHANNEL_TYPE_INVALID,
-      );
-    }
+    const refused = refusal((facts as Record<string, any>).reason);
+    if (refused) return refused;
 
     // Only to find them: the move itself is a packet telling their client to
     // rejoin elsewhere, and its next `get_channel_token` resolves the node
     // for the destination. So a move between two channels on two different
     // LiveKits needs nothing extra here — the client reconnects, which is
     // what it was already doing.
-    const services = await livekitRoomServices(supabase, auth.serverId);
-    if (services.length === 0) {
-      return CustomResponse.error(
-        "LiveKit credentials not configured for this server",
-        EC.SERVER_CREDENTIALS_MISSING,
-      );
-    }
+    const services = roomServicesFrom((facts as Record<string, any>).nodes);
+    if (services.length === 0) return refusal("credentials_missing")!;
 
-    const { data: channels } = await supabase
-      .from(DBSchema.channels.tableName)
-      .select(DBSchema.channels.id)
-      .eq(DBSchema.channels.serverId, auth.serverId);
-
-    const channelIds = (channels ?? []).map(
-      (c) => (c as Record<string, any>)[DBSchema.channels.id] as string,
-    );
+    // Out of a call the caller manages, the only rooms asked about: a
+    // private call they are not in is not theirs to empty, or to learn the
+    // target is in.
+    const channelIds = ((facts as Record<string, any>).rooms ?? []) as string[];
 
     // Only rooms that exist come back, so this is one call per node rather
     // than one listParticipants per channel on a server where nobody is in
@@ -154,28 +159,17 @@ Deno.serve(async (req) => {
         v: SIGNAL_VERSION,
         type: "move",
         channel_id,
-        moved_by: auth.userId,
+        moved_by: userId,
       }),
     );
 
-    const everywhere = (await roomParticipantsAcross(services, rooms))
+    const found = (await roomParticipantsAcross(services, rooms))
       .map(({ room, participants, service }) => ({
         room,
         service,
         identities: voiceConnectionsOf(participants, target_user_id),
       }))
       .filter(({ identities }) => identities.length > 0);
-    // Out of a call the caller manages, into one they manage: a private call
-    // they are not in is not theirs to empty, or to learn the target is in.
-    const mine = await manageableRooms(
-      supabase,
-      [...everywhere.map(({ room }) => room), channel_id],
-      auth.userId,
-    );
-    if (!mine.has(channel_id)) {
-      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
-    }
-    const found = everywhere.filter(({ room }) => mine.has(room));
 
     foundAnywhere = found.length > 0;
     // Already where they're being sent — nothing to say to them.
