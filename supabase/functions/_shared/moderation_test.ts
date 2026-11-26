@@ -1,7 +1,7 @@
 // Run: deno test --no-lock --allow-env=BUF_BIGINT_DISABLE --config supabase/functions/moderate_user/deno.json supabase/functions/_shared/
 import { assertEquals } from "jsr:@std/assert@1";
 import { TrackSource } from "livekit-server-sdk";
-import { holdsAlready, livePermissionsFor, micHeldBack } from "./moderation.ts";
+import { holdsAlready, livePermissionsFor, publishSources } from "./moderation.ts";
 import { watchGrant } from "./watch.ts";
 
 // LiveKit replaces a connection's whole permission set on update, so a right
@@ -26,15 +26,38 @@ Deno.test("a moderated watch connection keeps what it was minted with", () => {
   assertEquals(live.canPublishData, minted.canPublishData);
 });
 
-// `set_channel_override` updates only the connections whose microphone is in
-// the wrong state, so it has to read the two encodings the same way the
-// pushes write them: empty is every source, the muted list holds it back.
-Deno.test("a connection's microphone is read the way it was pushed", () => {
-  assertEquals(micHeldBack([]), false);
-  assertEquals(micHeldBack(undefined), false);
-  assertEquals(micHeldBack(livePermissionsFor("voice", true, false).canPublishSources), true);
-  assertEquals(micHeldBack(livePermissionsFor("voice", false, false).canPublishSources), false);
-  assertEquals(micHeldBack([TrackSource.MICROPHONE, TrackSource.CAMERA]), false);
+// A grant reads a missing list as every source and a live update reads an
+// empty one so. The list is never either, whatever the flags.
+Deno.test("what a connection may publish is always named source by source", () => {
+  for (const muted of [true, false]) {
+    for (const deafened of [true, false]) {
+      for (const share of [true, false]) {
+        const sources = publishSources(muted, deafened, share);
+        assertEquals(sources.length > 0, true);
+        assertEquals(sources.includes(TrackSource.CAMERA), true);
+        assertEquals(sources.includes(TrackSource.MICROPHONE), !muted && !deafened);
+        assertEquals(sources.includes(TrackSource.SCREEN_SHARE), share);
+        assertEquals(sources.includes(TrackSource.SCREEN_SHARE_AUDIO), share);
+      }
+    }
+  }
+});
+
+// Phones and browsers share on the voice connection, so its sources are the
+// screen's door too (security re-review, Nov 26).
+Deno.test("a pushed connection shares its screen only with the right", () => {
+  for (const kind of ["voice", "share"] as const) {
+    assertEquals(
+      livePermissionsFor(kind, false, false, true, false, true).canPublishSources
+        .includes(TrackSource.SCREEN_SHARE),
+      true,
+    );
+    // A caller that forgets takes it.
+    assertEquals(
+      livePermissionsFor(kind, false, false).canPublishSources.includes(TrackSource.SCREEN_SHARE),
+      false,
+    );
+  }
 });
 
 // A soundboard press is the only data packet a member sends, so
@@ -61,6 +84,14 @@ Deno.test("a connection holding more than it should is not left alone", () => {
   assertEquals(holdsAlready("voice", stale, wanted), false);
   assertEquals(holdsAlready("voice", { ...wanted, canPublishData: true }, wanted), false);
   assertEquals(holdsAlready("voice", { ...wanted, canPublishSources: [] }, wanted), false);
+  // Minted with the screen before the channel took it.
+  const shared = livePermissionsFor("voice", true, false, true, false, true);
+  assertEquals(holdsAlready("voice", shared, wanted), false);
+  // The same sources in another order are the same.
+  assertEquals(
+    holdsAlready("voice", { ...wanted, canPublishSources: [...wanted.canPublishSources].reverse() }, wanted),
+    true,
+  );
   // Deafened since: the ears go too.
   const deaf = livePermissionsFor("voice", false, true, true, false);
   assertEquals(holdsAlready("voice", { ...deaf, canSubscribe: true }, deaf), false);

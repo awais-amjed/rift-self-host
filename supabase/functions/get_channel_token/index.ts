@@ -1,7 +1,7 @@
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
-import { grantSources, moderationMetadata } from "../_shared/moderation.ts";
+import { moderationMetadata, publishSources } from "../_shared/moderation.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
@@ -194,6 +194,10 @@ Deno.serve(async (req) => {
     const isBot: boolean = facts.is_bot === true;
     const maySpeak: boolean = facts.speak === true;
     const maySoundboard: boolean = facts.soundboard === true;
+    // Missing from a database before 078: no screen on the voice connection,
+    // which is the refusal it was meant to give. A share connection got past
+    // `no_share`, so it holds the bit whatever the answer says.
+    const mayShareScreen: boolean = facts.screen_share === true || wantsShare;
 
     // A bot publishes; it does not hear (BOTS.md §6b).
     //
@@ -424,11 +428,13 @@ Deno.serve(async (req) => {
       roomJoin: true,
       room,
       canPublish: true,
-      // undefined = all sources. Deafened denies the mic as well as the ears.
-      // Without `SPEAK` here the microphone goes as it does for a muted
-      // member, though the metadata says nothing: nobody muted them, and the
-      // badge would say somebody had. Unreadable is not allowed, failing closed.
-      canPublishSources: grantSources(isMuted || maySpeak !== true, isDeafened),
+      // Named one by one (`publishSources`). Deafened denies the mic as well
+      // as the ears. Without `SPEAK` here the microphone goes as it does for
+      // a muted member, though the metadata says nothing: nobody muted them,
+      // and the badge would say somebody had. Without `SCREEN_SHARE` the
+      // screen goes, which phones and browsers publish on this connection.
+      // Unreadable is not allowed, failing closed.
+      canPublishSources: publishSources(isMuted || maySpeak !== true, isDeafened, mayShareScreen),
       // Never on a share connection. A share only publishes — the desktop's
       // is a Rust session that listens for nothing — and the roster skips
       // `_screenshare` / `_soundshare` identities, because they are the same

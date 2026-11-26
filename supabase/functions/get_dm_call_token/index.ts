@@ -6,6 +6,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { publishSources } from "../_shared/moderation.ts";
 import { admitWatcher, WATCH_TOKEN_TTL, watchGrant, watchIdentity } from "../_shared/watch.ts";
 import {
   LiveKitNode,
@@ -103,9 +104,9 @@ Deno.serve(async (req) => {
         p_preferred: preferredNode(preferred_node_id),
       }),
       supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "CONNECT" }),
-      wantsShare
-        ? supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "SCREEN_SHARE" })
-        : Promise.resolve({ data: null }),
+      // Asked for every connection: the call's own shares too, from a phone
+      // or a browser, and its token names the screen only with this.
+      supabase.rpc("user_has_permission", { p_user: auth.userId, p_name: "SCREEN_SHARE" }),
       // The soundboard right, as a channel's (`_shared/call_rights.ts`): a
       // clip is sound in the call, so it takes Speak as well. A DM call has
       // no channel to override them, so these are the server's bits — the
@@ -242,6 +243,10 @@ Deno.serve(async (req) => {
       // A share connection only publishes, as in a channel: one that could
       // subscribe would be a second pair of ears nobody sees in the call.
       canSubscribe: !wantsShare,
+      // The microphone always: a DM call was never minted with the server's
+      // flags or `SPEAK` (`moderate_user`). The screen only with
+      // `SCREEN_SHARE`, as in a channel (`publishSources`).
+      canPublishSources: publishSources(false, false, mayShare === true),
       // Nor does it send packets (`_shared/moderation.ts`). The call's own
       // connection sends one only to press a soundboard clip, so it may only
       // with that right; the clip notice comes from the server (`note_clip`).

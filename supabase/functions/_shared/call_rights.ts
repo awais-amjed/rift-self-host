@@ -31,10 +31,12 @@ import {
 export interface CallRights {
   speak: boolean;
   soundboard: boolean;
+  /** `SCREEN_SHARE`, which the voice connection's sources follow too. */
+  screenShare: boolean;
 }
 
 /** Neither: what an unreadable answer comes to where failing closed is right. */
-export const NO_CALL_RIGHTS: CallRights = { speak: false, soundboard: false };
+export const NO_CALL_RIGHTS: CallRights = { speak: false, soundboard: false, screenShare: false };
 
 /**
  * What a call holds one person to, as `call_rights_for` (065) answers it: the
@@ -44,7 +46,6 @@ export const NO_CALL_RIGHTS: CallRights = { speak: false, soundboard: false };
 export interface CallRightsRow extends CallRights {
   joinable: boolean;
   connect: boolean;
-  screenShare: boolean;
   isMuted: boolean;
   isDeafened: boolean;
   isBot: boolean;
@@ -97,13 +98,15 @@ export async function channelRights(
   const rights = await readCallRights(supabase, channelId, [userId]);
   if (rights === null) return null;
   const row = rights.get(userId);
-  return row ? { speak: row.speak, soundboard: row.soundboard } : NO_CALL_RIGHTS;
+  return row
+    ? { speak: row.speak, soundboard: row.soundboard, screenShare: row.screenShare }
+    : NO_CALL_RIGHTS;
 }
 
 /**
  * Make each of [connections] in [channelId]'s call hold what the server says
- * now: the microphone by `SPEAK` and the moderation flags, the soundboard by
- * [channelRights], the ears by deafening and a bot's grant, and the flags
+ * now: the microphone by `SPEAK` and the moderation flags, the screen by
+ * `SCREEN_SHARE`, the soundboard by [channelRights], the ears by deafening and a bot's grant, and the flags
  * every client draws in the metadata. Answers how many were pushed.
  *
  * A connection already right is left alone, since `updateParticipant`
@@ -142,6 +145,7 @@ export async function reconcileConnections(
       user.isDeafened,
       !user.isBot || user.botListens,
       user.soundboard,
+      user.screenShare,
     );
     // A watch connection is minted without the flags; the other two carry
     // them, and a token kept from before a mute would still say unmuted.

@@ -309,6 +309,7 @@ async function applyToLiveRooms(
             isDeafened,
             !isBot || botListensIn.has(room),
             (rightsIn.get(room) ?? NO_CALL_RIGHTS).soundboard,
+            (rightsIn.get(room) ?? NO_CALL_RIGHTS).screenShare,
           ),
         });
 

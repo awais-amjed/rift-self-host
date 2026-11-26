@@ -156,6 +156,7 @@ async function applyToLiveRoom(
           isDeafened,
           listen,
           rights.soundboard,
+          rights.screenShare,
         ),
       });
     }

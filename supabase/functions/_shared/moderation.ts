@@ -11,13 +11,6 @@ import type { ConnectionKind } from "./livekit.ts";
  * happened to already be in the call.
  */
 
-/** A silenced member keeps camera and screen share; only the microphone goes. */
-export const MUTED_SOURCES = [
-  TrackSource.CAMERA,
-  TrackSource.SCREEN_SHARE,
-  TrackSource.SCREEN_SHARE_AUDIO,
-];
-
 /**
  * Whether the microphone is denied.
  *
@@ -30,27 +23,27 @@ export function micDenied(isMuted: boolean, isDeafened: boolean): boolean {
 }
 
 /**
- * Publishable sources for an **AccessToken grant**, where `undefined` means
- * "every source".
+ * What a voice or share connection may publish: the camera always, the
+ * microphone unless it is denied, and the screen and its sound only with the
+ * channel's `SCREEN_SHARE`. Phones and browsers share on the voice connection
+ * itself, so a token minted for "every source" was a screen share for anybody
+ * the channel refused one (security re-review, Nov 26).
+ *
+ * **Always a list that names each source.** A grant reads a missing list as
+ * every source and a live update reads an empty one so; this is never either,
+ * so the two encodings cannot be mixed up. A silenced member keeps the camera
+ * and, where they may share, the screen and its sound.
  */
-export function grantSources(
+export function publishSources(
   isMuted: boolean,
   isDeafened: boolean,
-): TrackSource[] | undefined {
-  return micDenied(isMuted, isDeafened) ? MUTED_SOURCES : undefined;
-}
-
-/**
- * Publishable sources for a **live ParticipantPermission update**, where an
- * *empty list* means "every source" — the opposite encoding to the grant's
- * `undefined`. Mixing the two up silently mutes everyone or no one, which is
- * why they are separate functions rather than one shared value.
- */
-export function permissionSources(
-  isMuted: boolean,
-  isDeafened: boolean,
+  screenShare: boolean,
 ): TrackSource[] {
-  return micDenied(isMuted, isDeafened) ? MUTED_SOURCES : [];
+  return [
+    ...(micDenied(isMuted, isDeafened) ? [] : [TrackSource.MICROPHONE]),
+    TrackSource.CAMERA,
+    ...(screenShare ? [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO] : []),
+  ];
 }
 
 /**
@@ -75,6 +68,9 @@ export function livePermissionsFor(
   // the only data packet a member sends. False unless said, so a caller
   // that forgets takes the soundboard rather than handing it out.
   soundboard = false,
+  // The channel's `SCREEN_SHARE` (`_shared/call_rights.ts`). False unless
+  // said, as the soundboard is: a caller that forgets takes the screen.
+  screenShare = false,
 ) {
   switch (kind) {
     case "voice":
@@ -82,7 +78,7 @@ export function livePermissionsFor(
         canSubscribe: !isDeafened && mayListen,
         canPublish: true,
         canPublishData: soundboard,
-        canPublishSources: permissionSources(isMuted, isDeafened),
+        canPublishSources: publishSources(isMuted, isDeafened, screenShare),
         // As minted. LiveKit replaces the whole set on an update, and a right
         // left out is taken away: muted and unmuted, a member could no longer
         // publish being deafened, push-to-talk or what they watch, until
@@ -96,7 +92,7 @@ export function livePermissionsFor(
         // As minted: a share sends no packets, and one that could would be
         // a second way to press a clip.
         canPublishData: false,
-        canPublishSources: permissionSources(isMuted, isDeafened),
+        canPublishSources: publishSources(isMuted, isDeafened, screenShare),
         canUpdateMetadata: true,
       };
     case "watch":
@@ -104,7 +100,7 @@ export function livePermissionsFor(
         canSubscribe: !isDeafened && mayListen,
         canPublish: false,
         canPublishData: false,
-        canPublishSources: [],
+        canPublishSources: [] as TrackSource[],
         canUpdateMetadata: false,
         // Visible, as minted (`watchGrant`): a hidden one would listen unseen.
         hidden: false,
@@ -112,19 +108,24 @@ export function livePermissionsFor(
   }
 }
 
-/**
- * Whether a live connection is held without its microphone: sources that
- * name some but not the microphone. An empty list is every source (see
- * [permissionSources]), so it is not.
- */
-export function micHeldBack(sources: TrackSource[] | undefined): boolean {
-  return (sources?.length ?? 0) > 0 && !sources!.includes(TrackSource.MICROPHONE);
+/** [sources] as a set, an empty or missing list being every source. */
+function sourceSet(sources: TrackSource[] | undefined): Set<TrackSource> {
+  return new Set(
+    (sources?.length ?? 0) > 0
+      ? sources
+      : [
+        TrackSource.MICROPHONE,
+        TrackSource.CAMERA,
+        TrackSource.SCREEN_SHARE,
+        TrackSource.SCREEN_SHARE_AUDIO,
+      ],
+  );
 }
 
 /**
  * Whether a live connection of [kind] already holds [wanted] in everything a
- * push moves: its ears, its packets and its microphone. A watch connection
- * publishes nothing, so its microphone is not asked.
+ * push moves: its ears, its packets and what it may publish. A watch
+ * connection publishes nothing, so its sources are not asked.
  */
 export function holdsAlready(
   kind: ConnectionKind,
@@ -135,8 +136,13 @@ export function holdsAlready(
 ): boolean {
   return (held?.canSubscribe ?? false) === wanted.canSubscribe &&
     (held?.canPublishData ?? false) === wanted.canPublishData &&
-    (kind === "watch" ||
-      micHeldBack(held?.canPublishSources) === micHeldBack(wanted.canPublishSources));
+    (kind === "watch" || sameSources(held?.canPublishSources, wanted.canPublishSources));
+}
+
+function sameSources(a: TrackSource[] | undefined, b: TrackSource[] | undefined): boolean {
+  const x = sourceSet(a);
+  const y = sourceSet(b);
+  return x.size === y.size && [...x].every((source) => y.has(source));
 }
 
 /** The flags as every client reads them off participant metadata. */

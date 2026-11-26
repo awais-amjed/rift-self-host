@@ -13982,6 +13982,8 @@ BEGIN
      OR (v_got->>'speak')::boolean <> user_has_channel_permission(v_ann, v_v, 'SPEAK')
      OR (v_got->>'speak')::boolean
      OR (v_got->>'soundboard')::boolean
+     -- j-voice takes sharing too, and the voice connection's token asks (078).
+     OR (v_got->>'screen_share')::boolean IS NOT FALSE
      OR v_got->>'display_name' <> 'Ann'
      OR v_got->'node'->>'api_key' <> 'key-join'
      OR (v_got->'node'->>'is_default')::boolean IS NOT TRUE
@@ -14002,7 +14004,8 @@ BEGIN
   IF v_got->'node'->>'api_key' <> 'key-far'
      OR v_got->'node'->>'url' <> 'ws://far065:7880'
      OR v_got->>'pinned_node_id' <> v_got->'node'->>'id'
-     OR (v_got->>'speak')::boolean IS NOT TRUE THEN
+     OR (v_got->>'speak')::boolean IS NOT TRUE
+     OR (v_got->>'screen_share')::boolean IS NOT TRUE THEN
     RAISE EXCEPTION 'FAIL: a pinned join answered %', v_got - 'credentials';
   END IF;
   RAISE NOTICE 'ok  voice_join_facts answers a join as get_channel_token decided it (065)';
