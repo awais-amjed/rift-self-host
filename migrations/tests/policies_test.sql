@@ -14171,4 +14171,170 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 067: a reaction in one call ─────────────────────────────
+-- `toggle_reaction` takes the caller's own reaction off or puts it on, under
+-- the same policies as the rows, and answers the counts. Taking one off works
+-- for somebody the insert policy now refuses; a message holds at most twenty
+-- different emoji; and the rings name who reacted.
+INSERT INTO auth.users (id) VALUES
+  ('67676767-0000-4000-8000-000000000001'),  -- ada
+  ('67676767-0000-4000-8000-000000000002'),  -- bob
+  ('67676767-0000-4000-8000-000000000003');  -- kai, on another server
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('67670000-0000-4000-8000-000000000001', 'Open 067', 'ws://open067:7880'),
+  ('67670000-0000-4000-8000-000000000002', 'Other 067', 'ws://other067:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES
+  ('67676767-0000-4000-8000-000000000001', '67670000-0000-4000-8000-000000000001',
+   'ada', 'Ada', 'pk-ada', 'sid-ada-067', 'chat-ada', false),
+  ('67676767-0000-4000-8000-000000000002', '67670000-0000-4000-8000-000000000001',
+   'bob', 'Bob', 'pk-bob', 'sid-bob-067', 'chat-bob', false),
+  ('67676767-0000-4000-8000-000000000003', '67670000-0000-4000-8000-000000000002',
+   'kai', 'Kai', 'pk-kai', 'sid-kai-067', 'chat-kai', false);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('67670000-0000-4000-8000-0000000000c1', '67670000-0000-4000-8000-000000000001', 'r-text', 'text', false);
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = '67670000-0000-4000-8000-000000000001';
+SELECT pg_temp.as_member('67676767-0000-4000-8000-000000000002');
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (96701, '67670000-0000-4000-8000-0000000000c1', 'sealed-bob', 'n', 's', 1),
+  (96702, '67670000-0000-4000-8000-0000000000c1', 'sealed-bob-2', 'n', 's', 1);
+INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version) VALUES
+  (96703, '67676767-0000-4000-8000-000000000001', 'dm-bob-to-ada', 'n', 's', 1);
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF NOT has_function_privilege('authenticated', 'public.toggle_reaction(read_scope,bigint,text)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.toggle_reaction(read_scope,bigint,text)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'app.cap_reaction_kinds()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: toggle_reaction is not a member''s alone';
+  END IF;
+  RAISE NOTICE 'ok  toggle_reaction is for members (067)';
+END $$;
+
+SELECT pg_temp.as_member('67676767-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_got JSONB;
+BEGIN
+  v_got := toggle_reaction('channel', 96701, '👍');
+  IF v_got IS DISTINCT FROM jsonb_build_object('reacted', true, 'counts',
+       jsonb_build_array(jsonb_build_object('emoji', '👍', 'count', 1, 'mine', true)))
+     OR v_got->'counts' IS DISTINCT FROM (SELECT reaction_counts(m) FROM messages m WHERE m.id = 96701) THEN
+    RAISE EXCEPTION 'FAIL: putting a reaction on answered %', v_got;
+  END IF;
+  v_got := toggle_reaction('channel', 96701, '👍');
+  IF v_got IS DISTINCT FROM '{"reacted": false, "counts": []}'::jsonb
+     OR EXISTS (SELECT 1 FROM message_reactions WHERE message_id = 96701) THEN
+    RAISE EXCEPTION 'FAIL: taking a reaction off answered %', v_got;
+  END IF;
+  v_got := toggle_reaction('dm', 96703, '🎉');
+  IF v_got IS DISTINCT FROM jsonb_build_object('reacted', true, 'counts',
+       jsonb_build_array(jsonb_build_object('emoji', '🎉', 'count', 1, 'mine', true))) THEN
+    RAISE EXCEPTION 'FAIL: a DM reaction answered %', v_got;
+  END IF;
+  -- Left on, for the time-out below.
+  PERFORM toggle_reaction('channel', 96701, '👀');
+  RAISE NOTICE 'ok  toggle_reaction puts a reaction on and takes it off, and answers the counts (067)';
+END $$;
+
+-- Timed out, ada may add nothing but can still take hers off: the delete is
+-- asked first, so it never meets the insert policy.
+RESET ROLE;
+UPDATE users SET timed_out_until = now() + interval '1 hour'
+ WHERE id = '67676767-0000-4000-8000-000000000001';
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_got JSONB;
+BEGIN
+  v_got := toggle_reaction('channel', 96701, '👀');
+  IF (v_got->>'reacted')::BOOLEAN OR v_got->'counts' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a timed-out member taking her reaction off got %', v_got;
+  END IF;
+  v_got := toggle_reaction('dm', 96703, '🎉');
+  IF (v_got->>'reacted')::BOOLEAN THEN
+    RAISE EXCEPTION 'FAIL: a timed-out member taking a DM reaction off got %', v_got;
+  END IF;
+  BEGIN
+    PERFORM toggle_reaction('channel', 96701, '🔥');
+    RAISE EXCEPTION 'FAIL: a timed-out member put a reaction on';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a timed-out member can take a reaction off but not put one on (067)';
+END $$;
+RESET ROLE;
+UPDATE users SET timed_out_until = NULL
+ WHERE id = '67676767-0000-4000-8000-000000000001';
+
+-- Another server's member reaches nothing.
+SELECT pg_temp.as_member('67676767-0000-4000-8000-000000000003');
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM toggle_reaction('channel', 96701, '👍');
+    RAISE EXCEPTION 'FAIL: another server''s member reacted in r-text';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM toggle_reaction('dm', 96703, '👍');
+    RAISE EXCEPTION 'FAIL: an outsider reacted to a DM';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  toggle_reaction reaches only what the caller may react to (067)';
+END $$;
+RESET ROLE;
+
+-- Twenty different emoji on 96702, then a twenty-first is refused, whoever
+-- writes it and however; one already there may still be added to.
+INSERT INTO message_reactions (message_id, user_id, emoji)
+SELECT 96702, '67676767-0000-4000-8000-000000000002', 'e' || g FROM generate_series(1, 20) g;
+SELECT pg_temp.as_member('67676767-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_got JSONB;
+BEGIN
+  BEGIN
+    PERFORM toggle_reaction('channel', 96702, 'e21');
+    RAISE EXCEPTION 'FAIL: a twenty-first emoji went on';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'too_many_reactions' THEN RAISE; END IF;
+  END;
+  BEGIN
+    INSERT INTO message_reactions (message_id, user_id, emoji)
+    VALUES (96702, '67676767-0000-4000-8000-000000000001', 'e22');
+    RAISE EXCEPTION 'FAIL: a twenty-first emoji went on as a row';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'too_many_reactions' THEN RAISE; END IF;
+  END;
+  v_got := toggle_reaction('channel', 96702, 'e7');
+  IF NOT (v_got->>'reacted')::BOOLEAN OR jsonb_array_length(v_got->'counts') <> 20 THEN
+    RAISE EXCEPTION 'FAIL: adding to an emoji already there answered %', v_got;
+  END IF;
+  RAISE NOTICE 'ok  a message holds at most twenty different emoji (067)';
+END $$;
+RESET ROLE;
+
+DO $$
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+                  WHERE topic = 'server:67670000-0000-4000-8000-000000000001'
+                    AND event = 'reaction' AND payload->>'message_id' = '96701'
+                    AND payload->>'user_id' = '67676767-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a reaction''s ring did not say who reacted';
+  END IF;
+  IF (SELECT count(*) FROM realtime.messages
+       WHERE event = 'dm_reaction' AND payload->>'message_id' = '96703'
+         AND payload->>'user_id' = '67676767-0000-4000-8000-000000000001') <> 4 THEN
+    RAISE EXCEPTION 'FAIL: a DM reaction''s rings did not reach both, naming who';
+  END IF;
+  RAISE NOTICE 'ok  a reaction''s ring names who reacted (067)';
+END $$;
+
 ROLLBACK;
