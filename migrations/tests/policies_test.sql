@@ -3730,8 +3730,10 @@ BEGIN
   RAISE NOTICE 'ok  a page of a channel, in both directions';
 END $$;
 
--- The one the split exists to get right: bob is in the channel, so the id
--- half hands out 9213's id, and `messages_select` is what keeps the row.
+-- The one the split exists to get right: bob is in the channel, and 9213 is
+-- an ephemeral message for somebody else. Since 087 the id half leaves it
+-- out too, so a page is not spent on it, but `messages_select` still
+-- decides on its own: read directly, the row is not there either.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM channel_messages(
@@ -3739,10 +3741,12 @@ BEGIN
               WHERE id = 9213) THEN
     RAISE EXCEPTION 'FAIL: an ephemeral message for somebody else came back';
   END IF;
-  -- And it is not that the id was withheld: the definer half names it.
-  IF NOT (9213 = ANY(ARRAY(SELECT app.channel_page_ids(
-            'aaaa1111-0000-4000-8000-000000000001', NULL, NULL, 50)))) THEN
-    RAISE EXCEPTION 'FAIL: the id half is filtering, so this proves nothing';
+  IF 9213 = ANY(ARRAY(SELECT app.channel_page_ids(
+            'aaaa1111-0000-4000-8000-000000000001', NULL, NULL, 50))) THEN
+    RAISE EXCEPTION 'FAIL: the id half spent a page on a row its reader cannot see';
+  END IF;
+  IF EXISTS (SELECT 1 FROM messages WHERE id = 9213) THEN
+    RAISE EXCEPTION 'FAIL: messages_select showed an ephemeral message for somebody else';
   END IF;
   RAISE NOTICE 'ok  the policy still decides, one row at a time';
 END $$;
@@ -16215,5 +16219,119 @@ BEGIN
   RAISE NOTICE 'ok  a DM conversation opens in one request (086)';
 END $$;
 RESET ROLE;
+
+-- ── 087: a channel's page counts only rows its reader sees ───
+-- `app.channel_page_ids` used to spend a page on rows `messages_select`
+-- then dropped, so a page came back short and the app, reading "no extra
+-- row" as "nothing older", stopped there. Each caller's page must be the
+-- first rows of what the policy shows them, before, after and from the top.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('87878787-0000-4000-8000-000000000001'),  -- ida, reads
+  ('87878787-0000-4000-8000-000000000002'),  -- joe, presses and is answered
+  ('87878787-0000-4000-8000-0000000000b0');  -- kit, a bot granted from version 2
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('87870000-0000-4000-8000-000000000001', 'Pages', 'ws://pages.test:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES
+  ('87878787-0000-4000-8000-000000000001', '87870000-0000-4000-8000-000000000001',
+   'ida87', 'Ida', 'pk-ida87', 'sid-ida87', 'chat-ida87', false),
+  ('87878787-0000-4000-8000-000000000002', '87870000-0000-4000-8000-000000000001',
+   'joe87', 'Joe', 'pk-joe87', 'sid-joe87', 'chat-joe87', false),
+  ('87878787-0000-4000-8000-0000000000b0', '87870000-0000-4000-8000-000000000001',
+   'kit87', 'Kit', 'pk-kit87', 'sid-kit87', 'chat-kit87', true);
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('87870000-0000-4000-8000-0000000000c1', '87870000-0000-4000-8000-000000000001',
+   'pages', 'text');
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version) VALUES
+  ('87870000-0000-4000-8000-0000000000c1', '87878787-0000-4000-8000-0000000000b0',
+   '87878787-0000-4000-8000-000000000002', 2);
+
+-- Each under its sender's claims: `attest_message` stamps the sender.
+DO $$
+DECLARE
+  v_joe TEXT := '87878787-0000-4000-8000-000000000002';
+  v_kit TEXT := '87878787-0000-4000-8000-0000000000b0';
+  v_row RECORD;
+BEGIN
+  FOR v_row IN SELECT * FROM (VALUES
+      (878701, v_joe, 1, NULL, NULL, false),  -- p1
+      (878702, v_joe, 1, NULL, NULL, false),  -- p2
+      (878703, v_joe, 1, NULL, NULL, false),  -- p3
+      (878704, v_kit, 2, v_joe, NULL, false), -- Kit's reply only Joe was shown
+      (878705, v_joe, 0, NULL, v_kit, true),  -- Joe's press, between him and Kit
+      (878706, v_joe, 1, NULL, NULL, false),  -- p4
+      (878707, v_joe, 1, NULL, NULL, false)) AS t(id, sender, version, eph, bot, press)
+  LOOP
+    PERFORM set_config('request.jwt.claims',
+      jsonb_build_object('sub', v_row.sender, 'role', 'authenticated')::text, true);
+    INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version,
+                          ephemeral_for, to_bot, is_interaction, action_id)
+    VALUES (v_row.id, '87870000-0000-4000-8000-0000000000c1', 'b' || v_row.id, 'n', 's',
+            v_row.version, v_row.eph::uuid, v_row.bot::uuid, v_row.press,
+            CASE WHEN v_row.press THEN 'go' END);
+  END LOOP;
+END $$;
+
+DO $$
+DECLARE
+  v_ch   UUID := '87870000-0000-4000-8000-0000000000c1';
+  v_who  TEXT;
+  v_n    INTEGER;
+  v_mid  BIGINT;
+BEGIN
+  FOREACH v_who IN ARRAY ARRAY['87878787-0000-4000-8000-000000000001',
+                               '87878787-0000-4000-8000-000000000002',
+                               '87878787-0000-4000-8000-0000000000b0'] LOOP
+    PERFORM set_config('request.jwt.claims',
+      jsonb_build_object('sub', v_who, 'role', 'authenticated')::text, true);
+    SET LOCAL ROLE authenticated;
+    FOR v_n IN 1..4 LOOP
+      IF (SELECT array_agg(id) FROM channel_messages(v_ch, NULL, NULL, v_n))
+         IS DISTINCT FROM
+         (SELECT array_agg(id) FROM (SELECT id FROM messages WHERE channel_id = v_ch
+                                      ORDER BY id DESC LIMIT v_n) t) THEN
+        RAISE EXCEPTION 'FAIL: % got a short or wrong top page of %', v_who, v_n;
+      END IF;
+      IF (SELECT array_agg(id) FROM channel_messages(v_ch, 878707, NULL, v_n))
+         IS DISTINCT FROM
+         (SELECT array_agg(id) FROM (SELECT id FROM messages WHERE channel_id = v_ch
+                                       AND id < 878707 ORDER BY id DESC LIMIT v_n) t) THEN
+        RAISE EXCEPTION 'FAIL: % got a short or wrong older page of %', v_who, v_n;
+      END IF;
+      IF (SELECT array_agg(id) FROM channel_messages(v_ch, NULL, 878701, v_n))
+         IS DISTINCT FROM
+         (SELECT array_agg(id) FROM (SELECT id FROM messages WHERE channel_id = v_ch
+                                       AND id > 878701 ORDER BY id LIMIT v_n) t) THEN
+        RAISE EXCEPTION 'FAIL: % got a short or wrong newer page of %', v_who, v_n;
+      END IF;
+    END LOOP;
+    RESET ROLE;
+  END LOOP;
+
+  -- The case that was found: Ida's page of three past the press and the
+  -- reply Joe alone was shown is three rows, not one.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"87878787-0000-4000-8000-000000000001","role":"authenticated"}', true);
+  SET LOCAL ROLE authenticated;
+  IF (SELECT array_agg(id) FROM channel_messages(v_ch, 878707, NULL, 3))
+     IS DISTINCT FROM ARRAY[878706, 878703, 878702]::bigint[] THEN
+    RAISE EXCEPTION 'FAIL: a page stopped at rows its reader cannot see';
+  END IF;
+  RESET ROLE;
+  -- And Kit, granted from version 2, reads only its own and what was for it.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"87878787-0000-4000-8000-0000000000b0","role":"authenticated"}', true);
+  SET LOCAL ROLE authenticated;
+  IF (SELECT array_agg(id) FROM channel_messages(v_ch, NULL, NULL, 2))
+     IS DISTINCT FROM ARRAY[878705, 878704]::bigint[] THEN
+    RAISE EXCEPTION 'FAIL: a bot''s page counted rows from before its grant';
+  END IF;
+  RESET ROLE;
+  RAISE NOTICE 'ok  a channel''s page counts only the rows its reader sees (087)';
+END $$;
+RESET ROLE;
+
 
 ROLLBACK;
