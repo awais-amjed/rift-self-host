@@ -575,6 +575,11 @@ files, each run once after it, and the list below grows with them.
    A marked server has no members: `app.server_id()` and a member's own row (`users_select_self`)
    answer nothing for it. Measured Nov 26 2026 on 50,000 members and 5,000,000 messages: 37,000
    messages a second, 2.2 ms a member, so some four minutes of work in all.
+38. **058_server_details_overrides.sql** — `get_server_details` reads the caller's channel
+   overrides for the whole server in one grouped pass (`app.my_channel_overrides`) rather than
+   two lookups per channel, and applies them by the same rule as `app.apply_channel_overrides`
+   (`app.override_bits`). Same answers. Measured Nov 26 2026 on 320 channels, 60 with
+   overrides: 9.5 → 5 ms for a member.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that

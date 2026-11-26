@@ -10854,6 +10854,25 @@ BEGIN
   RAISE NOTICE 'ok  a role the channel allows posts, and only what it allows';
 END $$;
 
+-- The details fold every channel's overrides in one pass (058); each answer
+-- must be the one the per-channel rule gives, for gus (an allow and a deny
+-- between his roles) and hal (@everyone's alone).
+DO $$
+DECLARE v_who UUID;
+BEGIN
+  FOREACH v_who IN ARRAY ARRAY['99999999-f0f0-4f0f-8f0f-000000000004',
+                               '99999999-f0f0-4f0f-8f0f-000000000005']::UUID[] LOOP
+    PERFORM pg_temp.as_member(v_who::TEXT);
+    IF EXISTS (
+      SELECT 1 FROM jsonb_array_elements(get_server_details() -> 'channels') c
+       WHERE (c ->> 'my_permissions')::BIGINT
+             IS DISTINCT FROM app.channel_permissions_of((c ->> 'id')::UUID, v_who)) THEN
+      RAISE EXCEPTION 'FAIL: the details and the per-channel rule disagree for %', v_who;
+    END IF;
+  END LOOP;
+  RAISE NOTICE 'ok  the details give each channel the bits the rule gives';
+END $$;
+
 SELECT pg_temp.as_member('99999999-f0f0-4f0f-8f0f-000000000002');  -- ivy
 DO $$
 BEGIN
