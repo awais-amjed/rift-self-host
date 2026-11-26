@@ -15146,4 +15146,94 @@ BEGIN
   RAISE NOTICE 'ok  the @ menu gathers its matches first; inside names from three letters (075)';
 END $$;
 
+-- ============================================================
+-- 076. A server's member count is kept, not counted
+-- ============================================================
+-- By now the suite has joined, banned, let back, kicked, left and deleted
+-- members on several servers. The kept counts must be what counting gives,
+-- before and after another round of each, and `member_counts` must read
+-- them for the whole server and still count a private channel.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+CREATE FUNCTION pg_temp.tally_off() RETURNS BIGINT LANGUAGE sql AS $$
+  SELECT count(*) FROM (
+    SELECT u.server_id,
+           count(*) FILTER (WHERE NOT u.is_bot) AS people,
+           count(*) FILTER (WHERE u.is_bot)     AS bots
+      FROM users u WHERE NOT u.is_banned GROUP BY u.server_id) n
+  FULL JOIN server_member_counts k USING (server_id)
+ WHERE COALESCE(n.people, 0) <> COALESCE(k.people, 0)
+    OR COALESCE(n.bots, 0)   <> COALESCE(k.bots, 0)
+$$;
+
+DO $$
+DECLARE
+  s   CONSTANT UUID := 'cccc0000-0000-4000-8000-000000007601';
+  a   CONSTANT UUID := '76767676-0000-4000-8000-000000000001';
+  b   CONSTANT UUID := '76767676-0000-4000-8000-000000000002';
+  bot CONSTANT UUID := '76767676-0000-4000-8000-000000000003';
+  v   JSONB;
+BEGIN
+  IF pg_temp.tally_off() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: % servers'' kept counts differ from a count', pg_temp.tally_off();
+  END IF;
+
+  INSERT INTO servers (id, name, livekit_url) VALUES (s, 'Tally', 'ws://lan:7880');
+  INSERT INTO auth.users (id) VALUES (a), (b), (bot);
+  INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, is_bot)
+  VALUES (a,   s, 't76a', 'A', 'pk-76a', 'sid-76a', false),
+         (b,   s, 't76b', 'B', 'pk-76b', 'sid-76b', false),
+         (bot, s, 't76bot', 'Bot', 'pk-76bot', 'sid-76bot', true);
+  IF (SELECT people || '/' || bots FROM server_member_counts WHERE server_id = s) <> '2/1' THEN
+    RAISE EXCEPTION 'FAIL: three arrivals kept as %',
+      (SELECT people || '/' || bots FROM server_member_counts WHERE server_id = s);
+  END IF;
+  UPDATE users SET is_banned = true WHERE id = b;
+  UPDATE users SET is_banned = true WHERE id = b;        -- again: no move
+  UPDATE users SET display_name = 'Bee' WHERE id = b;   -- not counted
+  IF (SELECT people FROM server_member_counts WHERE server_id = s) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a ban was not taken off the count';
+  END IF;
+  UPDATE users SET is_banned = false WHERE id = b;
+  DELETE FROM users WHERE id = bot;
+  IF (SELECT people || '/' || bots FROM server_member_counts WHERE server_id = s) <> '2/0' THEN
+    RAISE EXCEPTION 'FAIL: a return and a bot removed kept as %',
+      (SELECT people || '/' || bots FROM server_member_counts WHERE server_id = s);
+  END IF;
+  IF pg_temp.tally_off() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: the kept counts drifted';
+  END IF;
+
+  -- `member_counts` reads the kept number for the whole server and a public
+  -- channel, and counts a private one. Skewed here to tell the two apart.
+  UPDATE server_member_counts SET people = people + 1000
+   WHERE server_id = 'ee500000-0000-4000-8000-000000000001';
+  PERFORM pg_temp.as50(1);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  v := member_counts();
+  IF (v ->> 'people')::int < 1000
+     OR (member_counts('ee501111-0000-4000-8000-000000000001') ->> 'people')::int < 1000
+     OR (member_counts('ee501111-0000-4000-8000-000000000002') ->> 'people')::int >= 1000 THEN
+    RAISE EXCEPTION 'FAIL: member_counts did not read the kept count: % / %', v,
+      member_counts('ee501111-0000-4000-8000-000000000002');
+  END IF;
+  BEGIN
+    PERFORM 1 FROM server_member_counts;
+    RAISE EXCEPTION 'FAIL: a member can read server_member_counts';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  EXECUTE 'RESET ROLE';
+  PERFORM set_config('request.jwt.claims', '', true);
+  UPDATE server_member_counts SET people = people - 1000
+   WHERE server_id = 'ee500000-0000-4000-8000-000000000001';
+
+  -- A server deleted takes its count with it.
+  DELETE FROM servers WHERE id = s;
+  IF EXISTS (SELECT 1 FROM server_member_counts WHERE server_id = s)
+     OR pg_temp.tally_off() <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a deleted server left its count behind';
+  END IF;
+  RAISE NOTICE 'ok  a server''s member count is kept by its members'' changes (076)';
+END $$;
+
 ROLLBACK;

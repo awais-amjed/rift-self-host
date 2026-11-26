@@ -690,6 +690,14 @@ files, each run once after it, and the list below grows with them.
    "abr" does. Below three letters the answer is the prefix matches alone; from three it is
    unchanged (compared over 672 calls on the test server). Measured Nov 26 2026 on 50,000
    members: "a" 31 → 4.9 ms, a two-letter prefix nobody has 39 → 0.5 ms.
+56. **076_member_count_kept.sql** — `server_member_counts` holds each server's members who are
+   not banned, people and bots apart, kept by triggers on `users` (`users_tally_*`) in the
+   transaction that moves them, and `member_counts` reads it for the whole server or a public
+   channel; a private channel's audience is still counted. A join already waits on the server's
+   row in `register_user`, so the count's row holds up no join that was not already held. The
+   suite checks the kept counts against a real count after everything it does. Measured Nov 26
+   2026 on 50,000 members: `member_counts()` 1.5 → 0.03 ms, `members_refresh` of one id 2.4 →
+   0.9 ms; a ban costs what it did.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
