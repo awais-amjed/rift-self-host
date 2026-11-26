@@ -15948,4 +15948,27 @@ BEGIN
   RAISE NOTICE 'ok  a DM call''s join is one call, in the function''s order (082)';
 END $$;
 
+-- ── 083: a channel's poll counts come with it ───────────────
+-- 066's o-text, as ada: her vote shows in the tallies `channel_open`
+-- answers, which hold the poll and nothing else.
+SELECT pg_temp.as_member('66666666-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_got JSONB;
+BEGIN
+  PERFORM vote_poll(96603, ARRAY[1]::SMALLINT[]);
+  v_got := channel_open('66660000-0000-4000-8000-0000000000c1', 51, 51) -> 'tallies';
+  IF v_got IS DISTINCT FROM poll_tallies(ARRAY[96603::BIGINT])
+     OR v_got -> '96603' -> 'mine' <> '[1]'::jsonb
+     OR (SELECT count(*) FROM jsonb_object_keys(v_got)) <> 1 THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s tallies are %', v_got;
+  END IF;
+  IF channel_open('66660000-0000-4000-8000-0000000000c2', 51, 51) -> 'tallies' <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a channel with no polls answered tallies';
+  END IF;
+  RAISE NOTICE 'ok  channel_open answers its polls'' tallies (083)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
