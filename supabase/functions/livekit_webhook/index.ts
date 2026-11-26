@@ -4,7 +4,7 @@ import { ParticipantInfo, RoomServiceClient, WebhookReceiver } from "livekit-ser
 import DBSchema from "../_shared/schema.ts";
 import { connectionKind, normaliseHost } from "../_shared/livekit.ts";
 import { sweepOrphanedWatchers } from "../_shared/watch.ts";
-import { reconcileConnections } from "../_shared/call_rights.ts";
+import { readCallRights, reconcileConnections } from "../_shared/call_rights.ts";
 
 /**
  * LiveKit's webhook: tells this server who joined and left its calls.
@@ -34,6 +34,9 @@ import { reconcileConnections } from "../_shared/call_rights.ts";
  *     call. So a join the token gate would refuse now is removed, and one it
  *     would mint differently is pushed what it would mint. A DM call's room
  *     is held to its call the same way (`checkDmJoin`).
+ *
+ * Which node signs with a key is kept in the worker for a few minutes
+ * (`signerOf`), so a join check is one database read (`call_rights_for`).
  *
  * Each of those, once its signature checks out, also notes that the node's
  * webhook reaches this server (`noteHeard`), so a node without one can be
@@ -128,19 +131,17 @@ async function checkJoin(service: RoomServiceClient, room: string, identity: str
     return; // Gone again already.
   }
   const userId = identity.split("~")[0];
-  const ask = (name: string) =>
-    supabase.rpc("user_has_channel_permission", { p_user: userId, p_channel: room, p_name: name });
-  const answers = await Promise.all([
-    supabase.rpc("channel_joinable_by", { p_channel: room, p_user: userId }),
-    ask("CONNECT"),
-    ...(connectionKind(identity) === "share" ? [ask("SCREEN_SHARE")] : []),
-  ]);
-  if (answers.some((a) => a.error)) return;
-  if (answers.some((a) => a.data !== true)) {
+  // One read for all of it (`call_rights_for`): the door, the bits and what
+  // the connection should hold.
+  const rights = await readCallRights(supabase, room, [userId]);
+  if (rights === null) return;
+  const row = rights.get(userId);
+  const share = connectionKind(identity) === "share";
+  if (!row || !row.joinable || !row.connect || (share && !row.screenShare)) {
     await service.removeParticipant(room, identity);
     return;
   }
-  await reconcileConnections(supabase, service, room, [participant], { leaveUnreadable: true });
+  await reconcileConnections(supabase, service, room, [participant], rights);
 }
 
 /** The `iss` of a token, unverified: only which key to verify it with. */
@@ -187,6 +188,52 @@ async function nodesSigningWith(
     add(one(row.livekit_nodes)?.url, row.livekit_secret_key);
   }
   return [...found.values()];
+}
+
+/** What [nodesSigningWith] answered, per key, while this worker lives. */
+const signers = new Map<string, { nodes: { url: string; secret: string }[]; at: number }>();
+const SIGNERS_FOR_MS = 5 * 60 * 1000;
+const MOST_SIGNERS = 64;
+
+/**
+ * The node that signed [body], as a list of none or one.
+ *
+ * LiveKit posts every event, a call's join among them, and asking the
+ * database which node signs with a key was two of the three reads a join
+ * check made. So a worker keeps the answer for five minutes. A key it holds
+ * that no longer verifies — a secret rotated, a region removed — is asked
+ * again at once rather than refused, and a key nobody holds is never kept,
+ * so made-up issuers cannot fill the map.
+ */
+async function signerOf(
+  apiKey: string,
+  body: string,
+  token: string,
+): Promise<{ url: string; secret: string }[]> {
+  const verified = async (nodes: { url: string; secret: string }[]) => {
+    for (const node of nodes) {
+      try {
+        await new WebhookReceiver(apiKey, node.secret).receive(body, token);
+        return [node];
+      } catch {
+        continue;
+      }
+    }
+    return [];
+  };
+  const held = signers.get(apiKey);
+  if (held && Date.now() - held.at < SIGNERS_FOR_MS) {
+    const found = await verified(held.nodes);
+    if (found.length > 0) return found;
+  }
+  const nodes = await nodesSigningWith(apiKey);
+  if (nodes.length > 0) {
+    if (signers.size >= MOST_SIGNERS) signers.clear();
+    signers.set(apiKey, { nodes, at: Date.now() });
+  } else {
+    signers.delete(apiKey);
+  }
+  return await verified(nodes);
 }
 
 /** When this worker last stamped each node, by address: see [noteHeard]. */
@@ -241,12 +288,7 @@ Deno.serve(async (req) => {
   const apiKey = issuerOf(token);
   if (!apiKey) return new Response(null, { status: 401 });
 
-  for (const node of await nodesSigningWith(apiKey)) {
-    try {
-      await new WebhookReceiver(apiKey, node.secret).receive(body, token);
-    } catch {
-      continue;
-    }
+  for (const node of await signerOf(apiKey, body, token)) {
     await noteHeard(node.url);
     const service = new RoomServiceClient(normaliseHost(node.url), apiKey, node.secret);
     // The join first: a watcher refused here has nothing left to sweep.

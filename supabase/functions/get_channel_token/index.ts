@@ -2,18 +2,20 @@ import "@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { grantSources, moderationMetadata } from "../_shared/moderation.ts";
-import DBSchema from "../_shared/schema.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
-import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { extractBearerToken } from "../_shared/auth.ts";
+import { verifyJwt } from "../_shared/jwt.ts";
 import { admitWatcher, WATCH_TOKEN_TTL, watchGrant, watchIdentity } from "../_shared/watch.ts";
 import {
-  callNodeOf,
   claimVoiceNode,
-  livekitCredentials,
+  KeyPair,
+  LiveKitCredentials,
+  LiveKitNode,
   nodeKeyPair,
   normaliseHost,
+  preferredNode,
   releaseVoiceNodes,
   voiceUserId,
 } from "../_shared/livekit.ts";
@@ -42,6 +44,56 @@ async function openRoom(
   }
 }
 
+/**
+ * The answer for a refusal `voice_join_facts` gave, in the words and codes
+ * this function always answered with, or null for `ok`.
+ */
+function refusal(reason: string): Response | null {
+  switch (reason) {
+    case "ok":
+      return null;
+    case "user_not_found":
+      return CustomResponse.error("User not found", EC.USER_NOT_FOUND);
+    case "user_banned":
+      return CustomResponse.error("User is banned", EC.USER_BANNED);
+    case "channel_not_found":
+      // Not "forbidden": a room you cannot see should not confirm it exists.
+      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
+    case "no_connect":
+      return CustomResponse.error("You cannot join this voice channel", EC.PERMISSION_DENIED);
+    case "no_share":
+      // Sharing sound is the same capability as sharing a screen — a screen
+      // share already carries the app's audio, so a separate permission would
+      // only let a member be denied the quieter half of what they can already
+      // do. One permission, two kinds of share.
+      return CustomResponse.error("You cannot share here", EC.PERMISSION_DENIED);
+    case "bot_cannot_watch":
+      // A bot hears on its one connection, by an explicit grant; a hidden
+      // second one would be listening nobody sees.
+      return CustomResponse.error("A bot cannot watch", EC.PERMISSION_DENIED);
+    case "key_not_ready":
+      return CustomResponse.error(
+        "No media key for this channel yet — a member has to be here first",
+        EC.KEY_NOT_READY,
+      );
+    case "credentials_missing":
+      return CustomResponse.error(
+        "LiveKit credentials not configured for this server",
+        EC.SERVER_CREDENTIALS_MISSING,
+      );
+    case "not_in_call":
+      return CustomResponse.error("Join the call before watching in it", EC.USER_NOT_IN_VOICE);
+    case "not_voice":
+      // A call is only ever in a voice channel. Without this a text channel's
+      // id made a room too, which nothing lists and nothing moderates.
+      return CustomResponse.error("Not a voice channel", EC.CHANNEL_NOT_FOUND);
+    case "claim_failed":
+      return CustomResponse.error("Could not decide where this call is held", EC.VOICE_SERVER_UNREACHABLE);
+    default:
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR);
+  }
+}
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -52,42 +104,21 @@ Deno.serve(async (req) => {
     const { channel_id, screen_share, sound_share, watch, device_id, preferred_node_id } =
       await req.json();
     const token = extractBearerToken(req);
-
-    const auth = await authenticateToken(supabase, token);
-    if (isAuthError(auth)) return auth;
+    if (!token) {
+      return CustomResponse.error("Missing required field: token", EC.TOKEN_MISSING);
+    }
+    // The JWT is checked here, against the stack's keys; who the caller is on
+    // this server (a member, banned, a server being deleted) is the
+    // database's first answer below.
+    const userId = await verifyJwt(token);
+    if (!userId) {
+      return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
+    }
 
     if (!channel_id) {
       return CustomResponse.error("Missing required field: channel_id", EC.MISSING_FIELDS);
     }
 
-    // Membership, not just "is it on my server". This checked the server and
-    // nothing else, which was harmless while every channel was everybody's and
-    // is a hole the moment one is not — for people before bots, since a private
-    // voice channel is a call you could walk into by knowing an id.
-    //
-    // `visible_channels` is the same answer the channel policies give; asking the
-    // database rather than reimplementing the rule here is the whole point of
-    // 021.
-    //
-    // `channel_joinable_by` rather than `channel_visible_to`: a summoned
-    // bot is in the room without being of it. It may take a token for this one
-    // voice channel and nothing else — it still cannot list the channel, read
-    // its roster or post in it, because every other caller asks
-    // `app.sees_channel` and still gets no.
-    //
-    // ── and everything it needs to decide, asked at once ──
-    //
-    // Nothing here depends on anything else here: whether the channel admits
-    // them, whether they may connect, whether they may share, who they are,
-    // and the server's LiveKit credentials are five independent reads. They
-    // used to be five round trips one after another, and this is the function
-    // every join goes through — a channel that fills up after a raid or an
-    // event pays them once per person, in series, each.
-    //
-    // The *answers* are still weighed in the order they always were, below,
-    // so the refusal a caller gets is unchanged. Asking a question whose
-    // answer is thrown away costs a query and reveals nothing: none of these
-    // writes anything, and nothing is returned on a refusal.
     const wantsShare = screen_share === true || sound_share === true;
     // A watch connection only receives (`_shared/watch.ts`); one that also
     // shared would be a hidden publisher.
@@ -95,82 +126,44 @@ Deno.serve(async (req) => {
     if (wantsWatch && wantsShare) {
       return CustomResponse.error("A connection either shares or watches", EC.PERMISSION_DENIED);
     }
-    const [
-      { data: visible, error: visibleError },
-      { data: mayConnect },
-      { data: mayShare },
-      { data: maySpeak },
-      { data: maySoundboard },
-      { data: userData, error: userError },
-      credentials,
-      { data: limitsRow },
-    ] = await Promise.all([
-      supabase.rpc("channel_joinable_by", { p_channel: channel_id, p_user: auth.userId }),
-      // The channel's bits, not the server's: a channel can override a
-      // role's (`channel_overrides`), so a stage can keep everyone but its
-      // speakers quiet.
-      supabase.rpc("user_has_channel_permission", {
-        p_user: auth.userId, p_channel: channel_id, p_name: "CONNECT",
-      }),
-      wantsShare
-        ? supabase.rpc("user_has_channel_permission", {
-          p_user: auth.userId, p_channel: channel_id, p_name: "SCREEN_SHARE",
-        })
-        : Promise.resolve({ data: null }),
-      supabase.rpc("user_has_channel_permission", {
-        p_user: auth.userId, p_channel: channel_id, p_name: "SPEAK",
-      }),
-      // Only the voice connection presses clips (`_shared/soundboard.ts`).
-      wantsShare || wantsWatch
-        ? Promise.resolve({ data: null })
-        : supabase.rpc("user_has_channel_permission", {
-          p_user: auth.userId, p_channel: channel_id, p_name: "USE_SOUNDBOARD",
-        }),
-      supabase
-        .from(DBSchema.users.tableName)
-        .select(
-          `${DBSchema.users.displayName}, ${DBSchema.users.isMuted}, ` +
-            `${DBSchema.users.isDeafened}, ${DBSchema.users.isBot}`,
-        )
-        .eq(DBSchema.users.id, auth.userId)
-        .single(),
-      livekitCredentials(supabase, auth.serverId),
-      supabase
-        .from(DBSchema.servers.tableName)
-        .select(`${DBSchema.servers.maxVoiceParticipants}, ${DBSchema.servers.maxShareMbps}`)
-        .eq(DBSchema.servers.id, auth.serverId)
-        .single(),
-    ]);
 
-    if (visibleError) {
-      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, visibleError);
+    // ── Everything it decides from, in one call ──
+    //
+    // `voice_join_facts` (065) weighs what this function used to ask in eleven
+    // round trips, in the order it weighed them, so the refusal a caller gets
+    // is unchanged:
+    //
+    //   * membership: no row, a ban, a server being deleted;
+    //   * the door, `channel_joinable_by` rather than `channel_visible_to`: a
+    //     summoned bot is in the room without being of it, and may take a
+    //     token for this one voice channel and nothing else;
+    //   * the channel's bits, not the server's (`channel_overrides`), so a
+    //     stage can keep everyone but its speakers quiet: `CONNECT`, and
+    //     `SCREEN_SHARE` for a share, decide whether there is a token at all;
+    //     `SPEAK` and the soundboard decide what it carries;
+    //   * a bot: no watching, a media key before a token, and ears only by a
+    //     grant (below);
+    //   * the server's LiveKit, and its limits;
+    //   * where the call is: for a watch, read; otherwise claimed.
+    //
+    // The claim is the one write, and it comes after every refusal the
+    // database can give. The keys come back with it: this function is what
+    // signs, and the only thing that may hold them.
+    const kind = wantsWatch ? "watch" : wantsShare ? "share" : "voice";
+    const { data: factsData, error: factsError } = await supabase.rpc("voice_join_facts", {
+      p_user: userId,
+      p_channel: channel_id,
+      p_kind: kind,
+      p_preferred: preferredNode(preferred_node_id),
+    });
+    if (factsError) {
+      return CustomResponse.error("Error reading channel access", EC.DB_ERROR, factsError);
     }
-    if (visible !== true) {
-      // Not "forbidden": a room you cannot see should not confirm it exists.
-      return CustomResponse.error("Channel not found", EC.CHANNEL_NOT_FOUND);
-    }
-
-    // `CONNECT`, and `SCREEN_SHARE` for the second connection. The moderation
-    // flags below decide what a token may carry once you are in the room; these
-    // decide whether there is a token at all.
-    if (mayConnect !== true) {
-      return CustomResponse.error("You cannot join this voice channel", EC.PERMISSION_DENIED);
-    }
-    // Sharing sound is the same capability as sharing a screen — a screen
-    // share already carries the app's audio, so a separate permission would
-    // only let a member be denied the quieter half of what they can already
-    // do. One permission, two kinds of share.
-    if (wantsShare && mayShare !== true) {
-      return CustomResponse.error("You cannot share here", EC.PERMISSION_DENIED);
-    }
+    const facts = (factsData ?? {}) as Record<string, any>;
+    const refused = refusal(String(facts.reason ?? ""));
+    if (refused) return refused;
 
     const room = channel_id;
-
-    if (userError || !userData) {
-      return CustomResponse.error("User not found", EC.USER_NOT_FOUND, userError);
-    }
-
-    const userRecord = userData as Record<string, any>;
 
     // Identity = "<userId>~<deviceId>" (+ "_screenshare" for the screen-share
     // connection, "_soundshare" for the sound-share one, or "_watch" for the
@@ -186,7 +179,7 @@ Deno.serve(async (req) => {
     const deviceSuffix =
       (typeof device_id === "string" ? device_id : "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16) ||
       "default";
-    const voiceIdentity = `${auth.userId}~${deviceSuffix}`;
+    const voiceIdentity = `${userId}~${deviceSuffix}`;
     let identity = voiceIdentity;
 
     if (screen_share === true) {
@@ -195,16 +188,12 @@ Deno.serve(async (req) => {
       identity = `${identity}_soundshare`;
     }
 
-    const displayName = userRecord[DBSchema.users.displayName];
-    const isMuted: boolean = userRecord[DBSchema.users.isMuted] === true;
-    const isDeafened: boolean = userRecord[DBSchema.users.isDeafened] === true;
-    const isBot: boolean = userRecord[DBSchema.users.isBot] === true;
-
-    // A bot hears on its one connection, by an explicit grant; a hidden
-    // second one would be listening nobody sees.
-    if (wantsWatch && isBot) {
-      return CustomResponse.error("A bot cannot watch", EC.PERMISSION_DENIED);
-    }
+    const displayName = facts.display_name as string;
+    const isMuted: boolean = facts.is_muted === true;
+    const isDeafened: boolean = facts.is_deafened === true;
+    const isBot: boolean = facts.is_bot === true;
+    const maySpeak: boolean = facts.speak === true;
+    const maySoundboard: boolean = facts.soundboard === true;
 
     // A bot publishes; it does not hear (BOTS.md §6b).
     //
@@ -220,53 +209,27 @@ Deno.serve(async (req) => {
     // Calls are end-to-end encrypted, and a bot publishing
     // with `encryptionType: kNone` would be one every member's client skips the
     // frame cryptor for — its audio in the clear, inside the room built so that
-    // could not happen. So a bot needs a media key before it needs a token, and
-    // a member's client is the only thing that can produce one.
+    // could not happen. So a bot needs a media key before it needs a token
+    // (`key_not_ready`), and a member's client is the only thing that can
+    // produce one.
     //
-    // Refusing until it has one is the honest failure: the bot is told to wait
-    // rather than joining and being inaudible for reasons nothing reports.
-    if (isBot) {
-      const { data: botKey } = await supabase
-        .from("bot_voice_keys")
-        .select("bot_id")
-        .eq("channel_id", channel_id)
-        .eq("bot_id", auth.userId)
-        .limit(1)
-        .maybeSingle();
-      if (!botKey) {
-        return CustomResponse.error(
-          "No media key for this channel yet — a member has to be here first",
-          EC.KEY_NOT_READY,
-        );
-      }
-    }
-
-    let mayListen = true;
-    if (isBot) {
-      const { data: grant, error: grantError } = await supabase
-        .from("bot_voice_grants")
-        .select("bot_id")
-        .eq("channel_id", channel_id)
-        .eq("bot_id", auth.userId)
-        .maybeSingle();
-      if (grantError) {
-        return CustomResponse.error("Error reading bot voice access", EC.DB_ERROR, grantError);
-      }
-      // Fail closed. An unreadable grant is a bot that cannot hear, never one
-      // that can — the failure people notice is the safe one.
-      mayListen = grant !== null;
-    }
+    // Fail closed: anything but a grant read as there is a bot that cannot
+    // hear, never one that can — the failure people notice is the safe one.
+    const mayListen = !isBot || facts.may_listen === true;
 
     // The API secret lives in `server_secrets`, which no client can read —
     // minting this token is the only reason anything reads it, and it is why
     // this endpoint stays an edge function.
-    if (!credentials) {
-      return CustomResponse.error("LiveKit credentials not configured for this server", EC.SERVER_CREDENTIALS_MISSING);
-    }
+    const credentialsRow = facts.credentials as Record<string, string>;
+    const credentials: LiveKitCredentials = {
+      host: normaliseHost(credentialsRow.url),
+      apiKey: credentialsRow.api_key,
+      apiSecret: credentialsRow.api_secret,
+      url: credentialsRow.url,
+    };
 
-    const limits = (limitsRow ?? {}) as Record<string, any>;
-    const maxVoice = Number(limits[DBSchema.servers.maxVoiceParticipants] ?? 0);
-    const maxShareMbps = Number(limits[DBSchema.servers.maxShareMbps] ?? 0);
+    const maxVoice = Number(facts.max_voice_participants ?? 0);
+    const maxShareMbps = Number(facts.max_share_mbps ?? 0);
 
     // ── A watch connection ──────────────────────────────────
     //
@@ -275,14 +238,12 @@ Deno.serve(async (req) => {
     // comes from `voice_rooms`, read rather than claimed, and the voice
     // connection being in that room is the condition for the token at all.
     if (wantsWatch) {
-      const node = await callNodeOf(supabase, auth.serverId, channel_id, credentials);
-      const service = node
-        ? new RoomServiceClient(normaliseHost(node.url), node.pair.apiKey, node.pair.apiSecret)
-        : null;
-      if (!node || !service || !(await admitWatcher(service, room, voiceIdentity))) {
+      const node = facts.watch as Record<string, string>;
+      const service = new RoomServiceClient(normaliseHost(node.url), node.api_key, node.api_secret);
+      if (!(await admitWatcher(service, room, voiceIdentity))) {
         return CustomResponse.error("Join the call before watching in it", EC.USER_NOT_IN_VOICE);
       }
-      const watchToken = new AccessToken(node.pair.apiKey, node.pair.apiSecret, {
+      const watchToken = new AccessToken(node.api_key, node.api_secret, {
         identity: watchIdentity(voiceIdentity),
         name: displayName,
         ttl: WATCH_TOKEN_TTL,
@@ -299,20 +260,7 @@ Deno.serve(async (req) => {
     // The channel's pinned region, needed only to know whether a failure to
     // open the room is the *pin* failing — which is the one case that falls
     // back to automatic below.
-    const { data: channelRow } = await supabase
-      .from(DBSchema.channels.tableName)
-      .select(`${DBSchema.channels.livekitNodeId}, ${DBSchema.channels.channelType}`)
-      .eq(DBSchema.channels.id, channel_id)
-      .maybeSingle();
-    // A call is only ever in a voice channel. Without this a text channel's id
-    // made a room too, which nothing lists and nothing moderates.
-    if ((channelRow as Record<string, any> | null)?.[DBSchema.channels.channelType] !== "voice") {
-      return CustomResponse.error("Not a voice channel", EC.CHANNEL_NOT_FOUND);
-    }
-    const pinnedNodeId =
-      (channelRow as Record<string, any> | null)?.[
-        DBSchema.channels.livekitNodeId
-      ] as string | null ?? null;
+    const pinnedNodeId = (facts.pinned_node_id as string | null) ?? null;
 
     // Which LiveKit this call is on. A server may have several, and a room
     // lives on exactly one of them — so this is decided once, by whoever gets
@@ -324,16 +272,10 @@ Deno.serve(async (req) => {
     // up yet. A client that names somebody else's node, or a stale one, is
     // answered with the default rather than refused — being sent to a working
     // node is better than being told no.
-    let node: Awaited<ReturnType<typeof claimVoiceNode>>;
-    try {
-      node = await claimVoiceNode(supabase, channel_id, preferred_node_id ?? null);
-    } catch (err) {
-      return CustomResponse.error(
-        "Could not decide where this call is held",
-        EC.VOICE_SERVER_UNREACHABLE,
-        err,
-      );
-    }
+    const claimed = facts.node as Record<string, any> | null;
+    let node: LiveKitNode | null = claimed
+      ? { id: claimed.id, url: claimed.url, label: claimed.label ?? "", isDefault: claimed.is_default === true }
+      : null;
     let nodeUrl = node?.url ?? credentials.url;
     let nodeHost = node ? normaliseHost(node.url) : credentials.host;
 
@@ -347,7 +289,11 @@ Deno.serve(async (req) => {
     // allow to happen. If it somehow has, the region is unusable rather than
     // quietly run on the server's pair, and everything below treats it as a
     // region that did not answer.
-    let pair = await nodeKeyPair(supabase, node, credentials);
+    let pair: KeyPair | null = !claimed
+      ? credentials
+      : claimed.api_key && claimed.api_secret
+      ? { apiKey: claimed.api_key, apiSecret: claimed.api_secret }
+      : null;
 
     // Pre-create the LiveKit room server-side (idempotent — safe to call even if
     // the room already exists). This means clients never need roomCreate: true;
@@ -378,7 +324,7 @@ Deno.serve(async (req) => {
             .map((p) => voiceUserId(p.identity))
             .filter((id): id is string => id !== null),
         );
-        if (present.size >= maxVoice && !present.has(auth.userId)) {
+        if (present.size >= maxVoice && !present.has(userId)) {
           return CustomResponse.error(
             `This call is full — it takes ${maxVoice} ` +
               `${maxVoice === 1 ? "person" : "people"}`,

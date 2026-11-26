@@ -13808,4 +13808,230 @@ BEGIN
 END $$;
 RESET ROLE;
 
+
+-- ── 065: a call's questions in one call each ───────────────
+-- `voice_join_facts` and `call_rights_for` answer as the questions they stand
+-- for (`channel_joinable_by`, `user_has_channel_permission`) and refuse in
+-- `get_channel_token`'s order; `voice_roster_facts` names only the caller's
+-- server; `call_panels` is the call's players and the live panels of the
+-- text channels the caller reads, and nothing else.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('65656565-0000-4000-8000-000000000001'),  -- ann
+  ('65656565-0000-4000-8000-000000000002'),  -- tik, a bot with no media key
+  ('65656565-0000-4000-8000-000000000003'),  -- tok, a bot with one, and ears
+  ('65656565-0000-4000-8000-000000000004'),  -- kim, on another server
+  ('65656565-0000-4000-8000-000000000005');  -- bea, banned
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('65650000-0000-4000-8000-000000000001', 'Join', 'ws://join:7880'),
+  ('65650000-0000-4000-8000-000000000002', 'Keyless', 'ws://keyless:7880');
+INSERT INTO server_secrets VALUES
+  ('65650000-0000-4000-8000-000000000001', 'key-join', 'secret-join');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot, is_banned, is_muted)
+VALUES
+  ('65656565-0000-4000-8000-000000000001', '65650000-0000-4000-8000-000000000001',
+   'ann', 'Ann', 'pk-ann', 'sid-ann', 'chat-ann', false, false, true),
+  ('65656565-0000-4000-8000-000000000002', '65650000-0000-4000-8000-000000000001',
+   'tik', 'Tik', 'pk-tik', 'sid-tik', 'chat-tik', true, false, false),
+  ('65656565-0000-4000-8000-000000000003', '65650000-0000-4000-8000-000000000001',
+   'tok', 'Tok', 'pk-tok', 'sid-tok', 'chat-tok', true, false, false),
+  ('65656565-0000-4000-8000-000000000004', '65650000-0000-4000-8000-000000000002',
+   'kim', 'Kim', 'pk-kim', 'sid-kim', 'chat-kim', false, false, false),
+  ('65656565-0000-4000-8000-000000000005', '65650000-0000-4000-8000-000000000001',
+   'bea', 'Bea', 'pk-bea', 'sid-bea', 'chat-bea', false, true, false);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('65650000-0000-4000-8000-0000000000c1', '65650000-0000-4000-8000-000000000001', 'j-voice', 'voice', false),
+  ('65650000-0000-4000-8000-0000000000c2', '65650000-0000-4000-8000-000000000001', 'j-text', 'text', false),
+  ('65650000-0000-4000-8000-0000000000c3', '65650000-0000-4000-8000-000000000001', 'j-hidden', 'voice', true),
+  ('65650000-0000-4000-8000-0000000000c4', '65650000-0000-4000-8000-000000000001', 'j-secret', 'text', true),
+  ('65650000-0000-4000-8000-0000000000c5', '65650000-0000-4000-8000-000000000001', 'j-far', 'voice', false),
+  ('65650000-0000-4000-8000-0000000000c9', '65650000-0000-4000-8000-000000000002', 'k-voice', 'voice', false);
+-- j-voice takes speaking and sharing from everybody.
+INSERT INTO channel_overrides (channel_id, role_id, deny)
+SELECT '65650000-0000-4000-8000-0000000000c1', id, app.perm('SPEAK') | app.perm('SCREEN_SHARE')
+  FROM roles WHERE server_id = '65650000-0000-4000-8000-000000000001' AND is_everyone;
+-- j-far is pinned to a region with a key of its own.
+DO $$
+DECLARE v_far UUID;
+BEGIN
+  INSERT INTO livekit_nodes (server_id, label, url)
+  VALUES ('65650000-0000-4000-8000-000000000001', 'Far 065', 'ws://far065:7880')
+  RETURNING id INTO v_far;
+  INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
+  VALUES (v_far, 'key-far', 'secret-far');
+  UPDATE channels SET livekit_node_id = v_far WHERE id = '65650000-0000-4000-8000-0000000000c5';
+END $$;
+-- The grant first: a grant changing clears the bot's sealed keys.
+INSERT INTO bot_voice_grants (channel_id, bot_id) VALUES
+  ('65650000-0000-4000-8000-0000000000c1', '65656565-0000-4000-8000-000000000003');
+INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key, ephemeral_public_key, ciphertext, nonce)
+VALUES ('65650000-0000-4000-8000-0000000000c1', '65656565-0000-4000-8000-000000000003', 1, true, 'e', 'c', 'n');
+-- tok's players: one to the call from the secret channel ann cannot read, one
+-- to nothing in j-text, one that is over, and a poll that is not a player.
+SELECT pg_temp.as_member('65656565-0000-4000-8000-000000000003');
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('65650000-0000-4000-8000-0000000000c4', '65656565-0000-4000-8000-000000000003');
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks) VALUES
+  (96501, '65650000-0000-4000-8000-0000000000c4', '', 0,
+   '{"v":1,"live":true,"call":"65650000-0000-4000-8000-0000000000c1","blocks":[]}'),
+  (96502, '65650000-0000-4000-8000-0000000000c2', '', 0,
+   '{"v":1,"live":true,"blocks":[]}'),
+  (96503, '65650000-0000-4000-8000-0000000000c2', '', 0,
+   '{"v":1,"blocks":[]}'),
+  (96504, '65650000-0000-4000-8000-0000000000c4', '', 0,
+   '{"v":1,"live":true,"blocks":[]}');
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = '65650000-0000-4000-8000-000000000001';
+
+DO $$
+BEGIN
+  IF has_function_privilege('authenticated', 'public.voice_join_facts(uuid,uuid,text,uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.call_rights_for(uuid,uuid[])', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.voice_roster_facts(uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.call_panels(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: a member may read LiveKit''s keys, or anon a call''s bar';
+  END IF;
+  RAISE NOTICE 'ok  the keys stay with the service role (065)';
+END $$;
+
+DO $$
+DECLARE
+  v_ann  UUID := '65656565-0000-4000-8000-000000000001';
+  v_tik  UUID := '65656565-0000-4000-8000-000000000002';
+  v_tok  UUID := '65656565-0000-4000-8000-000000000003';
+  v_kim  UUID := '65656565-0000-4000-8000-000000000004';
+  v_bea  UUID := '65656565-0000-4000-8000-000000000005';
+  v_v    UUID := '65650000-0000-4000-8000-0000000000c1';
+  v_far  UUID := '65650000-0000-4000-8000-0000000000c5';
+  v_got  JSONB;
+  v_row  RECORD;
+  v_n    INTEGER := 0;
+BEGIN
+  -- The refusals, in order.
+  IF voice_join_facts('65656565-0000-4000-8000-0000000000ff', v_v, 'voice')->>'reason' <> 'user_not_found'
+     OR voice_join_facts(v_bea, v_v, 'voice')->>'reason' <> 'user_banned'
+     OR voice_join_facts(v_kim, v_v, 'voice')->>'reason' <> 'channel_not_found'
+     OR voice_join_facts(v_ann, '65650000-0000-4000-8000-0000000000c3', 'voice')->>'reason' <> 'channel_not_found'
+     OR voice_join_facts(v_ann, v_v, 'share')->>'reason' <> 'no_share'
+     OR voice_join_facts(v_tok, v_v, 'watch')->>'reason' <> 'bot_cannot_watch'
+     OR voice_join_facts(v_tik, v_v, 'voice')->>'reason' <> 'key_not_ready'
+     OR voice_join_facts(v_ann, '65650000-0000-4000-8000-0000000000c2', 'voice')->>'reason' <> 'not_voice'
+     OR voice_join_facts(v_kim, '65650000-0000-4000-8000-0000000000c9', 'voice')->>'reason' <> 'credentials_missing' THEN
+    RAISE EXCEPTION 'FAIL: voice_join_facts refused out of order';
+  END IF;
+
+  -- A watch with no call goes to the server's own LiveKit, and claims nothing.
+  v_got := voice_join_facts(v_ann, v_v, 'watch');
+  IF v_got->>'reason' <> 'ok'
+     OR v_got->'watch' <> '{"url":"ws://join:7880","api_key":"key-join","api_secret":"secret-join"}'::jsonb
+     OR EXISTS (SELECT 1 FROM voice_rooms WHERE channel_id = v_v) THEN
+    RAISE EXCEPTION 'FAIL: a watch with no call answered %', v_got;
+  END IF;
+
+  -- A join: the caller's flags and bits as the old questions answer them, and
+  -- the call claimed on the server's node with the server's pair.
+  v_got := voice_join_facts(v_ann, v_v, 'voice');
+  IF v_got->>'reason' <> 'ok'
+     OR (v_got->>'is_muted')::boolean IS NOT TRUE
+     OR (v_got->>'speak')::boolean <> user_has_channel_permission(v_ann, v_v, 'SPEAK')
+     OR (v_got->>'speak')::boolean
+     OR (v_got->>'soundboard')::boolean
+     OR v_got->>'display_name' <> 'Ann'
+     OR v_got->'node'->>'api_key' <> 'key-join'
+     OR (v_got->'node'->>'is_default')::boolean IS NOT TRUE
+     OR NOT EXISTS (SELECT 1 FROM voice_rooms WHERE channel_id = v_v) THEN
+    RAISE EXCEPTION 'FAIL: a join answered %', v_got - 'credentials';
+  END IF;
+  -- Now there is a call, a watch goes where it is.
+  IF voice_join_facts(v_ann, v_v, 'watch')->'watch'->>'url' <> 'ws://join:7880' THEN
+    RAISE EXCEPTION 'FAIL: a watch did not follow the call';
+  END IF;
+  -- A bot with a key and ears.
+  v_got := voice_join_facts(v_tok, v_v, 'voice');
+  IF v_got->>'reason' <> 'ok' OR (v_got->>'may_listen')::boolean IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: a bot with a key and a grant answered %', v_got - 'credentials';
+  END IF;
+  -- The pinned region signs with its own pair, and says it was the pin.
+  v_got := voice_join_facts(v_ann, v_far, 'voice');
+  IF v_got->'node'->>'api_key' <> 'key-far'
+     OR v_got->'node'->>'url' <> 'ws://far065:7880'
+     OR v_got->>'pinned_node_id' <> v_got->'node'->>'id'
+     OR (v_got->>'speak')::boolean IS NOT TRUE THEN
+    RAISE EXCEPTION 'FAIL: a pinned join answered %', v_got - 'credentials';
+  END IF;
+  RAISE NOTICE 'ok  voice_join_facts answers a join as get_channel_token decided it (065)';
+
+  -- call_rights_for: as the old questions, one row per member found.
+  FOR v_row IN SELECT * FROM call_rights_for(v_v, ARRAY[v_ann, v_tok, v_kim, v_bea,
+                         '65656565-0000-4000-8000-0000000000ff'::uuid]) LOOP
+    v_n := v_n + 1;
+    IF v_row.joinable <> channel_joinable_by(v_v, v_row.user_id)
+       OR v_row.connect <> user_has_channel_permission(v_row.user_id, v_v, 'CONNECT')
+       OR v_row.screen_share <> user_has_channel_permission(v_row.user_id, v_v, 'SCREEN_SHARE')
+       OR v_row.speak <> user_has_channel_permission(v_row.user_id, v_v, 'SPEAK')
+       OR v_row.soundboard <> (user_has_channel_permission(v_row.user_id, v_v, 'SPEAK')
+                               AND user_has_channel_permission(v_row.user_id, v_v, 'USE_SOUNDBOARD'))
+       OR v_row.bot_listens <> (v_row.user_id = v_tok)
+       OR v_row.is_muted <> (v_row.user_id = v_ann) THEN
+      RAISE EXCEPTION 'FAIL: call_rights_for answered % unlike its questions', v_row;
+    END IF;
+  END LOOP;
+  IF v_n <> 4 THEN
+    RAISE EXCEPTION 'FAIL: call_rights_for answered % rows, not one per member found', v_n;
+  END IF;
+  IF (SELECT joinable OR connect FROM call_rights_for(v_v, ARRAY[v_kim])) THEN
+    RAISE EXCEPTION 'FAIL: another server''s member may be in the call';
+  END IF;
+  RAISE NOTICE 'ok  call_rights_for answers as the questions it stands for (065)';
+
+  -- voice_roster_facts: the caller's server only, and the private call out of sight.
+  v_got := voice_roster_facts(v_ann);
+  IF v_got->>'reason' <> 'ok'
+     OR v_got->'voice_channels' <> to_jsonb(ARRAY(SELECT id FROM channels
+          WHERE server_id = '65650000-0000-4000-8000-000000000001' AND channel_type = 'voice' ORDER BY id))
+     OR v_got->'visible' @> '["65650000-0000-4000-8000-0000000000c3"]'::jsonb
+     OR NOT v_got->'visible' @> '["65650000-0000-4000-8000-0000000000c1"]'::jsonb
+     OR jsonb_array_length(v_got->'nodes') <> 2
+     OR (v_got->'nodes'->0->>'is_default')::boolean IS NOT TRUE
+     OR v_got->'nodes'->0->>'api_key' <> 'key-join'
+     OR v_got->'nodes'->1->>'api_key' <> 'key-far'
+     OR jsonb_array_length(v_got->'claims') <> 2 THEN
+    RAISE EXCEPTION 'FAIL: voice_roster_facts answered %', v_got - 'credentials' - 'nodes';
+  END IF;
+  IF voice_roster_facts(v_bea)->>'reason' <> 'user_banned'
+     OR voice_roster_facts(v_kim)->>'reason' <> 'credentials_missing' THEN
+    RAISE EXCEPTION 'FAIL: voice_roster_facts let in who voice_roster refused';
+  END IF;
+  RAISE NOTICE 'ok  voice_roster_facts names the caller''s server and what they see (065)';
+END $$;
+
+-- call_panels, as ann: the call's player from the channel she cannot read,
+-- and j-text's live panel; not the one that is over, nor the secret
+-- channel's own.
+SELECT pg_temp.as_member('65656565-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE v_ids BIGINT[];
+BEGIN
+  SELECT array_agg(id ORDER BY id DESC) INTO v_ids
+    FROM call_panels('65650000-0000-4000-8000-0000000000c1');
+  IF v_ids IS DISTINCT FROM ARRAY[96502, 96501]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: the call''s bar read %', v_ids;
+  END IF;
+  IF EXISTS (SELECT 1 FROM call_panels('65650000-0000-4000-8000-0000000000c3')) THEN
+    RAISE EXCEPTION 'FAIL: a call ann cannot see answered its bar';
+  END IF;
+  RAISE NOTICE 'ok  call_panels is the call''s players and the panels ann reads (065)';
+END $$;
+SELECT pg_temp.as_member('65656565-0000-4000-8000-000000000004');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM call_panels('65650000-0000-4000-8000-0000000000c1')) THEN
+    RAISE EXCEPTION 'FAIL: another server''s member read the call''s bar';
+  END IF;
+  RAISE NOTICE 'ok  call_panels answers nobody outside the server (065)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;

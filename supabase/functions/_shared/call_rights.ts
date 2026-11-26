@@ -1,6 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { ParticipantInfo, RoomServiceClient, TrackSource } from "livekit-server-sdk";
-import DBSchema from "./schema.ts";
 import { connectionKind } from "./livekit.ts";
 import {
   holdsAlready,
@@ -37,22 +36,68 @@ export interface CallRights {
 /** Neither: what an unreadable answer comes to where failing closed is right. */
 export const NO_CALL_RIGHTS: CallRights = { speak: false, soundboard: false };
 
-/** [userId]'s [CallRights] in [channelId]'s call; null if either was unreadable. */
+/**
+ * What a call holds one person to, as `call_rights_for` (065) answers it: the
+ * door (`channel_joinable_by`), the channel's call bits, the moderation flags
+ * and a bot's ears. `soundboard` already needs `speak`.
+ */
+export interface CallRightsRow extends CallRights {
+  joinable: boolean;
+  connect: boolean;
+  screenShare: boolean;
+  isMuted: boolean;
+  isDeafened: boolean;
+  isBot: boolean;
+  botListens: boolean;
+}
+
+/**
+ * [userIds]' [CallRightsRow]s in [channelId]'s call, in one database call,
+ * by id; a member with no row is missing. Null when it was unreadable.
+ *
+ * Each of these was its own questions: the door, then `SPEAK` and
+ * `USE_SOUNDBOARD` per person, each working that person's bits out again, then
+ * the flags and the grants. A call of forty was over a hundred round trips.
+ */
+export async function readCallRights(
+  supabase: SupabaseClient,
+  channelId: string,
+  userIds: string[],
+): Promise<Map<string, CallRightsRow> | null> {
+  const ids = [...new Set(userIds)].filter((id) => id.length > 0);
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase.rpc("call_rights_for", {
+    p_channel: channelId,
+    p_users: ids,
+  });
+  if (error) return null;
+  const rights = new Map<string, CallRightsRow>();
+  for (const row of (data ?? []) as Record<string, any>[]) {
+    rights.set(row.user_id as string, {
+      joinable: row.joinable === true,
+      connect: row.connect === true,
+      screenShare: row.screen_share === true,
+      speak: row.speak === true,
+      soundboard: row.soundboard === true,
+      isMuted: row.is_muted === true,
+      isDeafened: row.is_deafened === true,
+      isBot: row.is_bot === true,
+      botListens: row.bot_listens === true,
+    });
+  }
+  return rights;
+}
+
+/** [userId]'s [CallRights] in [channelId]'s call; null if unreadable. */
 export async function channelRights(
   supabase: SupabaseClient,
   userId: string,
   channelId: string,
 ): Promise<CallRights | null> {
-  const [speak, soundboard] = await Promise.all(
-    ["SPEAK", "USE_SOUNDBOARD"].map((name) =>
-      supabase.rpc("user_has_channel_permission", {
-        p_user: userId, p_channel: channelId, p_name: name,
-      })
-    ),
-  );
-  if (speak.error || soundboard.error) return null;
-  const maySpeak = speak.data === true;
-  return { speak: maySpeak, soundboard: maySpeak && soundboard.data === true };
+  const rights = await readCallRights(supabase, channelId, [userId]);
+  if (rights === null) return null;
+  const row = rights.get(userId);
+  return row ? { speak: row.speak, soundboard: row.soundboard } : NO_CALL_RIGHTS;
 }
 
 /**
@@ -65,75 +110,42 @@ export async function channelRights(
  * replaces the whole permission set and there is no reason to touch one that
  * did not move.
  *
- * With [leaveUnreadable], a connection whose rights could not be read is
- * left as it is rather than held back: the join check (`livekit_webhook`)
- * comes moments after a token was minted from the same rules, and a database
- * hiccup must not take the microphone from everybody joining during it.
- * Without it, unreadable is no `SPEAK`, failing closed as `get_channel_token`
- * does.
+ * [rights] is what a caller already read for these people
+ * ([readCallRights]); without it they are read here. Unreadable changes
+ * nothing: neither anybody's flags nor their bits are known, and a database
+ * hiccup must not take the microphone from a whole call.
  */
 export async function reconcileConnections(
   supabase: SupabaseClient,
   service: RoomServiceClient,
   channelId: string,
   connections: ParticipantInfo[],
-  { leaveUnreadable = false } = {},
+  rights?: Map<string, CallRightsRow> | null,
 ): Promise<number> {
   const userIds = [...new Set(connections.map((p) => p.identity.split("~")[0]))];
   if (userIds.length === 0) return 0;
 
-  const [{ data: users, error: usersError }, { data: grants, error: grantsError }, rights] =
-    await Promise.all([
-      supabase
-        .from(DBSchema.users.tableName)
-        .select(
-          `${DBSchema.users.id}, ${DBSchema.users.isMuted}, ${DBSchema.users.isDeafened}, ` +
-            `${DBSchema.users.isBot}`,
-        )
-        .in(DBSchema.users.id, userIds),
-      supabase
-        .from("bot_voice_grants")
-        .select("bot_id")
-        .eq("channel_id", channelId)
-        .in("bot_id", userIds),
-      Promise.all(userIds.map(async (id) =>
-        [id, await channelRights(supabase, id, channelId)] as const
-      )),
-    ]);
-  // Nobody's flags known, nothing to decide. Without the grants every bot
-  // would read as deaf, which is closed, so only the join check stops there.
-  if (usersError || (grantsError && leaveUnreadable)) return 0;
-
-  const byId = new Map(
-    (users ?? []).map((u) => [(u as Record<string, any>)[DBSchema.users.id] as string, u as Record<string, any>]),
-  );
-  const botListens = new Set((grants ?? []).map((g) => (g as Record<string, any>).bot_id as string));
-  const rightsOf = new Map(rights);
+  const known = rights ?? await readCallRights(supabase, channelId, userIds);
+  if (known === null) return 0;
 
   let updated = 0;
   await Promise.all(connections.map(async (participant) => {
     const userId = participant.identity.split("~")[0];
-    const user = byId.get(userId);
+    const user = known.get(userId);
     if (!user) return;
-    const read = rightsOf.get(userId) ?? null;
-    if (read === null && leaveUnreadable) return;
-    const { speak, soundboard } = read ?? NO_CALL_RIGHTS;
 
     const kind = connectionKind(participant.identity);
-    const isMuted = user[DBSchema.users.isMuted] === true;
-    const isDeafened = user[DBSchema.users.isDeafened] === true;
-    const isBot = user[DBSchema.users.isBot] === true;
-    const quiet = isMuted || !speak;
+    const quiet = user.isMuted || !user.speak;
     const permission = livePermissionsFor(
       kind,
       quiet,
-      isDeafened,
-      !isBot || botListens.has(userId),
-      soundboard,
+      user.isDeafened,
+      !user.isBot || user.botListens,
+      user.soundboard,
     );
     // A watch connection is minted without the flags; the other two carry
     // them, and a token kept from before a mute would still say unmuted.
-    const metadata = kind === "watch" ? undefined : moderationMetadata(isMuted, isDeafened);
+    const metadata = kind === "watch" ? undefined : moderationMetadata(user.isMuted, user.isDeafened);
     if (
       holdsAlready(kind, participant.permission, permission) &&
       (metadata === undefined || participant.metadata === metadata)
@@ -150,7 +162,7 @@ export async function reconcileConnections(
     );
     updated++;
 
-    if (kind !== "watch" && micDenied(quiet, isDeafened)) {
+    if (kind !== "watch" && micDenied(quiet, user.isDeafened)) {
       await Promise.all(
         (participant.tracks ?? [])
           .filter((track) => track.source === TrackSource.MICROPHONE && !track.muted)
@@ -168,21 +180,18 @@ export async function reconcileConnections(
  * there, by the question `get_channel_token` asks at the door
  * (`channel_joinable_by`). A summoned bot is in the call without a seat, and
  * stays. Unreadable is left alone: a database hiccup must not throw a whole
- * call out.
+ * call out. [rights] as for [reconcileConnections]; a connection whose
+ * member row has gone is outside.
  */
 export async function connectionsOutside(
   supabase: SupabaseClient,
   channelId: string,
   connections: ParticipantInfo[],
+  rights?: Map<string, CallRightsRow> | null,
 ): Promise<ParticipantInfo[]> {
   const userIds = [...new Set(connections.map((p) => p.identity.split("~")[0]))];
-  const answers = await Promise.all(userIds.map(async (userId) => {
-    const { data: joinable, error } = await supabase.rpc("channel_joinable_by", {
-      p_channel: channelId,
-      p_user: userId,
-    });
-    return [userId, error ? true : joinable === true] as const;
-  }));
-  const outside = new Set(answers.filter(([, may]) => !may).map(([id]) => id));
-  return connections.filter((p) => outside.has(p.identity.split("~")[0]));
+  if (userIds.length === 0) return [];
+  const known = rights ?? await readCallRights(supabase, channelId, userIds);
+  if (known === null) return [];
+  return connections.filter((p) => known.get(p.identity.split("~")[0])?.joinable !== true);
 }

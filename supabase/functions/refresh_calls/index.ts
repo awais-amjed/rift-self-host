@@ -6,7 +6,7 @@ import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
 import { livekitRoomServices } from "../_shared/livekit.ts";
-import { connectionsOutside, reconcileConnections } from "../_shared/call_rights.ts";
+import { connectionsOutside, readCallRights, reconcileConnections } from "../_shared/call_rights.ts";
 
 /**
  * Bring this server's running calls up to date with its roles.
@@ -110,7 +110,13 @@ Deno.serve(async (req) => {
       await Promise.all(rooms.map(async (room) => {
         try {
           const connections = await service.listParticipants(room.name);
-          const outside = await connectionsOutside(supabase, room.name, connections);
+          // Read once for the room, and both questions answered from it.
+          const rights = await readCallRights(
+            supabase,
+            room.name,
+            connections.map((p) => p.identity.split("~")[0]),
+          );
+          const outside = await connectionsOutside(supabase, room.name, connections, rights);
           const results = await Promise.allSettled(
             outside.map((p) => service.removeParticipant(room.name, p.identity)),
           );
@@ -121,6 +127,7 @@ Deno.serve(async (req) => {
             service,
             room.name,
             connections.filter((p) => !gone.has(p.identity)),
+            rights,
           );
         } catch (err) {
           console.error("[refresh_calls] room", room.name, err);
