@@ -100,6 +100,10 @@ Deno.serve(async (req) => {
       // The address a pass for this server must name: central makes the tag
       // from it, and `register` accepts no other (`_shared/server_pass.ts`).
       public_url: Deno.env.get("SUPABASE_PUBLIC_URL") || null,
+      // The anon key `register` hands every newcomer. It is public (the web
+      // app carries it), and with it the app signs in to GoTrue directly
+      // rather than through the `login` function.
+      supabase_key: Deno.env.get("SUPABASE_ANON_KEY") || null,
     });
   } catch (err) {
     return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);

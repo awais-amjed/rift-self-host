@@ -42,8 +42,13 @@ Deno.serve(async (req) => {
       return CustomResponse.error("Invalid or expired token", EC.TOKEN_INVALID);
     }
 
-    const { invite_code, public_key, stable_id, username, display_name, pass } =
+    const { invite_code, public_key, stable_id, username, display_name, pass, context } =
       await req.json();
+    // An app that reads `get_server_details` itself after joining says
+    // `"context": false`, and is answered the server id and anon key alone:
+    // the context below is four reads it would only throw away. An older
+    // app sends nothing and gets the context as before.
+    const wantsContext = context !== false;
 
     if (!invite_code || !public_key || !stable_id || !username || !display_name) {
       return CustomResponse.error(
@@ -169,11 +174,16 @@ Deno.serve(async (req) => {
       case "exhausted":
         return CustomResponse.error("Invite code has reached its maximum uses", EC.INVITE_EXHAUSTED);
       case "already_registered":
-        return await rejoin(invite_code, authUid);
+        return await rejoin(invite_code, authUid, undefined, wantsContext);
       // A kicked member, let back in by this invite (register_user lifted
       // the kick and spent a use). From here it is a rejoin like any other.
       case "readmitted":
-        return await rejoin(invite_code, authUid, reg[DBSchema.invites.serverId] as string);
+        return await rejoin(
+          invite_code,
+          authUid,
+          reg[DBSchema.invites.serverId] as string,
+          wantsContext,
+        );
       case "account_required":
         return CustomResponse.error(
           "This link needs a Rift account. Sign in to Rift, or ask a member for another link.",
@@ -217,15 +227,16 @@ Deno.serve(async (req) => {
     }
 
     const server_id = reg[DBSchema.invites.serverId] as string;
+    if (!wantsContext) return CustomResponse.success(joined(server_id));
 
     // Return full server context (no token — the client holds the JWT).
-    const context = await fetchServerContext(supabase, {
+    const serverContext = await fetchServerContext(supabase, {
       serverId: server_id,
       userId: authUid,
     });
-    if (context instanceof Response) return context;
+    if (serverContext instanceof Response) return serverContext;
 
-    return CustomResponse.success(context);
+    return CustomResponse.success(serverContext);
   } catch (err) {
     return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, err);
   }
@@ -262,7 +273,8 @@ async function web3Subject(authUid: string): Promise<string | null> {
 async function rejoin(
   inviteCode: string,
   authUid: string,
-  readmittedTo?: string,
+  readmittedTo: string | undefined,
+  wantsContext: boolean,
 ): Promise<Response> {
   const { data: member } = await supabase
     .from(DBSchema.users.tableName)
@@ -287,7 +299,13 @@ async function rejoin(
     return CustomResponse.error("You are banned from this server", EC.USER_BANNED);
   }
 
+  if (!wantsContext) return CustomResponse.success({ ...joined(serverId), rejoined: true });
   const context = await fetchServerContext(supabase, { serverId, userId: authUid });
   if (context instanceof Response) return context;
   return CustomResponse.success({ ...context, rejoined: true });
+}
+
+/** The answer to an app that reads the server's details itself. */
+function joined(serverId: string) {
+  return { server_id: serverId, supabase_key: Deno.env.get("SUPABASE_ANON_KEY") };
 }
