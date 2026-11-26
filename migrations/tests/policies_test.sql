@@ -13437,4 +13437,119 @@ BEGIN
   RAISE NOTICE 'ok  a ring reads only the cursors that are caught up (054)';
 END $$;
 
+-- ============================================================
+-- A `members` ring says who, and one call answers it (062)
+-- ============================================================
+-- Every app with the server on its list answers a `members` ring, so it now
+-- names the members it is about, says nothing for a write no roster shows,
+-- and `members_refresh` re-reads what it names in one request.
+RESET ROLE;
+-- Its own servers: Alpha is purged by the time the suite gets here (057).
+INSERT INTO auth.users (id) VALUES
+  ('62626262-0000-4000-8000-000000000001'),
+  ('62626262-0000-4000-8000-000000000002'),
+  ('62626262-0000-4000-8000-000000000003');
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('62620000-0000-4000-8000-000000000001', 'Rings', 'ws://lan:7880'),
+  ('62620000-0000-4000-8000-000000000002', 'Elsewhere', 'ws://lan:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES
+  ('62626262-0000-4000-8000-000000000001', '62620000-0000-4000-8000-000000000001',
+   'rina', 'Rina', 'pk-rina', 'sid-rina', 'chat-rina'),
+  ('62626262-0000-4000-8000-000000000002', '62620000-0000-4000-8000-000000000001',
+   'rob', 'Rob', 'pk-rob', 'sid-rob', 'chat-rob'),
+  ('62626262-0000-4000-8000-000000000003', '62620000-0000-4000-8000-000000000002',
+   'otto', 'Otto', 'pk-otto', 'sid-otto', 'chat-otto');
+DO $$
+DECLARE
+  v_rob  UUID := '62626262-0000-4000-8000-000000000002';
+  v_role UUID;
+  v_ring JSONB;
+  v_told INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+
+  -- A rename names the member.
+  UPDATE users SET display_name = 'Bob Rings' WHERE id = v_rob;
+  SELECT payload INTO v_ring FROM pg_temp.said WHERE event = 'members';
+  IF v_ring IS DISTINCT FROM jsonb_build_object('ids', jsonb_build_array(v_rob)) THEN
+    RAISE EXCEPTION 'FAIL: a rename rang members with %, not rob''s id', v_ring;
+  END IF;
+
+  -- A write that moves nothing the roster shows rings nobody but the member.
+  DELETE FROM pg_temp.said;
+  UPDATE users SET display_name = 'Bob Rings' WHERE id = v_rob;
+  UPDATE users SET public_key = public_key WHERE id = v_rob;
+  IF EXISTS (SELECT 1 FROM pg_temp.said WHERE event = 'members') THEN
+    RAISE EXCEPTION 'FAIL: a write the roster does not show rang the whole server';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_temp.said
+                  WHERE event = 'me' AND topic = 'user:' || v_rob) THEN
+    RAISE EXCEPTION 'FAIL: the member no longer hears about their own row';
+  END IF;
+
+  -- A role handed out names who got it.
+  DELETE FROM pg_temp.said;
+  INSERT INTO roles (server_id, name, position, permissions)
+  VALUES ('62620000-0000-4000-8000-000000000001', 'ring-test', 90, 0)
+  RETURNING id INTO v_role;
+  DELETE FROM pg_temp.said;
+  INSERT INTO member_roles (user_id, role_id) VALUES (v_rob, v_role);
+  SELECT count(*) INTO v_told FROM pg_temp.said
+   WHERE event = 'members' AND payload = jsonb_build_object('ids', jsonb_build_array(v_rob));
+  IF v_told <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a role given rang members % times naming rob, not once', v_told;
+  END IF;
+
+  -- More than one call resolves goes without names: "anything may have moved".
+  IF app.members_ring(array_fill(v_rob, ARRAY[app.member_page_max() + 1])) <> '{}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a ring named more members than one refresh resolves';
+  END IF;
+
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  RAISE NOTICE 'ok  a members ring names who moved, and only for what a roster shows (062)';
+END $$;
+
+-- The re-read is the caller's own: their server's members, and nobody else's.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"62626262-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_read JSONB := members_refresh(ARRAY['62626262-0000-4000-8000-000000000002'::UUID]);
+BEGIN
+  IF jsonb_array_length(v_read->'members') <> 1
+     OR v_read->'members'->0->>'display_name' <> 'Bob Rings' THEN
+    RAISE EXCEPTION 'FAIL: members_refresh did not answer with rob as he is now: %', v_read->'members';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v_read->'assignments') a
+                  WHERE a->>'user_id' = '62626262-0000-4000-8000-000000000002'
+                    AND a->>'name' = 'ring-test') THEN
+    RAISE EXCEPTION 'FAIL: members_refresh left out rob''s new role';
+  END IF;
+  IF v_read->'counts'->>'people' IS NULL OR jsonb_array_length(v_read->'roles') = 0 THEN
+    RAISE EXCEPTION 'FAIL: members_refresh left out the counts or the roles';
+  END IF;
+  RAISE NOTICE 'ok  members_refresh answers a ring in one call (062)';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"62626262-0000-4000-8000-000000000003","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  IF jsonb_array_length(members_refresh(ARRAY['62626262-0000-4000-8000-000000000002'::UUID])->'members') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: members_refresh named a member of another server';
+  END IF;
+  RAISE NOTICE 'ok  and names nobody from another server (062)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
