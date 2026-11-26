@@ -120,14 +120,23 @@ SQL
 # callback invoked with each filename as it succeeds.
 rift_scratch_migrate() {
   local report="${1:-}"
-  local f
+  local f rc
+  local -            # pipefail for this function only
+  set -o pipefail
   for f in "$MIGRATIONS"/[0-9][0-9][0-9]_*.sql; do
     # `REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public` also names pgcrypto's and
     # pg_trgm's own functions, which live in `extensions` on a real Supabase
     # and in `public` here. Their warnings are the harness, not the schema.
+    # The filter finding nothing is the usual case, so psql's own status is
+    # the one asked: a file that fails stops here rather than reading as ok.
     sed 's/^CREATE EXTENSION IF NOT EXISTS pg_cron;/-- pg_cron: shimmed above/' "$f" \
       | psql_scratch -v ON_ERROR_STOP=1 -f - 2>&1 >/dev/null \
-      | grep -v 'no privileges could be revoked' >&2 || true
+      | { grep -v 'no privileges could be revoked' >&2 || true; } \
+      && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "   FAILED $(basename "$f")" >&2
+      return 1
+    fi
     [ -n "$report" ] && "$report" "$(basename "$f")"
   done
   return 0
