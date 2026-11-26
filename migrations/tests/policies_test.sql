@@ -7124,6 +7124,30 @@ BEGIN
   RAISE NOTICE 'ok  counts, never ballots; one pick, a real one, and changeable';
 END $$;
 
+-- A poll nobody has voted in, and one voter with two picks: voters are
+-- people, not picks (060 counts both in one walk of the votes).
+DO $$
+DECLARE
+  v_id BIGINT;
+  v    JSONB;
+BEGIN
+  INSERT INTO messages (channel_id, sender_id, ciphertext, nonce, signature,
+                        key_version, poll)
+  VALUES ('aaaa1111-0000-4000-8000-0000000000f9', auth.uid(), 'c', 'n', 's', 1,
+          jsonb_build_object('options', 4, 'multiple', true,
+                             'closes_at', (now() + interval '1 day')::TEXT))
+  RETURNING id INTO v_id;
+  v := poll_tallies(ARRAY[v_id]) -> v_id::TEXT;
+  IF v IS DISTINCT FROM '{"counts": [0, 0, 0, 0], "voters": 0, "mine": []}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: a poll nobody voted in reads back as %', v;
+  END IF;
+  v := vote_poll(v_id, ARRAY[0, 2]::SMALLINT[]);
+  IF v IS DISTINCT FROM '{"counts": [1, 0, 1, 0], "voters": 1, "mine": [0, 2]}'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: two picks by one voter read back as %', v;
+  END IF;
+  RAISE NOTICE 'ok  an empty poll counts zeros, and a voter with two picks is one voter';
+END $$;
+
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"22222222-bbbb-4bbb-8bbb-000000000001","role":"authenticated"}', true); END $$;
 

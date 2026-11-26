@@ -585,6 +585,9 @@ files, each run once after it, and the list below grows with them.
    roles in one call, in place of reading `member_role_list` whole a thousand rows at a time.
    Measured Nov 26 2026 on 50,000 members holding 49,000 roles: 49 requests and 657 ms → one
    request and 7 ms through PostgREST.
+40. **060_poll_tallies.sql** — `poll_tallies` counts each option and the voters in one walk
+   of a poll's votes along the primary key, rather than reading them twice. Same answers.
+   Measured Nov 26 2026 on 20 polls of 5,000 voters each: 1.5 → 1.2 ms a poll.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
