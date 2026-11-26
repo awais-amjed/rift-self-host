@@ -14317,24 +14317,173 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- The rings, read off a stand-in for `realtime.send`.
 DO $$
 BEGIN
-  IF NOT app.realtime_ready() THEN
-    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
     RETURN;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM realtime.messages
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+  PERFORM pg_temp.as_member('67676767-0000-4000-8000-000000000001');
+  SET LOCAL ROLE authenticated;
+  PERFORM toggle_reaction('channel', 96701, '🎯');
+  PERFORM toggle_reaction('dm', 96703, '🎯');
+  RESET ROLE;
+  IF NOT EXISTS (SELECT 1 FROM pg_temp.said
                   WHERE topic = 'server:67670000-0000-4000-8000-000000000001'
-                    AND event = 'reaction' AND payload->>'message_id' = '96701'
-                    AND payload->>'user_id' = '67676767-0000-4000-8000-000000000001') THEN
+                    AND event = 'reaction'
+                    AND payload = jsonb_build_object('message_id', 96701,
+                          'channel_id', '67670000-0000-4000-8000-0000000000c1',
+                          'user_id', '67676767-0000-4000-8000-000000000001')) THEN
     RAISE EXCEPTION 'FAIL: a reaction''s ring did not say who reacted';
   END IF;
-  IF (SELECT count(*) FROM realtime.messages
-       WHERE event = 'dm_reaction' AND payload->>'message_id' = '96703'
-         AND payload->>'user_id' = '67676767-0000-4000-8000-000000000001') <> 4 THEN
-    RAISE EXCEPTION 'FAIL: a DM reaction''s rings did not reach both, naming who';
+  IF (SELECT count(*) FROM pg_temp.said
+       WHERE event = 'dm_reaction'
+         AND topic IN ('user:67676767-0000-4000-8000-000000000001',
+                       'user:67676767-0000-4000-8000-000000000002')
+         AND payload = jsonb_build_object('message_id', 96703,
+               'user_id', '67676767-0000-4000-8000-000000000001')) <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a DM reaction''s ring did not reach both, naming who';
   END IF;
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
   RAISE NOTICE 'ok  a reaction''s ring names who reacted (067)';
+END $$;
+
+-- ── 068: moving a role is one statement ─────────────────────
+-- `swap_role_positions` swaps two roles or neither, under `roles_update`,
+-- and the member list hears it once.
+INSERT INTO auth.users (id) VALUES
+  ('68686868-0000-4000-8000-000000000001'),  -- ada, an admin
+  ('68686868-0000-4000-8000-000000000002');  -- bob, nobody
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('68680000-0000-4000-8000-000000000001', 'Ladder 068', 'ws://ladder068:7880'),
+  ('68680000-0000-4000-8000-000000000002', 'Other 068', 'ws://other068:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
+VALUES
+  ('68686868-0000-4000-8000-000000000001', '68680000-0000-4000-8000-000000000001',
+   'ada', 'Ada', 'pk-ada', 'sid-ada-068', 'chat-ada'),
+  ('68686868-0000-4000-8000-000000000002', '68680000-0000-4000-8000-000000000001',
+   'bob', 'Bob', 'pk-bob', 'sid-bob-068', 'chat-bob');
+INSERT INTO member_roles (user_id, role_id)
+SELECT '68686868-0000-4000-8000-000000000001', r.id FROM roles r
+ WHERE r.server_id = '68680000-0000-4000-8000-000000000001' AND r.name = 'Admin';
+INSERT INTO roles (id, server_id, name, position) VALUES
+  ('68680000-0000-4000-8000-0000000000a1', '68680000-0000-4000-8000-000000000001', 'Low', 100),
+  ('68680000-0000-4000-8000-0000000000a2', '68680000-0000-4000-8000-000000000001', 'High', 150),
+  ('68680000-0000-4000-8000-0000000000b1', '68680000-0000-4000-8000-000000000002', 'Away', 120);
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = '68680000-0000-4000-8000-000000000001';
+
+DO $$
+BEGIN
+  IF NOT has_function_privilege('authenticated', 'public.swap_role_positions(uuid,uuid)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.swap_role_positions(uuid,uuid)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'app.ring_role_drawing()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: swap_role_positions is not a member''s alone';
+  END IF;
+  RAISE NOTICE 'ok  swap_role_positions is for members (068)';
+END $$;
+
+DO $$
+DECLARE
+  v_low  UUID := '68680000-0000-4000-8000-0000000000a1';
+  v_high UUID := '68680000-0000-4000-8000-0000000000a2';
+  v_srv  UUID := '68680000-0000-4000-8000-000000000001';
+  v_mod  UUID;
+  v_adm  UUID;
+  v_ev   UUID;
+  v_was  INTEGER[];
+  v_n    INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  SELECT id INTO v_mod FROM roles WHERE server_id = v_srv AND name = 'Moderator';
+  SELECT id INTO v_adm FROM roles WHERE server_id = v_srv AND name = 'Admin';
+  SELECT id INTO v_ev FROM roles WHERE server_id = v_srv AND is_everyone;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+
+  -- Ada swaps two roles below her own: both move, and the list hears once.
+  PERFORM pg_temp.as_member('68686868-0000-4000-8000-000000000001');
+  SET LOCAL ROLE authenticated;
+  PERFORM swap_role_positions(v_low, v_high);
+  RESET ROLE;
+  IF (SELECT "position" FROM roles WHERE id = v_low) <> 150
+     OR (SELECT "position" FROM roles WHERE id = v_high) <> 100 THEN
+    RAISE EXCEPTION 'FAIL: a swap left Low at % and High at %',
+      (SELECT "position" FROM roles WHERE id = v_low),
+      (SELECT "position" FROM roles WHERE id = v_high);
+  END IF;
+  SELECT count(*) INTO v_n FROM pg_temp.said
+   WHERE event = 'members' AND topic = 'server:' || v_srv;
+  IF v_n <> 1 OR EXISTS (SELECT 1 FROM pg_temp.said WHERE event <> 'members') THEN
+    RAISE EXCEPTION 'FAIL: a swap rang members % times', v_n;
+  END IF;
+
+  -- Neither moves when one may not: her own rank, @everyone, another
+  -- server's role, the same role twice, or somebody who manages none.
+  SELECT array_agg("position" ORDER BY id) INTO v_was FROM roles
+   WHERE server_id IN (v_srv, '68680000-0000-4000-8000-000000000002');
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    -- Moderator would land on her own rung, which `roles_update` refuses.
+    PERFORM swap_role_positions(v_mod, v_adm);
+    RAISE EXCEPTION 'FAIL: a role swapped with the admin''s own';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM swap_role_positions(v_low, v_ev);
+    RAISE EXCEPTION 'FAIL: a role swapped with @everyone';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_swapped' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM swap_role_positions(v_low, '68680000-0000-4000-8000-0000000000b1');
+    RAISE EXCEPTION 'FAIL: a role swapped with another server''s';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_swapped' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM swap_role_positions(v_low, v_low);
+    RAISE EXCEPTION 'FAIL: a role swapped with itself';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_swapped' THEN RAISE; END IF;
+  END;
+  RESET ROLE;
+  PERFORM pg_temp.as_member('68686868-0000-4000-8000-000000000002');
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    PERFORM swap_role_positions(v_low, v_high);
+    RAISE EXCEPTION 'FAIL: a member with no roles swapped two';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'not_swapped' THEN RAISE; END IF;
+  END;
+  RESET ROLE;
+  IF (SELECT array_agg("position" ORDER BY id) FROM roles
+       WHERE server_id IN (v_srv, '68680000-0000-4000-8000-000000000002'))
+     IS DISTINCT FROM v_was THEN
+    RAISE EXCEPTION 'FAIL: a refused swap moved a role';
+  END IF;
+
+  -- Two renamed in one statement: the list hears once, as for one.
+  DELETE FROM pg_temp.said;
+  UPDATE roles SET name = name || '!' WHERE id IN (v_low, v_high);
+  SELECT count(*) INTO v_n FROM pg_temp.said WHERE event = 'members';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: two roles renamed in one statement rang members % times', v_n;
+  END IF;
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  RAISE NOTICE 'ok  swap_role_positions swaps two roles or neither, and rings once (068)';
 END $$;
 
 ROLLBACK;
