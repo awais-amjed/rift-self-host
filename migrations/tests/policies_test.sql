@@ -4586,6 +4586,26 @@ BEGIN
   RAISE NOTICE 'ok  role chips are fetched for the rows on screen only';
 END $$;
 
+-- The Roles page's counts (059): every assignment on the server counted, and
+-- the viewer's own roles, in place of reading the assignments whole.
+DO $$
+DECLARE v JSONB := role_counts();
+BEGIN
+  IF v -> 'counts' IS DISTINCT FROM (
+       SELECT jsonb_object_agg(role_id, n)
+         FROM (SELECT role_id, count(*) AS n FROM member_role_list GROUP BY role_id) t) THEN
+    RAISE EXCEPTION 'FAIL: role_counts counted other than the assignments: %', v -> 'counts';
+  END IF;
+  IF jsonb_array_length(v -> 'mine') = 0
+     OR jsonb_array_length(v -> 'mine') <> (SELECT count(*) FROM member_role_list
+                                              WHERE user_id = auth.uid())
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(v -> 'mine') m
+                 WHERE (m ->> 'user_id')::UUID <> auth.uid()) THEN
+    RAISE EXCEPTION 'FAIL: role_counts gave other than the viewer''s own roles: %', v -> 'mine';
+  END IF;
+  RAISE NOTICE 'ok  role_counts counts every holder and names the viewer''s roles';
+END $$;
+
 -- ============================================================
 -- 24. Reactions counted where they are stored (040)
 -- ============================================================
@@ -5339,6 +5359,11 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM member_roles_for(v_alpha)) THEN
     RAISE EXCEPTION 'FAIL: member_roles_for returned another server''s roles';
+  END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_object_keys(role_counts() -> 'counts') k
+              JOIN roles r ON r.id = k::UUID
+             WHERE r.server_id <> 'bbbb0000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: role_counts counted another server''s roles';
   END IF;
   v_n := (member_counts() ->> 'people')::BIGINT;
   IF v_n <> (SELECT count(*) FROM users
@@ -9412,6 +9437,9 @@ BEGIN
   END IF;
   IF get_server_details() IS NOT NULL THEN
     RAISE EXCEPTION 'FAIL: a server being deleted still describes itself';
+  END IF;
+  IF role_counts() IS NOT NULL OR EXISTS (SELECT 1 FROM app.my_channel_overrides()) THEN
+    RAISE EXCEPTION 'FAIL: a server being deleted still counts its roles or overrides';
   END IF;
   SELECT (SELECT count(*) FROM servers) + (SELECT count(*) FROM channels)
        + (SELECT count(*) FROM messages) + (SELECT count(*) FROM roles)
