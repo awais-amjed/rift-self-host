@@ -13552,4 +13552,155 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 063: a member's key reads are database calls ───────────
+-- `my_channel_key` and `my_key_work` answer what `get_channel_key` and
+-- `sweep_channel_keys` answer, about the caller only, and refuse whom they
+-- refused.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('63636363-0000-4000-8000-000000000001'),
+  ('63636363-0000-4000-8000-000000000002'),
+  ('63636363-0000-4000-8000-000000000003'),
+  ('63636363-0000-4000-8000-000000000004');
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('63630000-0000-4000-8000-000000000001', 'Keys', 'ws://lan:7880'),
+  ('63630000-0000-4000-8000-000000000002', 'Away', 'ws://lan:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot, is_banned)
+VALUES
+  ('63636363-0000-4000-8000-000000000001', '63630000-0000-4000-8000-000000000001',
+   'kara', 'Kara', 'pk-kara', 'sid-kara', 'chat-kara', false, false),
+  ('63636363-0000-4000-8000-000000000002', '63630000-0000-4000-8000-000000000001',
+   'kim', 'Kim', 'pk-kim', 'sid-kim', 'chat-kim', false, true),
+  ('63636363-0000-4000-8000-000000000003', '63630000-0000-4000-8000-000000000001',
+   'bolt', 'Bolt', 'pk-bolt', 'sid-bolt', 'chat-bolt', true, false),
+  ('63636363-0000-4000-8000-000000000004', '63630000-0000-4000-8000-000000000002',
+   'oz', 'Oz', 'pk-oz', 'sid-oz', 'chat-oz', false, false);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('63630000-0000-4000-8000-0000000000c1', '63630000-0000-4000-8000-000000000001', 'k-text', 'text', false),
+  ('63630000-0000-4000-8000-0000000000c2', '63630000-0000-4000-8000-000000000001', 'k-voice', 'voice', false),
+  ('63630000-0000-4000-8000-0000000000c3', '63630000-0000-4000-8000-000000000001', 'k-hidden', 'voice', true),
+  ('63630000-0000-4000-8000-0000000000c4', '63630000-0000-4000-8000-000000000002', 'away', 'text', false);
+INSERT INTO channel_keyring (channel_id, key_version, user_id, wrapped_by,
+                             ephemeral_public_key, ciphertext, nonce)
+VALUES
+  ('63630000-0000-4000-8000-0000000000c1', 1, '63636363-0000-4000-8000-000000000001',
+   '63636363-0000-4000-8000-000000000001', 'epk', 'ct-text', 'n'),
+  ('63630000-0000-4000-8000-0000000000c2', 1, '63636363-0000-4000-8000-000000000001',
+   '63636363-0000-4000-8000-000000000001', 'epk', 'ct-voice', 'n');
+INSERT INTO bot_voice_summons (channel_id, bot_id) VALUES
+  ('63630000-0000-4000-8000-0000000000c2', '63636363-0000-4000-8000-000000000003'),
+  ('63630000-0000-4000-8000-0000000000c3', '63636363-0000-4000-8000-000000000003');
+INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, wrapped_by,
+                            ephemeral_public_key, ciphertext, nonce)
+VALUES ('63630000-0000-4000-8000-0000000000c3', '63636363-0000-4000-8000-000000000003',
+        3, '63636363-0000-4000-8000-000000000001', 'epk', 'ct-bolt', 'n');
+
+DO $$
+BEGIN
+  IF has_function_privilege('anon', 'public.my_key_work()', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.my_channel_key(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: anon may call a key read';
+  END IF;
+  RAISE NOTICE 'ok  the key reads are for members only (063)';
+END $$;
+
+-- Kara, a member.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"63636363-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_read JSONB := my_channel_key('63630000-0000-4000-8000-0000000000c1');
+  v_work JSONB := my_key_work();
+BEGIN
+  IF (v_read->>'current_version')::int <> 1
+     OR jsonb_array_length(v_read->'my_keys') <> 1
+     OR v_read->'my_keys'->0->>'ciphertext' <> 'ct-text'
+     OR v_read->'links' IS NULL OR v_read->'members_missing' IS NULL
+     OR v_read->'bots_missing' <> '[]'::jsonb
+     OR v_read->'my_voice_key' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: my_channel_key answered a text channel as %', v_read;
+  END IF;
+  IF jsonb_typeof(v_work->'work') <> 'array' OR jsonb_typeof(v_work->'more') <> 'boolean' THEN
+    RAISE EXCEPTION 'FAIL: my_key_work answered %', v_work;
+  END IF;
+
+  -- A voice channel: the summoned bot is owed a media key.
+  v_read := my_channel_key('63630000-0000-4000-8000-0000000000c2');
+  IF v_read->'bots_missing' <> jsonb_build_array(jsonb_build_object(
+       'bot_id', '63636363-0000-4000-8000-000000000003',
+       'chat_public_key', 'chat-bolt', 'may_listen', false)) THEN
+    RAISE EXCEPTION 'FAIL: my_channel_key left out the bot owed a key: %', v_read->'bots_missing';
+  END IF;
+  RAISE NOTICE 'ok  my_channel_key answers a member as get_channel_key did (063)';
+END $$;
+
+DO $$
+DECLARE
+  v_channel UUID;
+BEGIN
+  FOREACH v_channel IN ARRAY ARRAY['63630000-0000-4000-8000-0000000000c3',
+                                   '63630000-0000-4000-8000-0000000000c4']::UUID[] LOOP
+    BEGIN
+      PERFORM my_channel_key(v_channel);
+      RAISE EXCEPTION 'FAIL: my_channel_key answered about %', v_channel;
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM <> 'channel_not_found' THEN RAISE; END IF;
+    END;
+  END LOOP;
+  RAISE NOTICE 'ok  a private channel or another server''s is not found (063)';
+END $$;
+
+-- Bolt, summoned into a private call it cannot see: its own key, nothing else.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"63636363-0000-4000-8000-000000000003","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE
+  v_read JSONB := my_channel_key('63630000-0000-4000-8000-0000000000c3');
+BEGIN
+  IF (v_read->>'current_version')::int <> 0
+     OR v_read->'my_keys' <> '[]'::jsonb
+     OR v_read ? 'links'
+     OR (v_read->'my_voice_key'->>'key_version')::int <> 3
+     OR v_read->'my_voice_key'->>'ciphertext' <> 'ct-bolt' THEN
+    RAISE EXCEPTION 'FAIL: a summoned bot read %', v_read;
+  END IF;
+  RAISE NOTICE 'ok  a summoned bot gets its own sealed key and nothing more (063)';
+END $$;
+
+-- Kim, banned, and Oz, on another server.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"63636363-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM my_key_work();
+    RAISE EXCEPTION 'FAIL: a banned member was handed key work';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'user_banned' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM my_channel_key('63630000-0000-4000-8000-0000000000c1');
+    RAISE EXCEPTION 'FAIL: a banned member read a channel''s keys';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'user_banned' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  a banned member is refused as user_banned (063)';
+END $$;
+
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"63636363-0000-4000-8000-000000000004","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM my_channel_key('63630000-0000-4000-8000-0000000000c1');
+    RAISE EXCEPTION 'FAIL: a member of another server read a channel''s keys';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'channel_not_found' THEN RAISE; END IF;
+  END;
+  RAISE NOTICE 'ok  another server''s member is not found (063)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
