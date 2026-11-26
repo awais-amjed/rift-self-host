@@ -674,6 +674,15 @@ files, each run once after it, and the list below grows with them.
    `refuse_ineligible_keyring` runs once a statement over the rows written, with the same three
    refusals; a row an upsert skips is no longer asked about. Measured Nov 26 2026 on 12.8 M
    keyring rows: a 500-key batch 106 ms → 11 ms (median of ten).
+54. **074_reads_that_move_nothing.sql** — `mark_read` reads the cursor first and answers from it
+   when there is nowhere to move, so the common call (a channel opened with nothing new, a
+   window focused) locks no row and takes no transaction id; `mark_all_read` writes only the
+   cursors behind. The suite checks that neither locks nor rewrites a cursor already in place.
+   Neither looks for a channel's newest message where the caller sees none of it (a private
+   channel they are not in, a ban, a bot): under their row security that search read the whole
+   of `messages` to find nothing. Measured Nov 26 2026 on 5 M messages: a bot's `mark_read`
+   with no id 12 s → 0.03 ms, its `mark_all_read` ~100 s → 0.5 ms; a member's `mark_all_read`
+   with nothing new 8.9 → 4.8 ms.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that

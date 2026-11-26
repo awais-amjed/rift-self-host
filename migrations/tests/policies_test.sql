@@ -14996,4 +14996,98 @@ BEGIN
   RAISE NOTICE 'ok  one bad row refuses its batch; a bot''s grant counts from its version (073)';
 END $$;
 
+
+-- ── 074: a read that moves nothing writes nothing ───────────
+-- A lock is a write too: `ON CONFLICT DO UPDATE` locks the row it meets even
+-- when its guard updates nothing, and a locked row carries the locker in xmax.
+DO $$
+DECLARE
+  v_me   UUID;
+  v_chan UUID;
+  v_cur  BIGINT;
+  v_n    INTEGER;
+  v_rows TID[];
+BEGIN
+  RESET ROLE;
+  SELECT u.id, m.channel_id INTO v_me, v_chan
+    FROM messages m
+    JOIN users u ON NOT u.is_bot AND u.id <> m.sender_id
+                AND app.channel_eligible(m.channel_id, u.id)
+   ORDER BY m.id DESC LIMIT 1;
+  IF v_chan IS NULL THEN
+    RAISE EXCEPTION 'FAIL: no member here with a channel to read';
+  END IF;
+  DELETE FROM read_state WHERE user_id = v_me;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM pg_temp.as_member(v_me::TEXT);
+
+  v_cur := mark_read('channel', v_chan);
+  IF v_cur IS NULL OR v_cur <= 0 THEN
+    RAISE EXCEPTION 'FAIL: mark_read did not move a new cursor (%)', v_cur;
+  END IF;
+  IF mark_read('channel', v_chan) <> v_cur OR mark_read('channel', v_chan, 1) <> v_cur THEN
+    RAISE EXCEPTION 'FAIL: mark_read with nowhere to go answered another cursor';
+  END IF;
+  PERFORM mark_all_read();
+  RESET ROLE;
+  SELECT array_agg(ctid ORDER BY ctid) INTO v_rows FROM read_state WHERE user_id = v_me;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM mark_all_read();
+
+  RESET ROLE;
+  IF v_rows IS DISTINCT FROM
+     (SELECT array_agg(ctid ORDER BY ctid) FROM read_state WHERE user_id = v_me) THEN
+    RAISE EXCEPTION 'FAIL: mark all as read rewrote cursors already in place';
+  END IF;
+  SELECT count(*) INTO v_n FROM read_state WHERE user_id = v_me AND xmax <> '0';
+  IF v_n > 0 THEN
+    RAISE EXCEPTION 'FAIL: % cursors already in place were locked by a read', v_n;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM read_state WHERE user_id = v_me AND scope = 'channel'
+                    AND scope_id = v_chan AND last_read_id = v_cur) THEN
+    RAISE EXCEPTION 'FAIL: the cursor moved';
+  END IF;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  a read with nowhere to move locks nothing (074)';
+END $$;
+
+-- Where the caller sees nothing of a channel, its newest is not looked for:
+-- under their row security that search read the whole table to find nothing.
+DO $$
+DECLARE
+  v_me   UUID;
+  v_chan UUID;
+  v_bot  UUID;
+  v_n    INTEGER;
+BEGIN
+  RESET ROLE;
+  SELECT u.id, c.id INTO v_me, v_chan
+    FROM channels c
+    JOIN users u ON u.server_id = c.server_id AND NOT u.is_bot AND NOT u.is_banned
+   WHERE c.is_private AND NOT app.channel_eligible(c.id, u.id)
+     AND EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = c.id)
+   LIMIT 1;
+  SELECT u.id INTO v_bot FROM users u WHERE u.is_bot AND NOT u.is_banned LIMIT 1;
+  IF v_chan IS NULL OR v_bot IS NULL THEN
+    RAISE EXCEPTION 'FAIL: no private channel with an outsider, or no bot, to try';
+  END IF;
+  DELETE FROM read_state WHERE user_id IN (v_me, v_bot);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+
+  PERFORM pg_temp.as_member(v_me::TEXT);
+  IF mark_read('channel', v_chan) <> 0 THEN
+    RAISE EXCEPTION 'FAIL: an outsider''s cursor in a private channel was put past 0';
+  END IF;
+
+  PERFORM pg_temp.as_member(v_bot::TEXT);
+  PERFORM mark_all_read();
+  RESET ROLE;
+  SELECT count(*) INTO v_n FROM read_state WHERE user_id = v_bot AND scope = 'channel';
+  IF v_n > 0 THEN
+    RAISE EXCEPTION 'FAIL: mark all as read kept % channel cursors for a bot', v_n;
+  END IF;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  RAISE NOTICE 'ok  no newest is looked for where the caller sees none (074)';
+END $$;
+
 ROLLBACK;
