@@ -887,6 +887,16 @@ the same rule against the data rather than the API: at commit, a non-default nod
 is refused, and the key cannot be deleted while its node is there. Rotation is
 `set_voice_region_credentials(p_node, p_api_key, p_secret)`, both halves, one box at a time.
 
+**A region's address moves only with its key**: `move_voice_region(p_node, p_url, p_api_key,
+p_secret)`, admin-checked, never the default (which follows `servers.livekit_url`, and
+`update_server` asks for its key the same way). Before 1.9.1 the address was a column an admin
+could update alone, and the functions then signed RoomService requests with the region's key for
+the new host: an admin never given that key could collect admin tokens for the real region.
+`authenticated` holds `UPDATE (label)` only. On every path, the default's included, an address
+pointing inside the server is refused (`app.livekit_url_refused`): loopback, link-local (where a
+cloud keeps its metadata), a name with no dot (a Docker service), a login in the address and the
+odd spellings of an IP. A LAN address is allowed, since a local install runs on one.
+
 Everything that talks to a node reads that node's pair, and **a missing one is never the
 server's**: `get_channel_token` mints the join token with the key of whichever node the claim
 landed on (and again if the unreachable-pin fallback moves it), `move_call` signs for the

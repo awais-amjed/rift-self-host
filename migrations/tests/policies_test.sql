@@ -44,8 +44,8 @@ INSERT INTO auth.users (id) VALUES
   ('22222222-bbbb-4bbb-8bbb-000000000001');  -- mallory
 
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('aaaa0000-0000-4000-8000-000000000001', 'Alpha', 'ws://lan:7880'),
-  ('bbbb0000-0000-4000-8000-000000000001', 'Beta',  'ws://lan:7880');
+  ('aaaa0000-0000-4000-8000-000000000001', 'Alpha', 'ws://lan.test:7880'),
+  ('bbbb0000-0000-4000-8000-000000000001', 'Beta',  'ws://lan.test:7880');
 
 INSERT INTO server_secrets VALUES
   ('aaaa0000-0000-4000-8000-000000000001', 'key-alpha', 'secret-alpha'),
@@ -6295,19 +6295,19 @@ BEGIN
 
   SELECT url INTO v_url FROM livekit_nodes
    WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
-  IF v_url <> 'ws://lan:7880' THEN
+  IF v_url <> 'ws://lan.test:7880' THEN
     RAISE EXCEPTION 'FAIL: the default node is %, not the server url', v_url;
   END IF;
 
   -- And it follows the column rather than drifting from it.
-  UPDATE servers SET livekit_url = 'ws://lan:7999'
+  UPDATE servers SET livekit_url = 'ws://lan.test:7999'
    WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
   SELECT url INTO v_url FROM livekit_nodes
    WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
-  IF v_url <> 'ws://lan:7999' THEN
+  IF v_url <> 'ws://lan.test:7999' THEN
     RAISE EXCEPTION 'FAIL: the default node did not follow livekit_url, is %', v_url;
   END IF;
-  UPDATE servers SET livekit_url = 'ws://lan:7880'
+  UPDATE servers SET livekit_url = 'ws://lan.test:7880'
    WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
 
   RAISE NOTICE 'ok  every server has a default node, and it is its livekit_url';
@@ -6325,7 +6325,7 @@ BEGIN
   UPDATE livekit_nodes SET label = 'Frankfurt'
    WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
 
-  UPDATE servers SET livekit_url = 'ws://lan:7001'
+  UPDATE servers SET livekit_url = 'ws://lan.test:7001'
    WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
 
   SELECT label, url INTO v_label, v_url FROM livekit_nodes
@@ -6334,11 +6334,11 @@ BEGIN
   IF v_label <> 'Frankfurt' THEN
     RAISE EXCEPTION 'FAIL: the mirror overwrote the operator''s name with %', v_label;
   END IF;
-  IF v_url <> 'ws://lan:7001' THEN
+  IF v_url <> 'ws://lan.test:7001' THEN
     RAISE EXCEPTION 'FAIL: the mirror did not carry the new address, is %', v_url;
   END IF;
 
-  UPDATE servers SET livekit_url = 'ws://lan:7880'
+  UPDATE servers SET livekit_url = 'ws://lan.test:7880'
    WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
   UPDATE livekit_nodes SET label = 'Default'
    WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
@@ -6368,7 +6368,7 @@ SET LOCAL ROLE authenticated;
 DO $$
 DECLARE v_id UUID;
 BEGIN
-  v_id := (add_voice_region('Singapore', 'ws://sg:7880', 'APIsg', 'secret-sg') ->> 'id')::UUID;
+  v_id := (add_voice_region('Singapore', 'ws://sg.test:7880', 'APIsg', 'secret-sg') ->> 'id')::UUID;
   IF v_id IS NULL THEN
     RAISE EXCEPTION 'FAIL: an admin could not add a node';
   END IF;
@@ -6392,14 +6392,14 @@ DO $$ BEGIN RAISE NOTICE 'ok  adding and renaming a region pass the key check at
 DO $$
 BEGIN
   BEGIN
-    PERFORM add_voice_region('Nowhere', 'ws://nowhere:7880', '', '');
+    PERFORM add_voice_region('Nowhere', 'ws://nowhere.test:7880', '', '');
     RAISE EXCEPTION 'FAIL: a region was added with no key';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 
   BEGIN
     INSERT INTO livekit_nodes (server_id, label, url)
-    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Nowhere', 'ws://nowhere:7880');
+    VALUES ('aaaa0000-0000-4000-8000-000000000001', 'Nowhere', 'ws://nowhere.test:7880');
     RAISE EXCEPTION 'FAIL: a bare node insert was accepted';
   EXCEPTION
     -- A member reaches the grant first; the admin this runs as reaches the
@@ -6424,16 +6424,24 @@ BEGIN
   END IF;
 
   BEGIN
-    PERFORM add_voice_region('Bobsville', 'ws://bob:7880', 'APIbob', 'secret-bob');
+    PERFORM add_voice_region('Bobsville', 'ws://bob.test:7880', 'APIbob', 'secret-bob');
     RAISE EXCEPTION 'FAIL: a member added a node';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 
-  UPDATE livekit_nodes SET url = 'ws://bob:7880' WHERE label = 'Singapore';
-  GET DIAGNOSTICS v_count = ROW_COUNT;
-  IF v_count <> 0 THEN
+  -- Nobody repoints one by the table since 079, an admin neither: the key
+  -- has to move with it (`move_voice_region`).
+  BEGIN
+    UPDATE livekit_nodes SET url = 'ws://bob.test:7880' WHERE label = 'Singapore';
     RAISE EXCEPTION 'FAIL: a member repointed a node';
-  END IF;
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM move_voice_region((SELECT id FROM livekit_nodes WHERE label = 'Singapore'),
+                              'ws://bob.test:7880', 'APIbob', 'secret-bob');
+    RAISE EXCEPTION 'FAIL: a member moved a node';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
 
   RAISE NOTICE 'ok  a member reads the node list and cannot write to it';
 END $$;
@@ -6517,6 +6525,90 @@ BEGIN
   RAISE NOTICE 'ok  the default region, half a pair and a stranger''s node are all refused';
 END $$;
 
+-- 079: a region's address moves only with its key, and no address that
+-- points inside the server is taken on any path.
+DO $$
+DECLARE
+  v_sg  UUID;
+  v_def UUID;
+  v_got JSONB;
+  v_url TEXT;
+BEGIN
+  SELECT id, url INTO v_sg, v_url FROM livekit_nodes WHERE label = 'Singapore';
+  SELECT id INTO v_def FROM livekit_nodes
+   WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001' AND is_default;
+
+  BEGIN
+    UPDATE livekit_nodes SET url = 'wss://elsewhere.test' WHERE id = v_sg;
+    RAISE EXCEPTION 'FAIL: an admin repointed a region without its key';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    PERFORM move_voice_region(v_sg, 'wss://elsewhere.test', 'APIsg3', NULL);
+    RAISE EXCEPTION 'FAIL: a region moved with half a key';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    PERFORM move_voice_region(v_def, 'wss://elsewhere.test', 'APIsg3', 'secret-sg3');
+    RAISE EXCEPTION 'FAIL: the default region moved apart from the server';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    PERFORM move_voice_region('99999999-0000-4000-8000-000000000009',
+                              'wss://elsewhere.test', 'APIx', 'secret-x');
+    RAISE EXCEPTION 'FAIL: a stranger''s node moved';
+  EXCEPTION WHEN no_data_found THEN NULL;
+  END;
+
+  -- Inside addresses, on the move and the add alike.
+  FOR v_url IN SELECT unnest(ARRAY[
+    'ws://kong:8000', 'ws://localhost:7880', 'ws://127.0.0.1:7880', 'ws://127.1',
+    'ws://0.0.0.0', 'ws://169.254.169.254', 'ws://[::1]:7880', 'ws://[fe80::1]',
+    'ws://[::ffff:127.0.0.1]', 'ws://0x7f.0.0.1', 'ws://2130706433',
+    'ws://user@127.0.0.1', 'ws://x@good.test', 'ws://lk.localhost'])
+  LOOP
+    BEGIN
+      PERFORM move_voice_region(v_sg, v_url, 'APIsg3', 'secret-sg3');
+      RAISE EXCEPTION 'FAIL: a region moved to %', v_url;
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+    BEGIN
+      PERFORM add_voice_region('Inside', v_url, 'APIin', 'secret-in');
+      RAISE EXCEPTION 'FAIL: a region was added at %', v_url;
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+  END LOOP;
+
+  -- A LAN address and a public one are fine.
+  v_got := move_voice_region(v_sg, 'ws://192.168.1.6:7890', 'APIsg3', 'secret-sg3');
+  IF v_got->>'url' <> 'ws://192.168.1.6:7890' OR (v_got->>'is_default')::boolean THEN
+    RAISE EXCEPTION 'FAIL: a move answered %', v_got;
+  END IF;
+  v_got := move_voice_region(v_sg, 'wss://sg.example.com', 'APIsg4', 'secret-sg4');
+  IF v_got->>'url' <> 'wss://sg.example.com' THEN
+    RAISE EXCEPTION 'FAIL: a move answered %', v_got;
+  END IF;
+  -- And the label is still the table's.
+  UPDATE livekit_nodes SET label = 'Singapore' WHERE id = v_sg;
+  RAISE NOTICE 'ok  a region moves only with its key, and never inside the server (079)';
+END $$;
+
+-- The default follows the server's address, and is held to the same rule.
+RESET ROLE;
+DO $$
+BEGIN
+  BEGIN
+    UPDATE servers SET livekit_url = 'ws://kong:8000'
+     WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
+    RAISE EXCEPTION 'FAIL: the default region followed the server inside';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  RAISE NOTICE 'ok  the default region is refused an inside address too (079)';
+END $$;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+
 -- A member cannot set one, admin-only being enforced by the function itself:
 -- SECURITY DEFINER means no policy is standing behind it.
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
@@ -6564,7 +6656,7 @@ BEGIN
   PERFORM set_config('request.jwt.claims',
     '{"sub":"11111111-aaaa-4aaa-8aaa-000000000001","role":"authenticated"}', true);
   SET LOCAL ROLE authenticated;
-  PERFORM add_voice_region('Singapore', 'ws://sg:7880', 'APIsg', 'secret-sg');
+  PERFORM add_voice_region('Singapore', 'ws://sg.test:7880', 'APIsg', 'secret-sg');
   RESET ROLE;
 
   RAISE NOTICE 'ok  a region''s key cannot be dropped, and goes with the region';
@@ -6588,7 +6680,7 @@ BEGIN
   IF v_got <> v_sg THEN
     RAISE EXCEPTION 'FAIL: the caller''s suggestion was not taken';
   END IF;
-  IF v_url <> 'ws://sg:7880' THEN
+  IF v_url <> 'ws://sg.test:7880' THEN
     RAISE EXCEPTION 'FAIL: the claim answered with url %', v_url;
   END IF;
 
@@ -9315,10 +9407,10 @@ BEGIN
    WHERE id = 'aaaa0000-0000-4000-8000-000000000001';
 
   INSERT INTO servers (id, name, livekit_url) VALUES
-    ('cccc0000-0000-4000-8000-0000000000f1', 'Ceiling', 'ws://lan:7880');
+    ('cccc0000-0000-4000-8000-0000000000f1', 'Ceiling', 'ws://lan.test:7880');
   PERFORM app.set_file_ceiling(10485760);  -- 10 MB, under the 25 MB default
   INSERT INTO servers (id, name, livekit_url) VALUES
-    ('cccc0000-0000-4000-8000-0000000000f2', 'Ceiling 2', 'ws://lan:7880');
+    ('cccc0000-0000-4000-8000-0000000000f2', 'Ceiling 2', 'ws://lan.test:7880');
   SELECT max_attachment_bytes INTO v_limit FROM servers
    WHERE id = 'cccc0000-0000-4000-8000-0000000000f2';
   IF v_limit <> 10485760 THEN
@@ -9639,7 +9731,7 @@ INSERT INTO auth.users (id)
 SELECT ('77777777-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid
   FROM generate_series(1, 604) i;
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('eeee0000-0000-4000-8000-000000000001', 'Gamma', 'ws://lan:7880');
+  ('eeee0000-0000-4000-8000-000000000001', 'Gamma', 'ws://lan.test:7880');
 INSERT INTO channels (id, server_id, name, channel_type) VALUES
   ('eeee1111-0000-4000-8000-000000000001', 'eeee0000-0000-4000-8000-000000000001', 'general', 'text');
 -- 1 ann, 2 ben, 3 cat, 4 dan (no chat key), 5–604 the crowd.
@@ -10446,7 +10538,7 @@ INSERT INTO auth.users (id) VALUES
   ('88888888-dddd-4ddd-8ddd-000000000002'),  -- eli
   ('88888888-dddd-4ddd-8ddd-000000000003');  -- the bot
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('dddd0000-0000-4000-8000-000000000001', 'Delta', 'ws://lan:7880');
+  ('dddd0000-0000-4000-8000-000000000001', 'Delta', 'ws://lan.test:7880');
 INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
   ('dddd1111-0000-4000-8000-000000000001', 'dddd0000-0000-4000-8000-000000000001', 'general',  'text',  false),
   ('dddd1111-0000-4000-8000-000000000002', 'dddd0000-0000-4000-8000-000000000001', 'hideout',  'text',  true),
@@ -10789,7 +10881,7 @@ INSERT INTO auth.users (id) VALUES
   ('99999999-f0f0-4f0f-8f0f-000000000005'),  -- hal
   ('99999999-f0f0-4f0f-8f0f-000000000006');  -- kim
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('f0f00000-0000-4000-8000-000000000001', 'Foxtrot', 'ws://lan:7880');
+  ('f0f00000-0000-4000-8000-000000000001', 'Foxtrot', 'ws://lan.test:7880');
 INSERT INTO channels (id, server_id, name, channel_type) VALUES
   ('f0f01111-0000-4000-8000-000000000001', 'f0f00000-0000-4000-8000-000000000001', 'news',  'text'),
   ('f0f01111-0000-4000-8000-000000000002', 'f0f00000-0000-4000-8000-000000000001', 'stage', 'voice');
@@ -11164,7 +11256,7 @@ RESET ROLE;
 -- ── joining with a tag ──────────────────────────────────────────────────
 -- Gamma is new and empty, so the first person through becomes its owner.
 INSERT INTO servers (id, name, livekit_url)
-VALUES ('cccc0000-0000-4000-8000-000000000001', 'Gamma', 'ws://lan:7880');
+VALUES ('cccc0000-0000-4000-8000-000000000001', 'Gamma', 'ws://lan.test:7880');
 INSERT INTO invites (server_id, code, max_uses, needs_account) VALUES
   ('cccc0000-0000-4000-8000-000000000001', 'gam-acct', NULL, true),
   ('cccc0000-0000-4000-8000-000000000001', 'gam-open', NULL, false);
@@ -11460,7 +11552,7 @@ RESET ROLE;
 -- trigger leaves alone whoever the caller could not have banned.
 
 INSERT INTO servers (id, name, livekit_url)
-VALUES ('e5e50000-0000-4000-8000-000000000001', 'Epsilon', 'ws://lan:7880');
+VALUES ('e5e50000-0000-4000-8000-000000000001', 'Epsilon', 'ws://lan.test:7880');
 INSERT INTO invites (server_id, code, max_uses, needs_account) VALUES
   ('e5e50000-0000-4000-8000-000000000001', 'eps-acct', NULL, true),
   ('e5e50000-0000-4000-8000-000000000001', 'eps-open', NULL, false);
@@ -11650,7 +11742,7 @@ END $$;
 -- channel manager could hold, with and without the webhook bit.
 RESET ROLE;
 INSERT INTO servers (id, name, livekit_url)
-VALUES ('a0320000-0000-4000-8000-000000000001', 'Zeta', 'ws://lan:7880');
+VALUES ('a0320000-0000-4000-8000-000000000001', 'Zeta', 'ws://lan.test:7880');
 INSERT INTO channels (id, server_id, name, channel_type)
 VALUES ('a0321111-0000-4000-8000-000000000001', 'a0320000-0000-4000-8000-000000000001',
         'general', 'text');
@@ -11838,7 +11930,7 @@ RESET ROLE;
 -- name everyone), ben and cal (plain members).
 RESET ROLE;
 INSERT INTO servers (id, name, livekit_url)
-VALUES ('a0330000-0000-4000-8000-000000000001', 'Eta', 'ws://lan:7880');
+VALUES ('a0330000-0000-4000-8000-000000000001', 'Eta', 'ws://lan.test:7880');
 INSERT INTO channels (id, server_id, name, channel_type) VALUES
   ('aaaa1111-0000-4000-8000-0000000000f3',
    'a0330000-0000-4000-8000-000000000001', 'rings', 'text');
@@ -12211,7 +12303,7 @@ BEGIN
   INSERT INTO channels (id, server_id, name, channel_type)
   VALUES (v_channel, v_server, 'calls-043', 'voice');
   INSERT INTO livekit_nodes (server_id, label, url)
-  VALUES (v_server, 'Frankfurt 043', 'ws://fra043:7880') RETURNING id INTO v_far;
+  VALUES (v_server, 'Frankfurt 043', 'ws://fra043.test:7880') RETURNING id INTO v_far;
   INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
   VALUES (v_far, 'APIfra', 'secret-fra');
   SELECT id INTO v_def FROM livekit_nodes WHERE server_id = v_server AND is_default;
@@ -12555,7 +12647,7 @@ INSERT INTO auth.users (id)
 SELECT ('47474747-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid
   FROM generate_series(1, 5) i;
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('ee470000-0000-4000-8000-000000000001', 'Delta', 'ws://lan:7880');
+  ('ee470000-0000-4000-8000-000000000001', 'Delta', 'ws://lan.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
 SELECT ('47474747-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
        'ee470000-0000-4000-8000-000000000001', 'd' || i, 'D' || i, 'pk-d' || i, 'sid-d' || i,
@@ -12982,7 +13074,7 @@ INSERT INTO auth.users (id)
 SELECT ('50505050-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid
   FROM generate_series(1, 4) i;
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('ee500000-0000-4000-8000-000000000001', 'Echo', 'ws://lan:7880');
+  ('ee500000-0000-4000-8000-000000000001', 'Echo', 'ws://lan.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
                    chat_public_key, is_bot)
 SELECT ('50505050-eeee-4eee-8eee-' || lpad(i::text, 12, '0'))::uuid,
@@ -13494,8 +13586,8 @@ INSERT INTO auth.users (id) VALUES
   ('62626262-0000-4000-8000-000000000002'),
   ('62626262-0000-4000-8000-000000000003');
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('62620000-0000-4000-8000-000000000001', 'Rings', 'ws://lan:7880'),
-  ('62620000-0000-4000-8000-000000000002', 'Elsewhere', 'ws://lan:7880');
+  ('62620000-0000-4000-8000-000000000001', 'Rings', 'ws://lan.test:7880'),
+  ('62620000-0000-4000-8000-000000000002', 'Elsewhere', 'ws://lan.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
 VALUES
   ('62626262-0000-4000-8000-000000000001', '62620000-0000-4000-8000-000000000001',
@@ -13608,8 +13700,8 @@ INSERT INTO auth.users (id) VALUES
   ('63636363-0000-4000-8000-000000000003'),
   ('63636363-0000-4000-8000-000000000004');
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('63630000-0000-4000-8000-000000000001', 'Keys', 'ws://lan:7880'),
-  ('63630000-0000-4000-8000-000000000002', 'Away', 'ws://lan:7880');
+  ('63630000-0000-4000-8000-000000000001', 'Keys', 'ws://lan.test:7880'),
+  ('63630000-0000-4000-8000-000000000002', 'Away', 'ws://lan.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
                    chat_public_key, is_bot, is_banned)
 VALUES
@@ -13758,8 +13850,8 @@ INSERT INTO auth.users (id) VALUES
   ('64646464-0000-4000-8000-000000000002'),
   ('64646464-0000-4000-8000-000000000003');
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('64640000-0000-4000-8000-000000000001', 'Start', 'ws://lan:7880'),
-  ('64640000-0000-4000-8000-000000000002', 'Other', 'ws://lan:7880');
+  ('64640000-0000-4000-8000-000000000001', 'Start', 'ws://lan.test:7880'),
+  ('64640000-0000-4000-8000-000000000002', 'Other', 'ws://lan.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
                    chat_public_key, is_bot)
 VALUES
@@ -13868,8 +13960,8 @@ INSERT INTO auth.users (id) VALUES
   ('65656565-0000-4000-8000-000000000004'),  -- kim, on another server
   ('65656565-0000-4000-8000-000000000005');  -- bea, banned
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('65650000-0000-4000-8000-000000000001', 'Join', 'ws://join:7880'),
-  ('65650000-0000-4000-8000-000000000002', 'Keyless', 'ws://keyless:7880');
+  ('65650000-0000-4000-8000-000000000001', 'Join', 'ws://join.test:7880'),
+  ('65650000-0000-4000-8000-000000000002', 'Keyless', 'ws://keyless.test:7880');
 INSERT INTO server_secrets VALUES
   ('65650000-0000-4000-8000-000000000001', 'key-join', 'secret-join');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
@@ -13901,7 +13993,7 @@ DO $$
 DECLARE v_far UUID;
 BEGIN
   INSERT INTO livekit_nodes (server_id, label, url)
-  VALUES ('65650000-0000-4000-8000-000000000001', 'Far 065', 'ws://far065:7880')
+  VALUES ('65650000-0000-4000-8000-000000000001', 'Far 065', 'ws://far065.test:7880')
   RETURNING id INTO v_far;
   INSERT INTO livekit_node_secrets (node_id, livekit_api_key, livekit_secret_key)
   VALUES (v_far, 'key-far', 'secret-far');
@@ -13969,7 +14061,7 @@ BEGIN
   -- A watch with no call goes to the server's own LiveKit, and claims nothing.
   v_got := voice_join_facts(v_ann, v_v, 'watch');
   IF v_got->>'reason' <> 'ok'
-     OR v_got->'watch' <> '{"url":"ws://join:7880","api_key":"key-join","api_secret":"secret-join"}'::jsonb
+     OR v_got->'watch' <> '{"url":"ws://join.test:7880","api_key":"key-join","api_secret":"secret-join"}'::jsonb
      OR EXISTS (SELECT 1 FROM voice_rooms WHERE channel_id = v_v) THEN
     RAISE EXCEPTION 'FAIL: a watch with no call answered %', v_got;
   END IF;
@@ -13991,7 +14083,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: a join answered %', v_got - 'credentials';
   END IF;
   -- Now there is a call, a watch goes where it is.
-  IF voice_join_facts(v_ann, v_v, 'watch')->'watch'->>'url' <> 'ws://join:7880' THEN
+  IF voice_join_facts(v_ann, v_v, 'watch')->'watch'->>'url' <> 'ws://join.test:7880' THEN
     RAISE EXCEPTION 'FAIL: a watch did not follow the call';
   END IF;
   -- A bot with a key and ears.
@@ -14002,7 +14094,7 @@ BEGIN
   -- The pinned region signs with its own pair, and says it was the pin.
   v_got := voice_join_facts(v_ann, v_far, 'voice');
   IF v_got->'node'->>'api_key' <> 'key-far'
-     OR v_got->'node'->>'url' <> 'ws://far065:7880'
+     OR v_got->'node'->>'url' <> 'ws://far065.test:7880'
      OR v_got->>'pinned_node_id' <> v_got->'node'->>'id'
      OR (v_got->>'speak')::boolean IS NOT TRUE
      OR (v_got->>'screen_share')::boolean IS NOT TRUE THEN
@@ -14094,8 +14186,8 @@ INSERT INTO auth.users (id) VALUES
   ('66666666-0000-4000-8000-000000000002'),  -- zed, a bot holding a key
   ('66666666-0000-4000-8000-000000000003');  -- kai, on another server
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('66660000-0000-4000-8000-000000000001', 'Open 066', 'ws://open066:7880'),
-  ('66660000-0000-4000-8000-000000000002', 'Other 066', 'ws://other066:7880');
+  ('66660000-0000-4000-8000-000000000001', 'Open 066', 'ws://open066.test:7880'),
+  ('66660000-0000-4000-8000-000000000002', 'Other 066', 'ws://other066.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
                    chat_public_key, is_bot)
 VALUES
@@ -14229,8 +14321,8 @@ INSERT INTO auth.users (id) VALUES
   ('67676767-0000-4000-8000-000000000002'),  -- bob
   ('67676767-0000-4000-8000-000000000003');  -- kai, on another server
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('67670000-0000-4000-8000-000000000001', 'Open 067', 'ws://open067:7880'),
-  ('67670000-0000-4000-8000-000000000002', 'Other 067', 'ws://other067:7880');
+  ('67670000-0000-4000-8000-000000000001', 'Open 067', 'ws://open067.test:7880'),
+  ('67670000-0000-4000-8000-000000000002', 'Other 067', 'ws://other067.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
                    chat_public_key, is_bot)
 VALUES
@@ -14409,8 +14501,8 @@ INSERT INTO auth.users (id) VALUES
   ('68686868-0000-4000-8000-000000000001'),  -- ada, an admin
   ('68686868-0000-4000-8000-000000000002');  -- bob, nobody
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('68680000-0000-4000-8000-000000000001', 'Ladder 068', 'ws://ladder068:7880'),
-  ('68680000-0000-4000-8000-000000000002', 'Other 068', 'ws://other068:7880');
+  ('68680000-0000-4000-8000-000000000001', 'Ladder 068', 'ws://ladder068.test:7880'),
+  ('68680000-0000-4000-8000-000000000002', 'Other 068', 'ws://other068.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, chat_public_key)
 VALUES
   ('68686868-0000-4000-8000-000000000001', '68680000-0000-4000-8000-000000000001',
@@ -14613,8 +14705,8 @@ INSERT INTO auth.users (id) VALUES
   ('70707070-0000-4000-8000-000000000003'),  -- cy, on another server
   ('70707070-0000-4000-8000-0000000000ff');  -- a stranger, signed in, no member
 INSERT INTO servers (id, name, livekit_url) VALUES
-  ('70700000-0000-4000-8000-000000000001', 'Reach 070', 'ws://reach070:7880'),
-  ('70700000-0000-4000-8000-000000000002', 'Other 070', 'ws://other070:7880');
+  ('70700000-0000-4000-8000-000000000001', 'Reach 070', 'ws://reach070.test:7880'),
+  ('70700000-0000-4000-8000-000000000002', 'Other 070', 'ws://other070.test:7880');
 INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
                    chat_public_key, is_bot)
 VALUES
@@ -15181,7 +15273,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: % servers'' kept counts differ from a count', pg_temp.tally_off();
   END IF;
 
-  INSERT INTO servers (id, name, livekit_url) VALUES (s, 'Tally', 'ws://lan:7880');
+  INSERT INTO servers (id, name, livekit_url) VALUES (s, 'Tally', 'ws://lan.test:7880');
   INSERT INTO auth.users (id) VALUES (a), (b), (bot);
   INSERT INTO users (id, server_id, username, display_name, public_key, stable_id, is_bot)
   VALUES (a,   s, 't76a', 'A', 'pk-76a', 'sid-76a', false),
@@ -15249,7 +15341,7 @@ DECLARE
   s2 UUID := '77770000-0000-4000-8000-000000000002';
 BEGIN
   INSERT INTO servers (id, name, livekit_url) VALUES
-    (s, 'Keyed', 'ws://lan:7880'), (s2, 'Other', 'ws://lan:7880');
+    (s, 'Keyed', 'ws://lan.test:7880'), (s2, 'Other', 'ws://lan.test:7880');
   INSERT INTO auth.users (id) VALUES
     ('77777777-0000-4000-8000-000000000001'), ('77777777-0000-4000-8000-000000000002'),
     ('77777777-0000-4000-8000-000000000003'), ('77777777-0000-4000-8000-000000000004'),

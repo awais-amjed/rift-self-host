@@ -76,6 +76,22 @@ function isLiveKitUrl(value: unknown): boolean {
   }
 }
 
+/**
+ * Whether a LiveKit address points inside the server, where the functions
+ * would send RoomService requests signed with its key: loopback, link-local
+ * (a cloud's metadata), a name with no dot (a Docker service), or an IPv6
+ * loopback, unspecified or mapped address. A LAN address is fine; a local
+ * install runs on one. The database refuses the same
+ * (`app.livekit_url_refused`); this is the refusal in words.
+ */
+function pointsInside(value: string): boolean {
+  // The parsed host: `0x7f.1` and `2130706433` come out as 127.0.0.1.
+  const host = new URL(value).hostname.toLowerCase().replace(/\.$/, "");
+  if (host.startsWith("[")) return /^\[(::|0|fe[89ab][0-9a-f]*:)/.test(host);
+  return !host.includes(".") || host === "localhost" || host.endsWith(".localhost") ||
+    /^(127|0)\./.test(host) || host.startsWith("169.254.");
+}
+
 /** A `servers` row as the client reads it — snake_case, limits included. */
 function toServerResponse(row: Record<string, any> | null) {
   if (!row) return row;
@@ -166,6 +182,13 @@ Deno.serve(async (req) => {
       if (!isLiveKitUrl(livekit_url)) {
         return CustomResponse.error(
           "livekit_url must be a ws:// or wss:// address",
+          EC.LIVEKIT_URL_INVALID,
+        );
+      }
+      if (pointsInside(livekit_url)) {
+        return CustomResponse.error(
+          "livekit_url has to be an address people's apps can reach: not localhost, " +
+            "a link-local address or a bare container name",
           EC.LIVEKIT_URL_INVALID,
         );
       }

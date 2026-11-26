@@ -53,7 +53,7 @@ INSERT INTO auth.users (id) VALUES
   ('aaaa1111-1111-4111-8111-000000000001'),
   ('aaaa1111-1111-4111-8111-000000000002');
 INSERT INTO servers (id, name, livekit_url)
-VALUES ('ffff0000-0000-4000-8000-000000000001', 'Probe', 'ws://x:7880');
+VALUES ('ffff0000-0000-4000-8000-000000000001', 'Probe', 'ws://x.test:7880');
 INSERT INTO invites (server_id, code)
 VALUES ('ffff0000-0000-4000-8000-000000000001', 'PROBECODE');
 DO $$
