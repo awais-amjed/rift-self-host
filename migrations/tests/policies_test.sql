@@ -14555,4 +14555,180 @@ BEGIN
   RAISE NOTICE 'ok  a ring about roles says so, and a member''s own does not (069)';
 END $$;
 
+-- ── 070: what a ban or a stranger can still reach ───────────
+-- A banned bot reads nothing and hears nothing; a banned member edits no DM;
+-- the avatars bucket is its members'.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('70707070-0000-4000-8000-000000000001'),  -- ada
+  ('70707070-0000-4000-8000-000000000002'),  -- bob
+  ('70707070-0000-4000-8000-0000000000b0'),  -- a bot
+  ('70707070-0000-4000-8000-000000000003'),  -- cy, on another server
+  ('70707070-0000-4000-8000-0000000000ff');  -- a stranger, signed in, no member
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('70700000-0000-4000-8000-000000000001', 'Reach 070', 'ws://reach070:7880'),
+  ('70700000-0000-4000-8000-000000000002', 'Other 070', 'ws://other070:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES
+  ('70707070-0000-4000-8000-000000000001', '70700000-0000-4000-8000-000000000001',
+   'ada', 'Ada', 'pk-ada', 'sid-ada-070', 'chat-ada', false),
+  ('70707070-0000-4000-8000-000000000002', '70700000-0000-4000-8000-000000000001',
+   'bob', 'Bob', 'pk-bob', 'sid-bob-070', 'chat-bob', false),
+  ('70707070-0000-4000-8000-0000000000b0', '70700000-0000-4000-8000-000000000001',
+   'bot', 'Bot', 'pk-bot', 'sid-bot-070', 'chat-bot', true),
+  ('70707070-0000-4000-8000-000000000003', '70700000-0000-4000-8000-000000000002',
+   'cy', 'Cy', 'pk-cy', 'sid-cy-070', 'chat-cy', false);
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE id::text LIKE '70707070-%';
+INSERT INTO channels (id, server_id, name, channel_type) VALUES
+  ('70701111-0000-4000-8000-000000000001', '70700000-0000-4000-8000-000000000001', 'general', 'text');
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version)
+VALUES ('70701111-0000-4000-8000-000000000001',
+        '70707070-0000-4000-8000-0000000000b0',
+        '70707070-0000-4000-8000-000000000001', 1);
+INSERT INTO channel_keyring
+  (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+VALUES ('70701111-0000-4000-8000-000000000001', 1,
+        '70707070-0000-4000-8000-0000000000b0',
+        '70707070-0000-4000-8000-000000000001', 'eph', 'ct', 'n');
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"70707070-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO messages (channel_id, ciphertext, nonce, signature, key_version)
+VALUES ('70701111-0000-4000-8000-000000000001', 'said-070', 'n', 's', 1);
+INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version)
+VALUES (70701, '70707070-0000-4000-8000-000000000002', 'dm-070', 'n', 's', 1);
+INSERT INTO storage.objects (bucket_id, name, owner) VALUES
+  ('avatars', '70707070-0000-4000-8000-000000000001/a.img', '70707070-0000-4000-8000-000000000001'),
+  ('avatars', '70707070-0000-4000-8000-000000000003/c.img', '70707070-0000-4000-8000-000000000003');
+
+-- The bot, in: reads the channel and its key.
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('70707070-0000-4000-8000-0000000000b0');
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'said-070')
+     OR NOT EXISTS (SELECT 1 FROM channel_keyring
+                     WHERE channel_id = '70701111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a granted bot cannot read its channel (070 setup)';
+  END IF;
+END $$;
+
+-- Banned: nothing, and not told.
+RESET ROLE;
+UPDATE users SET is_banned = true WHERE id = '70707070-0000-4000-8000-0000000000b0';
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM messages WHERE ciphertext = 'said-070') THEN
+    RAISE EXCEPTION 'FAIL: a banned bot reads its channel';
+  END IF;
+  IF EXISTS (SELECT 1 FROM channel_keyring
+              WHERE channel_id = '70701111-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: a banned bot reads its channel''s keys';
+  END IF;
+  RAISE NOTICE 'ok  a banned bot reads nothing (070)';
+END $$;
+RESET ROLE;
+DO $$
+DECLARE
+  v_n INTEGER;
+BEGIN
+  IF app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime runs here, so the recorder would replace it';
+    RETURN;
+  END IF;
+  CREATE SCHEMA IF NOT EXISTS realtime;
+  CREATE TEMP TABLE said (payload JSONB, event TEXT, topic TEXT);
+  CREATE FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN) RETURNS VOID
+    LANGUAGE sql AS 'INSERT INTO pg_temp.said VALUES ($1, $2, $3)';
+  PERFORM app.announce_to_channel('70701111-0000-4000-8000-000000000001', 'message', '{}');
+  SELECT count(*) INTO v_n FROM pg_temp.said
+   WHERE topic = 'user:70707070-0000-4000-8000-0000000000b0';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a banned bot is still told of its channel';
+  END IF;
+  UPDATE users SET is_banned = false WHERE id = '70707070-0000-4000-8000-0000000000b0';
+  DELETE FROM pg_temp.said;
+  PERFORM app.announce_to_channel('70701111-0000-4000-8000-000000000001', 'message', '{}');
+  SELECT count(*) INTO v_n FROM pg_temp.said
+   WHERE topic = 'user:70707070-0000-4000-8000-0000000000b0';
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a bot let back in is told % times', v_n;
+  END IF;
+  DROP FUNCTION realtime.send(JSONB, TEXT, TEXT, BOOLEAN);
+  DROP TABLE pg_temp.said;
+  RAISE NOTICE 'ok  a banned bot is not told, and is again once let back (070)';
+END $$;
+
+-- A banned member edits no DM they sent.
+UPDATE users SET is_banned = true WHERE id = '70707070-0000-4000-8000-000000000001';
+SET LOCAL ROLE authenticated;
+SELECT pg_temp.as_member('70707070-0000-4000-8000-000000000001');
+DO $$
+DECLARE
+  v_n INTEGER;
+BEGIN
+  UPDATE dm_messages SET ciphertext = 'rewritten' WHERE id = 70701;
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'FAIL: a banned member rewrote a DM';
+  END IF;
+  RAISE NOTICE 'ok  a banned member edits no DM (070)';
+END $$;
+RESET ROLE;
+UPDATE users SET is_banned = false WHERE id = '70707070-0000-4000-8000-000000000001';
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_n INTEGER;
+BEGIN
+  UPDATE dm_messages SET ciphertext = 'edited' WHERE id = 70701;
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a member cannot edit their own DM';
+  END IF;
+  RAISE NOTICE 'ok  a member still edits their own DM (070)';
+END $$;
+
+-- Avatars: a co-member's, not another server's, and nothing for a stranger.
+SELECT pg_temp.as_member('70707070-0000-4000-8000-000000000002');
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM storage.objects
+                  WHERE bucket_id = 'avatars' AND name LIKE '70707070-0000-4000-8000-000000000001/%') THEN
+    RAISE EXCEPTION 'FAIL: a member cannot see a co-member''s avatar';
+  END IF;
+  IF EXISTS (SELECT 1 FROM storage.objects
+              WHERE bucket_id = 'avatars' AND name LIKE '70707070-0000-4000-8000-000000000003/%') THEN
+    RAISE EXCEPTION 'FAIL: a member sees another server''s avatar';
+  END IF;
+  RAISE NOTICE 'ok  avatars are read among members of one server (070)';
+END $$;
+SELECT pg_temp.as_member('70707070-0000-4000-8000-0000000000ff');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM storage.objects WHERE bucket_id = 'avatars'
+                AND name LIKE '70707070-%') THEN
+    RAISE EXCEPTION 'FAIL: a stranger lists avatars';
+  END IF;
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name, owner)
+    VALUES ('avatars', '70707070-0000-4000-8000-0000000000ff/x.img',
+            '70707070-0000-4000-8000-0000000000ff');
+    RAISE EXCEPTION 'FAIL: a stranger uploaded an avatar';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a stranger neither lists nor uploads avatars (070)';
+END $$;
+SELECT pg_temp.as_member('70707070-0000-4000-8000-000000000002');
+DO $$
+BEGIN
+  INSERT INTO storage.objects (bucket_id, name, owner)
+  VALUES ('avatars', '70707070-0000-4000-8000-000000000002/b.img',
+          '70707070-0000-4000-8000-000000000002');
+  RAISE NOTICE 'ok  a member still uploads their own avatar (070)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;

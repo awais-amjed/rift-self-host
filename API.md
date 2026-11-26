@@ -453,7 +453,7 @@ files, each run once after it, and the list below grows with them.
    publication: each change is *broadcast* by a trigger onto a topic only the entitled may
    join, so what is in the payload is a decision rather than a consequence.
 6. **006_storage.sql** — `chat-<serverId>` per server, `avatars` (2 MB, **not** encrypted —
-   same accepted trade-off as reactions), `soundboard` (5 MB a clip, unencrypted for the same
+   same accepted trade-off as reactions; since 070 read only by members of the same server), `soundboard` (5 MB a clip, unencrypted for the same
    reason, one folder per server), `servers` (public, fetched before login), plus the
    running byte total and the trigger that refuses an upload over the cap.
 7. **007_jobs.sql** — the scheduled work: retention sweeps, expiring invites and summons,
@@ -647,6 +647,14 @@ files, each run once after it, and the list below grows with them.
 49. **069_role_rings_marked.sql** — a `members` ring about roles carries `"roles": true`
    (`app.roles_ring`), so an app's DM list, which draws no roles, does not read its
    conversations again: on a server of 50,000, one role renamed was 50,000 such reads.
+50. **070_banned_reach.sql** — three paths a ban (or a server marked deleted) never closed,
+   found in the security re-review of Nov 26 2026: a banned bot kept reading its channels and
+   their keys through its grants, and was still told of each new message (`app.bot_channels`
+   and `app.announce_to_channel` now ask that it is still in; its grants are kept, so lifting
+   the ban gives them back); a banned or kicked member could still edit every DM they had sent
+   (`dm_messages_update_own` now asks `app.server_id()`, as every other DM write did); and the
+   `avatars` bucket took uploads from anyone signed in and let them list every picture: writing
+   now takes a member, and reading a member of the same server (`app.avatar_owner`).
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
