@@ -14034,4 +14034,141 @@ BEGIN
 END $$;
 RESET ROLE;
 
+
+-- ── 066: opening a channel in one call ──────────────────────
+-- `channel_open` answers what the five reads it replaces answer, row for row
+-- and under the same policies: the page and the bar as `channel_messages`
+-- and `channel_live_messages` with their embeds, the listeners, the bots,
+-- and the keys or the reason there are none.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('66666666-0000-4000-8000-000000000001'),  -- ada
+  ('66666666-0000-4000-8000-000000000002'),  -- zed, a bot holding a key
+  ('66666666-0000-4000-8000-000000000003');  -- kai, on another server
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('66660000-0000-4000-8000-000000000001', 'Open 066', 'ws://open066:7880'),
+  ('66660000-0000-4000-8000-000000000002', 'Other 066', 'ws://other066:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES
+  ('66666666-0000-4000-8000-000000000001', '66660000-0000-4000-8000-000000000001',
+   'ada', 'Ada', 'pk-ada', 'sid-ada', 'chat-ada', false),
+  ('66666666-0000-4000-8000-000000000002', '66660000-0000-4000-8000-000000000001',
+   'zed', 'Zed', 'pk-zed', 'sid-zed', 'chat-zed', true),
+  ('66666666-0000-4000-8000-000000000003', '66660000-0000-4000-8000-000000000002',
+   'kai', 'Kai', 'pk-kai', 'sid-kai', 'chat-kai', false);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('66660000-0000-4000-8000-0000000000c1', '66660000-0000-4000-8000-000000000001', 'o-text', 'text', false),
+  ('66660000-0000-4000-8000-0000000000c2', '66660000-0000-4000-8000-000000000001', 'o-secret', 'text', true);
+INSERT INTO bot_channel_keys (channel_id, bot_id, granted_by, from_key_version) VALUES
+  ('66660000-0000-4000-8000-0000000000c1', '66666666-0000-4000-8000-000000000002',
+   '66666666-0000-4000-8000-000000000001', 1);
+-- In o-text: ada's message, pinned and reacted to; zed's live panel and open
+-- poll, which the bar holds; and zed's reply shown only to zed, which ada's
+-- page and bar must both leave out.
+SELECT pg_temp.as_member('66666666-0000-4000-8000-000000000001');
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version) VALUES
+  (96601, '66660000-0000-4000-8000-0000000000c1', 'sealed-ada', 'n', 's', 1);
+INSERT INTO message_pins (message_id, channel_id, pinned_by) VALUES
+  (96601, '66660000-0000-4000-8000-0000000000c1', '66666666-0000-4000-8000-000000000001');
+INSERT INTO message_reactions (message_id, user_id, emoji) VALUES
+  (96601, '66666666-0000-4000-8000-000000000001', '👍');
+SELECT pg_temp.as_member('66666666-0000-4000-8000-000000000002');
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks) VALUES
+  (96602, '66660000-0000-4000-8000-0000000000c1', '', 0, '{"v":1,"live":true,"blocks":[]}');
+INSERT INTO messages (id, channel_id, ciphertext, nonce, signature, key_version, poll) VALUES
+  (96603, '66660000-0000-4000-8000-0000000000c1', 'zed-poll', 'n', 's', 1,
+   jsonb_build_object('options', 2, 'multiple', false,
+                      'closes_at', (now() + interval '1 day')::TEXT));
+INSERT INTO messages (id, channel_id, ciphertext, key_version, blocks, ephemeral_for) VALUES
+  (96604, '66660000-0000-4000-8000-0000000000c1', '', 0, '{"v":1,"live":true,"blocks":[]}',
+   '66666666-0000-4000-8000-000000000002');
+SELECT app.sync_permission_cache(id) FROM users
+ WHERE server_id = '66660000-0000-4000-8000-000000000001';
+
+DO $$
+BEGIN
+  IF NOT has_function_privilege('authenticated', 'public.channel_open(uuid,integer,integer)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.channel_open(uuid,integer,integer)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: channel_open is not a member''s alone';
+  END IF;
+  RAISE NOTICE 'ok  channel_open is for members (066)';
+END $$;
+
+-- As ada: the same rows as the reads it replaces, in the same order.
+SELECT pg_temp.as_member('66666666-0000-4000-8000-000000000001');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_ch  UUID := '66660000-0000-4000-8000-0000000000c1';
+  v_got JSONB := channel_open('66660000-0000-4000-8000-0000000000c1', 51, 51);
+  v_row JSONB;
+BEGIN
+  IF ARRAY(SELECT (e->>'id')::BIGINT FROM jsonb_array_elements(v_got->'messages') e)
+       IS DISTINCT FROM ARRAY(SELECT id FROM channel_messages(v_ch, NULL, NULL, 51))
+     OR ARRAY(SELECT (e->>'id')::BIGINT FROM jsonb_array_elements(v_got->'messages') e)
+       IS DISTINCT FROM ARRAY[96603, 96602, 96601]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s page was %', v_got->'messages';
+  END IF;
+  IF ARRAY(SELECT (e->>'id')::BIGINT FROM jsonb_array_elements(v_got->'live') e)
+       IS DISTINCT FROM ARRAY(SELECT id FROM channel_live_messages(v_ch))
+     OR ARRAY(SELECT (e->>'id')::BIGINT FROM jsonb_array_elements(v_got->'live') e)
+       IS DISTINCT FROM ARRAY[96603, 96602]::BIGINT[] THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s bar was %', v_got->'live';
+  END IF;
+  SELECT e INTO v_row FROM jsonb_array_elements(v_got->'messages') e WHERE e->>'id' = '96601';
+  IF v_row->'sender'->>'display_name' IS DISTINCT FROM 'Ada'
+     OR v_row->'sender'->>'public_key' IS DISTINCT FROM 'pk-ada'
+     OR v_row->'reactions' IS DISTINCT FROM
+        (SELECT reaction_counts(m) FROM messages m WHERE m.id = 96601)
+     OR v_row->'message_pins'->>'pinned_at' IS NULL
+     OR v_row->>'ciphertext' IS DISTINCT FROM 'sealed-ada'
+     OR v_row->>'sender_id' IS DISTINCT FROM '66666666-0000-4000-8000-000000000001' THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s row read %', v_row;
+  END IF;
+  SELECT e INTO v_row FROM jsonb_array_elements(v_got->'messages') e WHERE e->>'id' = '96602';
+  IF v_row->'message_pins' <> 'null'::jsonb OR v_row->'blocks'->>'live' <> 'true' THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s panel read %', v_row;
+  END IF;
+  IF v_got->'listeners' IS DISTINCT FROM (
+       SELECT jsonb_agg(jsonb_build_object('bot_id', bot_id, 'username', username,
+                'display_name', display_name, 'granted_by_name', granted_by_name,
+                'granted_at', granted_at))
+         FROM channel_bot_listeners WHERE channel_id = v_ch)
+     OR v_got->'listeners'->0->>'granted_by_name' IS DISTINCT FROM 'Ada' THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s listeners were %', v_got->'listeners';
+  END IF;
+  IF ARRAY(SELECT e->>'id' FROM jsonb_array_elements(v_got->'bots') e)
+       IS DISTINCT FROM ARRAY(SELECT id::TEXT FROM list_members(v_ch, TRUE, FALSE, NULL, NULL, 51))
+     OR jsonb_array_length(v_got->'bots') <> 1 THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s bots were %', v_got->'bots';
+  END IF;
+  IF v_got->'key' IS DISTINCT FROM my_channel_key(v_ch) OR v_got->>'key_error' IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: channel_open''s keys were % / %', v_got->'key', v_got->>'key_error';
+  END IF;
+  RAISE NOTICE 'ok  channel_open answers as the five reads it replaces (066)';
+END $$;
+
+-- A channel ada cannot read, and the open server to kai: nothing but why.
+DO $$
+DECLARE v_got JSONB := channel_open('66660000-0000-4000-8000-0000000000c2', 51, 51);
+BEGIN
+  IF v_got->'messages' <> '[]' OR v_got->'live' <> '[]' OR v_got->'bots' <> '[]'
+     OR v_got->'key' <> 'null'::jsonb OR v_got->>'key_error' IS DISTINCT FROM 'channel_not_found' THEN
+    RAISE EXCEPTION 'FAIL: a channel ada cannot read opened as %', v_got;
+  END IF;
+  RAISE NOTICE 'ok  channel_open shows nothing of a channel the caller cannot read (066)';
+END $$;
+SELECT pg_temp.as_member('66666666-0000-4000-8000-000000000003');
+DO $$
+DECLARE v_got JSONB := channel_open('66660000-0000-4000-8000-0000000000c1', 51, 51);
+BEGIN
+  IF v_got->'messages' <> '[]' OR v_got->'live' <> '[]' OR v_got->'listeners' <> '[]'
+     OR v_got->'bots' <> '[]' OR v_got->>'key_error' IS DISTINCT FROM 'channel_not_found' THEN
+    RAISE EXCEPTION 'FAIL: another server''s member opened o-text as %', v_got;
+  END IF;
+  RAISE NOTICE 'ok  channel_open answers nobody outside the server (066)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
