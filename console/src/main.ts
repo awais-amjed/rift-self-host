@@ -10,6 +10,7 @@ import { clearStaleLock, exclusively } from "./operation.ts";
 import { announce, LISTEN_PORT } from "./banner.ts";
 import { startScheduler } from "./backup/scheduler.ts";
 import { startTopicRuleWatch } from "./setup/topic_rules.ts";
+import { startAttachmentSweep } from "./attachment_sweep.ts";
 import { startUpdateNotice } from "./update/notice.ts";
 import { isDockerReachable } from "./docker.ts";
 import { storedPasswordHash } from "./console_password.ts";
@@ -67,6 +68,9 @@ async function main(): Promise<void> {
   startTopicRuleWatch(isConfigured);
   // The same guard: the database has to be there and settled to keep it in.
   startUpdateNotice(() => isConfigured() && !preparingState().running);
+  // Files left behind by deleted messages, which only the service key can
+  // remove. The apps asked for this until self-host 064.
+  startAttachmentSweep(() => isConfigured() && !preparingState().running);
 
   Deno.serve({
     port: PORT,

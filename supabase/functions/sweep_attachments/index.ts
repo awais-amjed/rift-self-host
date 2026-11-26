@@ -4,6 +4,7 @@ import { corsHeaders } from "../_shared/cors.ts";
 import { CustomResponse } from "../_shared/response.ts";
 import * as EC from "../_shared/error_codes.ts";
 import { authenticateToken, extractBearerToken, isAuthError } from "../_shared/auth.ts";
+import { timingSafeEqual } from "@std/crypto/timing-safe-equal";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -29,9 +30,11 @@ const BATCH = 1000;
  * (see the migrations). This function only carries out
  * the half SQL can't.
  *
- * Any member may call it, the way any member may call `sweep_channel_keys`:
+ * The console calls it every few minutes, with the service key in the body
+ * as `create_server` takes it (`sweepAttachmentsNow` in the console). Apps
+ * before self-host 064 call it too, on server-ready, and any member still may:
  * it removes only unreferenced objects, so the worst a caller can do is
- * maintenance — and only once a minute. Clients run it on server-ready.
+ * maintenance — and only once a minute.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -39,9 +42,11 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const token = extractBearerToken(req);
-    const auth = await authenticateToken(supabase, token);
-    if (isAuthError(auth)) return auth;
+    if (!(await fromConsole(req))) {
+      const token = extractBearerToken(req);
+      const auth = await authenticateToken(supabase, token);
+      if (isAuthError(auth)) return auth;
+    }
 
     // A minute apart, whoever asks (`claim_attachment_sweep`): every app
     // calls this as it opens a server, and once a day a run reads every file.
@@ -89,3 +94,21 @@ Deno.serve(async (req) => {
     return CustomResponse.error("Unexpected error", EC.UNEXPECTED_ERROR, error);
   }
 });
+
+/** Whether the body carries this stack's service key: the console's timer. */
+async function fromConsole(req: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return false;
+  }
+  const provided = (body as { service_key?: unknown } | null)?.service_key;
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const encoder = new TextEncoder();
+  const providedBytes = encoder.encode(provided);
+  const expectedBytes = encoder.encode(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "");
+  return expectedBytes.byteLength > 0 &&
+    providedBytes.byteLength === expectedBytes.byteLength &&
+    timingSafeEqual(providedBytes, expectedBytes);
+}

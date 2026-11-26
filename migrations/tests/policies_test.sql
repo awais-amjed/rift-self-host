@@ -13703,4 +13703,109 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 064: what an app loads first, in one call ──────────────
+-- `server_start` and `dm_lists` answer what the calls they stand for answer,
+-- as the caller: nothing of another server's, nothing the caller's own reads
+-- would not show.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('64646464-0000-4000-8000-000000000001'),
+  ('64646464-0000-4000-8000-000000000002'),
+  ('64646464-0000-4000-8000-000000000003');
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('64640000-0000-4000-8000-000000000001', 'Start', 'ws://lan:7880'),
+  ('64640000-0000-4000-8000-000000000002', 'Other', 'ws://lan:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES
+  ('64646464-0000-4000-8000-000000000001', '64640000-0000-4000-8000-000000000001',
+   'sam', 'Sam', 'pk-sam', 'sid-sam', 'chat-sam', false),
+  ('64646464-0000-4000-8000-000000000002', '64640000-0000-4000-8000-000000000001',
+   'beep', 'Beep', 'pk-beep', 'sid-beep', 'chat-beep', true),
+  ('64646464-0000-4000-8000-000000000003', '64640000-0000-4000-8000-000000000002',
+   'oli', 'Oli', 'pk-oli', 'sid-oli', 'chat-oli', false);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('64640000-0000-4000-8000-0000000000c1', '64640000-0000-4000-8000-000000000001', 's-voice', 'voice', false);
+-- A clip is stamped with its adder's server (`stamp_soundboard_sound`), so
+-- each goes in as the member adding it.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"64646464-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+INSERT INTO soundboard_sounds (name, object_path, duration_ms, bytes) VALUES
+  ('boop', '64640000-0000-4000-8000-000000000001/boop.audio', 900, 100);
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"64646464-0000-4000-8000-000000000003","role":"authenticated"}', true); END $$;
+INSERT INTO soundboard_sounds (name, object_path, duration_ms, bytes) VALUES
+  ('honk', '64640000-0000-4000-8000-000000000002/honk.audio', 900, 100);
+INSERT INTO bot_voice_grants (channel_id, bot_id) VALUES
+  ('64640000-0000-4000-8000-0000000000c1', '64646464-0000-4000-8000-000000000002');
+INSERT INTO bot_voice_summons (channel_id, bot_id) VALUES
+  ('64640000-0000-4000-8000-0000000000c1', '64646464-0000-4000-8000-000000000002');
+INSERT INTO member_blocks (blocker_id, blocked_id) VALUES
+  ('64646464-0000-4000-8000-000000000001', '64646464-0000-4000-8000-000000000002');
+
+DO $$
+BEGIN
+  IF has_function_privilege('anon', 'public.server_start(integer)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.dm_lists()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: anon may call a first load';
+  END IF;
+  RAISE NOTICE 'ok  the first loads are for members only (064)';
+END $$;
+
+-- Sam, a member of Start.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"64646464-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v_start JSONB := server_start(51);
+  v_dms   JSONB := dm_lists();
+BEGIN
+  IF v_start->'unread' <> unread_counts()
+     OR v_start->'sidebar' <> member_sidebar(51) THEN
+    RAISE EXCEPTION 'FAIL: server_start answered unread or the sidebar unlike their own calls';
+  END IF;
+  IF jsonb_array_length(v_start->'sounds') <> 1
+     OR v_start->'sounds'->0->>'name' <> 'boop'
+     OR v_start->'sounds'->0->>'object_path' IS NULL
+     OR (v_start->'sounds'->0->>'duration_ms')::int <> 900 THEN
+    RAISE EXCEPTION 'FAIL: server_start answered the soundboard as %', v_start->'sounds';
+  END IF;
+  IF v_start->'listeners' <> jsonb_build_array(jsonb_build_object(
+       'channel_id', '64640000-0000-4000-8000-0000000000c1',
+       'bot_id', '64646464-0000-4000-8000-000000000002', 'bot_name', 'Beep'))
+     OR v_start->'summons' <> v_start->'listeners' THEN
+    RAISE EXCEPTION 'FAIL: server_start answered the voice bots as % and %',
+      v_start->'listeners', v_start->'summons';
+  END IF;
+  IF v_start->'sweeps_itself' <> 'true'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: server_start did not say the server sweeps itself';
+  END IF;
+
+  IF v_dms->'conversations' <> dm_conversations()
+     OR v_dms->'requests' <> dm_requests()
+     OR v_dms->'blocks' <> '["64646464-0000-4000-8000-000000000002"]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: dm_lists answered %', v_dms;
+  END IF;
+  RAISE NOTICE 'ok  server_start and dm_lists answer as the calls they stand for (064)';
+END $$;
+
+-- Oli, on another server: none of Start's.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"64646464-0000-4000-8000-000000000003","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE
+  v_start JSONB := server_start();
+BEGIN
+  IF jsonb_array_length(v_start->'sounds') <> 1
+     OR v_start->'sounds'->0->>'name' <> 'honk'
+     OR v_start->'listeners' <> '[]'::jsonb
+     OR v_start->'summons' <> '[]'::jsonb
+     OR dm_lists()->'blocks' <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: another server''s member read %', v_start;
+  END IF;
+  RAISE NOTICE 'ok  server_start answers only about the caller''s own server (064)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
