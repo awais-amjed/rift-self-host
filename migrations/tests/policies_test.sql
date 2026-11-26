@@ -14731,4 +14731,23 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 071: the policy helpers keep their plans ────────────────
+-- A definer helper written in SQL is planned again in every statement that
+-- asks it (Postgres 17); PL/pgSQL keeps the plan.
+DO $$
+DECLARE
+  v_left TEXT;
+BEGIN
+  SELECT string_agg(p.proname, ', ') INTO v_left
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_language l ON l.oid = p.prolang
+   WHERE n.nspname = 'app' AND l.lanname = 'sql' AND p.prosecdef
+     AND p.provolatile = 's' AND NOT p.proretset;
+  IF v_left IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: definer helpers still in SQL, planned every statement: %', v_left;
+  END IF;
+  RAISE NOTICE 'ok  no definer helper is planned again in every statement (071)';
+END $$;
+
 ROLLBACK;

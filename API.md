@@ -655,6 +655,13 @@ files, each run once after it, and the list below grows with them.
    (`dm_messages_update_own` now asks `app.server_id()`, as every other DM write did); and the
    `avatars` bucket took uploads from anyone signed in and let them list every picture: writing
    now takes a member, and reading a member of the same server (`app.avatar_owner`).
+51. **071_helpers_keep_plans.sql** — the definer helpers every policy, trigger and RPC asks
+   (`app.server_id`, `app.visible_channels`, `app.has_perm`, …) are PL/pgSQL rather than SQL,
+   bodies unchanged: Postgres 17 planned a definer SQL function again in every statement that
+   asked it, and PL/pgSQL keeps the plan for the connection. `app.visible_channels` asks for
+   its private channels in one statement. Measured Nov 26 2026 on 50,000 members, warm, in psql:
+   a page 2.95 → 0.75 ms, a send 1.8 → 1.3, a reaction 2.6 → 0.6, `channel_open` 8.9 → 3.6,
+   `get_server_details` 7.7 → 5.5, `server_start` 20 → 16; the same answers for five members.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
