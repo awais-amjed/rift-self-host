@@ -4535,6 +4535,8 @@ BEGIN
   IF v_names[1] <> 'Alice' THEN
     RAISE EXCEPTION 'FAIL: a prefix match did not come first: %', v_names;
   END IF;
+  -- What a name only contains is looked for from the third letter (075).
+  SELECT array_agg(display_name) INTO v_names FROM search_members('ana');
   IF NOT 'Dana' = ANY(v_names) THEN
     RAISE EXCEPTION 'FAIL: a substring match was dropped: %', v_names;
   END IF;
@@ -13311,16 +13313,17 @@ BEGIN
     RAISE EXCEPTION 'FAIL: the @ menu in a private room offered %',
       pg_temp.sm52('', room, NULL, NULL);
   END IF;
-  -- Typed: a prefix, and a match only inside the name (the second phase).
+  -- Typed: a prefix. (A match only inside the name waits for a third
+  -- letter since 075, and these names have two; the 075 test covers it.)
   IF pg_temp.sm52('e', room, NULL, false) <> ARRAY['e1', 'e4', 'e5']
-     OR pg_temp.sm52('5', room, NULL, false) <> ARRAY['e5']
-     OR pg_temp.sm52('2', room, NULL, false) <> '{}'::TEXT[] THEN
+     OR pg_temp.sm52('e5', room, NULL, false) <> ARRAY['e5']
+     OR pg_temp.sm52('e2', room, NULL, false) <> '{}'::TEXT[] THEN
     RAISE EXCEPTION 'FAIL: a search in a private room offered %',
       pg_temp.sm52('e', room, NULL, false);
   END IF;
   -- A public channel and none are the whole server, as before.
   IF pg_temp.sm52('', general, NULL, false) <> ARRAY['e1', 'e2', 'e4', 'e5']
-     OR pg_temp.sm52('2', NULL, NULL, false) <> ARRAY['e2'] THEN
+     OR pg_temp.sm52('e2', NULL, NULL, false) <> ARRAY['e2'] THEN
     RAISE EXCEPTION 'FAIL: the @ menu outside a private room offered %',
       pg_temp.sm52('', general, NULL, false);
   END IF;
@@ -15088,6 +15091,59 @@ BEGIN
   END IF;
   EXECUTE 'SET LOCAL ROLE authenticated';
   RAISE NOTICE 'ok  no newest is looked for where the caller sees none (074)';
+END $$;
+
+-- ============================================================
+-- 075. The @ menu gathers its matches before sorting them
+-- ============================================================
+-- Echo again (sections 36 and 37). e5 becomes "Abrams", e2 "Gabriel" and the
+-- bot e4 "Cabral": "abr" starts one name and sits inside the other two. A
+-- prefix match comes first and only once; what a name merely contains is
+-- offered from the third letter, in the room only to those in it.
+RESET ROLE;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims', '', true); END $$;
+UPDATE users SET display_name = 'Abrams'  WHERE id = '50505050-eeee-4eee-8eee-000000000005';
+UPDATE users SET display_name = 'Gabriel' WHERE id = '50505050-eeee-4eee-8eee-000000000002';
+UPDATE users SET display_name = 'Cabral'  WHERE id = '50505050-eeee-4eee-8eee-000000000004';
+
+DO $$
+DECLARE
+  room    CONSTANT UUID := 'ee501111-0000-4000-8000-000000000002';
+  general CONSTANT UUID := 'ee501111-0000-4000-8000-000000000001';
+BEGIN
+  PERFORM pg_temp.as50(1);
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  IF pg_temp.sm52('abr', general, NULL, false) <> ARRAY['e5', 'e4', 'e2']
+     OR pg_temp.sm52('abr', NULL, false, false) <> ARRAY['e5', 'e2'] THEN
+    RAISE EXCEPTION 'FAIL: "abr" offered %, not the prefix then the rest',
+      pg_temp.sm52('abr', general, NULL, false);
+  END IF;
+  -- Two letters: prefixes only.
+  IF pg_temp.sm52('ab', general, NULL, false) <> ARRAY['e5']
+     OR pg_temp.sm52('ga', general, NULL, false) <> ARRAY['e2']
+     OR pg_temp.sm52('br', general, NULL, false) <> '{}'::TEXT[] THEN
+    RAISE EXCEPTION 'FAIL: two letters looked inside names: %',
+      pg_temp.sm52('ab', general, NULL, false);
+  END IF;
+  -- In the room, e2 is not offered either way.
+  IF pg_temp.sm52('abr', room, NULL, false) <> ARRAY['e5', 'e4']
+     OR pg_temp.sm52('gab', room, NULL, false) <> '{}'::TEXT[] THEN
+    RAISE EXCEPTION 'FAIL: "abr" in the room offered %',
+      pg_temp.sm52('abr', room, NULL, false);
+  END IF;
+  -- A page the prefixes fill stops there.
+  IF (SELECT array_agg(s.username ORDER BY s.ordinality)
+        FROM search_members('abr', general, NULL, false, 1) WITH ORDINALITY s)
+     <> ARRAY['e5'] THEN
+    RAISE EXCEPTION 'FAIL: a page of one was not the prefix match';
+  END IF;
+  EXECUTE 'RESET ROLE';
+  PERFORM set_config('request.jwt.claims', '', true);
+  IF has_function_privilege('anon',
+       'search_members(text, uuid, boolean, boolean, integer)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: search_members is open to anon';
+  END IF;
+  RAISE NOTICE 'ok  the @ menu gathers its matches first; inside names from three letters (075)';
 END $$;
 
 ROLLBACK;

@@ -683,6 +683,13 @@ files, each run once after it, and the list below grows with them.
    of `messages` to find nothing. Measured Nov 26 2026 on 5 M messages: a bot's `mark_read`
    with no id 12 s → 0.03 ms, its `mark_all_read` ~100 s → 0.5 ms; a member's `mark_all_read`
    with nothing new 8.9 → 4.8 ms.
+55. **075_member_search_matches_first.sql** — `search_members` gathers what a prefix matches
+   (three name indexes, ids and sort key only) before sorting it, rather than walking the
+   members in name order and testing each one; and what a name merely contains is looked for
+   from the third letter, where the trigram index can, so "ab" no longer offers Gabriel and
+   "abr" does. Below three letters the answer is the prefix matches alone; from three it is
+   unchanged (compared over 672 calls on the test server). Measured Nov 26 2026 on 50,000
+   members: "a" 31 → 4.9 ms, a two-letter prefix nobody has 39 → 0.5 ms.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
