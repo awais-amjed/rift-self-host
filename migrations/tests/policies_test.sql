@@ -16141,4 +16141,79 @@ BEGIN
   RAISE NOTICE 'ok  a kick''s or a move''s checks are one call, in the functions'' order (085)';
 END $$;
 
+-- ── 086: opening a DM conversation in one request ────────────
+-- `dm_open` answers what `dm_link_state`, `dm_messages_page` and
+-- `dm_call_log` answer, read as the caller, with the calls from the oldest
+-- row shown when there is more above it. On 082's Ann and Cal.
+RESET ROLE;
+-- Each under its sender's claims: `attest_dm_messages` stamps the sender.
+DO $$
+DECLARE
+  v_ann TEXT := '82828282-0000-4000-8000-000000000001';
+  v_cal TEXT := '82828282-0000-4000-8000-000000000002';
+  v_row RECORD;
+BEGIN
+  FOR v_row IN SELECT * FROM (VALUES
+      (868601, v_ann, v_cal, 'c1', interval '60 minutes'),
+      (868602, v_cal, v_ann, 'c2', interval '30 minutes'),
+      (868603, v_ann, v_cal, 'c3', interval '10 minutes')) AS t(id, sender, recipient, body, ago)
+  LOOP
+    PERFORM set_config('request.jwt.claims',
+      jsonb_build_object('sub', v_row.sender, 'role', 'authenticated')::text, true);
+    INSERT INTO dm_messages (id, recipient_id, ciphertext, nonce, signature, key_version, created_at)
+    VALUES (v_row.id, v_row.recipient::uuid, v_row.body, 'n', 's', 1, now() - v_row.ago);
+  END LOOP;
+END $$;
+INSERT INTO dm_calls (id, caller_id, callee_id, started_at, answered_at, ended_at, outcome) VALUES
+  ('86860000-0000-4000-8000-0000000000d1', '82828282-0000-4000-8000-000000000002',
+   '82828282-0000-4000-8000-000000000001', now() - interval '2 hours',
+   now() - interval '2 hours', now() - interval '110 minutes', 'completed');
+
+DO $$
+DECLARE
+  v_cal  UUID := '82828282-0000-4000-8000-000000000002';
+  v_got  JSONB;
+BEGIN
+  IF has_function_privilege('anon', 'public.dm_open(uuid,integer)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: anon may open a DM conversation';
+  END IF;
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"82828282-0000-4000-8000-000000000001","role":"authenticated"}', true);
+  SET LOCAL ROLE authenticated;
+
+  -- The whole conversation: every call beside it, no edge.
+  v_got := dm_open(v_cal);
+  IF v_got->>'link_state' IS DISTINCT FROM dm_link_state(v_cal)
+     OR jsonb_array_length(v_got->'messages') <> 3
+     OR (SELECT array_agg((e->>'id')::bigint) FROM jsonb_array_elements(v_got->'messages') e)
+        IS DISTINCT FROM (SELECT array_agg(d.id) FROM dm_messages_page(v_cal) d)
+     OR v_got->'messages'->0->>'ciphertext' IS DISTINCT FROM 'c3'
+     OR v_got->'messages'->0->'sender'->>'display_name' IS DISTINCT FROM 'Ann'
+     OR v_got->'calls' <> dm_call_log(v_cal, NULL)
+     OR jsonb_array_length(v_got->'calls') < 2
+     OR v_got->'calls_since_id' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: dm_open disagrees with the reads it stands for: %', v_got - 'messages';
+  END IF;
+
+  -- More above a page of two (asked as three): the calls start at the oldest
+  -- row shown, and the call before it is left out.
+  v_got := dm_open(v_cal, 3);
+  IF jsonb_array_length(v_got->'messages') <> 3
+     OR (v_got->>'calls_since_id')::bigint IS DISTINCT FROM 868602
+     OR v_got->'calls' <> dm_call_log(v_cal, now() - interval '30 minutes')
+     OR v_got->'calls' @> jsonb_build_array(jsonb_build_object('id', '86860000-0000-4000-8000-0000000000d1')) THEN
+    RAISE EXCEPTION 'FAIL: dm_open''s calls are not from the oldest row shown: %', v_got - 'messages';
+  END IF;
+
+  -- Somebody on neither end reads nothing of it.
+  PERFORM set_config('request.jwt.claims',
+    '{"sub":"82828282-0000-4000-8000-000000000003","role":"authenticated"}', true);
+  v_got := dm_open(v_cal);
+  IF jsonb_array_length(v_got->'messages') <> 0 OR jsonb_array_length(v_got->'calls') <> 0 THEN
+    RAISE EXCEPTION 'FAIL: dm_open showed another pair''s conversation';
+  END IF;
+  RAISE NOTICE 'ok  a DM conversation opens in one request (086)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
