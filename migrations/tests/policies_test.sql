@@ -15581,4 +15581,192 @@ BEGIN
   RAISE NOTICE 'ok  store_key_work stores a pass, one answer a job (077)';
 END $$;
 
+-- ── 080: four small calls answer for themselves ─────────────
+-- A summon says whether it is new and whether the bot is owed a key;
+-- `my_channel_key` names who hears a voice channel; push and the listing
+-- token are admin calls.
+RESET ROLE;
+INSERT INTO auth.users (id) VALUES
+  ('80808080-0000-4000-8000-000000000001'),
+  ('80808080-0000-4000-8000-000000000002'),
+  ('80808080-0000-4000-8000-000000000003'),
+  ('80808080-0000-4000-8000-000000000004');
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('80800000-0000-4000-8000-000000000001', 'Small', 'ws://lan.test:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot, is_banned, is_server_admin)
+VALUES
+  ('80808080-0000-4000-8000-000000000001', '80800000-0000-4000-8000-000000000001',
+   'ada80', 'Ada', 'pk-ada80', 'sid-ada80', 'chat-ada80', false, false, true),
+  ('80808080-0000-4000-8000-000000000002', '80800000-0000-4000-8000-000000000001',
+   'ben80', 'Ben', 'pk-ben80', 'sid-ben80', 'chat-ben80', false, false, false),
+  ('80808080-0000-4000-8000-000000000003', '80800000-0000-4000-8000-000000000001',
+   'tune80', 'Tune', 'pk-tune80', 'sid-tune80', 'chat-tune80', true, false, false),
+  ('80808080-0000-4000-8000-000000000004', '80800000-0000-4000-8000-000000000001',
+   'ear80', 'Ear', 'pk-ear80', 'sid-ear80', 'chat-ear80', true, false, false);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('80800000-0000-4000-8000-0000000000c1', '80800000-0000-4000-8000-000000000001', 's-voice', 'voice', false),
+  ('80800000-0000-4000-8000-0000000000c2', '80800000-0000-4000-8000-000000000001', 's-text', 'text', false);
+INSERT INTO channel_keyring (channel_id, key_version, user_id, wrapped_by,
+                             ephemeral_public_key, ciphertext, nonce)
+VALUES
+  ('80800000-0000-4000-8000-0000000000c1', 2, '80808080-0000-4000-8000-000000000001',
+   '80808080-0000-4000-8000-000000000001', 'epk', 'ct', 'n'),
+  ('80800000-0000-4000-8000-0000000000c2', 1, '80808080-0000-4000-8000-000000000001',
+   '80808080-0000-4000-8000-000000000001', 'epk', 'ct', 'n');
+INSERT INTO bot_voice_grants (channel_id, bot_id) VALUES
+  ('80800000-0000-4000-8000-0000000000c1', '80808080-0000-4000-8000-000000000004');
+
+DO $$
+BEGIN
+  IF has_function_privilege('anon', 'public.push_status()', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.set_push_config(text,uuid,text)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.clear_push_config()', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.my_listing_token()', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'app.admin_caller_server()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: an admin call is reachable by someone it was not granted to';
+  END IF;
+  RAISE NOTICE 'ok  the admin calls are granted to members only (080)';
+END $$;
+
+-- Ada, an admin.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"80808080-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  c1 CONSTANT UUID := '80800000-0000-4000-8000-0000000000c1';
+  tune CONSTANT UUID := '80808080-0000-4000-8000-000000000003';
+  v JSONB;
+BEGIN
+  v := summon_bot_to_voice(tune, c1);
+  IF v->>'reason' <> 'ok' OR v->>'new' <> 'true' OR v->>'needs_key' <> 'true' THEN
+    RAISE EXCEPTION 'FAIL: a first summon answered %', v;
+  END IF;
+  v := summon_bot_to_voice(tune, c1);
+  IF v->>'new' <> 'false' OR v->>'needs_key' <> 'true' THEN
+    RAISE EXCEPTION 'FAIL: a repeat summon of an unkeyed bot answered %', v;
+  END IF;
+  RAISE NOTICE 'ok  a summon says it is new, and that the bot is owed a key (080)';
+END $$;
+
+RESET ROLE;
+INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key, wrapped_by,
+                            ephemeral_public_key, ciphertext, nonce)
+VALUES ('80800000-0000-4000-8000-0000000000c1', '80808080-0000-4000-8000-000000000003',
+        2, false, '80808080-0000-4000-8000-000000000001', 'epk', 'ct-tune', 'n');
+SET LOCAL ROLE authenticated;
+DO $$
+DECLARE
+  v JSONB := summon_bot_to_voice('80808080-0000-4000-8000-000000000003',
+                                 '80800000-0000-4000-8000-0000000000c1');
+BEGIN
+  IF v->>'new' <> 'false' OR v->>'needs_key' <> 'false' THEN
+    RAISE EXCEPTION 'FAIL: a repeat summon of a keyed bot answered %', v;
+  END IF;
+  RAISE NOTICE 'ok  a repeat summon of a keyed bot asks nobody to seal (080)';
+END $$;
+
+DO $$
+DECLARE
+  v JSONB := my_channel_key('80800000-0000-4000-8000-0000000000c1');
+BEGIN
+  IF v->'listening_bots' <> jsonb_build_array('80808080-0000-4000-8000-000000000004') THEN
+    RAISE EXCEPTION 'FAIL: my_channel_key named the listeners as %', v->'listening_bots';
+  END IF;
+  IF my_channel_key('80800000-0000-4000-8000-0000000000c2') ? 'listening_bots' THEN
+    RAISE EXCEPTION 'FAIL: a text channel answered listeners';
+  END IF;
+  RAISE NOTICE 'ok  my_channel_key names who hears a voice channel (080)';
+END $$;
+
+-- Push and the listing token, as the admin.
+DO $$
+DECLARE
+  v JSONB;
+BEGIN
+  v := push_status();
+  IF v->>'enabled' <> 'false' OR v->'relay_id' <> 'null'::jsonb THEN
+    RAISE EXCEPTION 'FAIL: push_status with nothing set answered %', v;
+  END IF;
+  BEGIN
+    PERFORM set_push_config('http://relay.test/forward',
+                            '80800000-0000-4000-8000-0000000000aa', 'secret-secret-secret');
+    RAISE EXCEPTION 'FAIL: push was pointed at a plain http relay';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'missing_fields' THEN RAISE; END IF;
+  END;
+  BEGIN
+    PERFORM set_push_config('https://relay.test/forward',
+                            '80800000-0000-4000-8000-0000000000aa', 'short');
+    RAISE EXCEPTION 'FAIL: push took a short secret';
+  EXCEPTION WHEN raise_exception THEN
+    IF SQLERRM <> 'missing_fields' THEN RAISE; END IF;
+  END;
+  v := set_push_config('https://relay.test/forward',
+                       '80800000-0000-4000-8000-0000000000aa', 'secret-secret-secret');
+  v := set_push_config('https://relay.test/forward',
+                       '80800000-0000-4000-8000-0000000000ab', 'secret-secret-again');
+  v := push_status();
+  IF v->>'enabled' <> 'true' OR v->>'relay_id' <> '80800000-0000-4000-8000-0000000000ab'
+     OR v ? 'secret' THEN
+    RAISE EXCEPTION 'FAIL: push_status after a set answered %', v;
+  END IF;
+  v := clear_push_config();
+  IF v->>'enabled' <> 'false' OR v->>'relay_id' <> '80800000-0000-4000-8000-0000000000ab'
+     OR (push_status()->>'enabled')::boolean THEN
+    RAISE EXCEPTION 'FAIL: clear_push_config answered %', v;
+  END IF;
+
+  v := my_listing_token();
+  IF length(v->>'token') <> 64 OR v->>'server_id' <> '80800000-0000-4000-8000-000000000001'
+     OR (v->>'expires_at')::timestamptz <= now() THEN
+    RAISE EXCEPTION 'FAIL: my_listing_token answered %', v - 'token';
+  END IF;
+  PERFORM set_config('test.token80', v->>'token', true);
+  RAISE NOTICE 'ok  an admin reads, sets and clears push, and takes a listing token (080)';
+END $$;
+
+RESET ROLE;
+DO $$
+DECLARE
+  v_token TEXT := current_setting('test.token80');
+BEGIN
+  -- pgcrypto is in `extensions` on a stack and in `public` here.
+  PERFORM set_config('search_path', 'public, extensions', true);
+  IF NOT EXISTS (SELECT 1 FROM listing_tokens
+                  WHERE token_hash = encode(digest(v_token, 'sha256'), 'hex')
+                    AND server_id = '80800000-0000-4000-8000-000000000001') THEN
+    RAISE EXCEPTION 'FAIL: the listing token''s digest was not stored';
+  END IF;
+  IF EXISTS (SELECT 1 FROM listing_tokens WHERE token_hash = v_token) THEN
+    RAISE EXCEPTION 'FAIL: the listing token was stored as it is';
+  END IF;
+  RAISE NOTICE 'ok  only the listing token''s digest is kept (080)';
+END $$;
+
+-- Ben, a member: refused every admin call.
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"80808080-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+DO $$
+DECLARE
+  v_call TEXT;
+BEGIN
+  FOREACH v_call IN ARRAY ARRAY[
+    'SELECT push_status()',
+    'SELECT set_push_config(''https://relay.test/x'', ''80800000-0000-4000-8000-0000000000ac'', ''secret-secret-secret'')',
+    'SELECT clear_push_config()',
+    'SELECT my_listing_token()'] LOOP
+    BEGIN
+      EXECUTE v_call;
+      RAISE EXCEPTION 'FAIL: a member ran %', v_call;
+    EXCEPTION WHEN raise_exception THEN
+      IF SQLERRM <> 'permission_denied' THEN RAISE; END IF;
+    END;
+  END LOOP;
+  RAISE NOTICE 'ok  a member is refused push and the listing token (080)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
