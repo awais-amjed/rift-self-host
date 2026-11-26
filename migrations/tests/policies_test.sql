@@ -5139,6 +5139,30 @@ BEGIN
   INSERT INTO rung VALUES (p_server_id, COALESCE(p_user_ids, '{}'::uuid[]));
 END $recorder$;
 
+-- Since 072 a message rings tokens, worked out from the members holding a
+-- device (`app.channel_ring_tokens`), so every member here holds one, and the
+-- recorder reads back whose they are.
+-- A token is stamped with whoever is signed in (`device_tokens_stamp`), so
+-- each is put in under its owner.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT u.id FROM users u
+            WHERE u.server_id = 'aaaa0000-0000-4000-8000-000000000001' LOOP
+    PERFORM set_config('request.jwt.claims',
+      json_build_object('sub', r.id, 'role', 'authenticated')::text, true);
+    INSERT INTO device_tokens (token, user_id, platform)
+    VALUES ('dt26-' || r.id, r.id, 'android');
+  END LOOP;
+END $$;
+CREATE OR REPLACE FUNCTION app.push_tokens(p_server_id UUID, p_tokens TEXT[])
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $recorder$
+BEGIN
+  INSERT INTO rung
+  SELECT p_server_id, COALESCE(array_agg(d.user_id), '{}'::uuid[])
+    FROM device_tokens d WHERE d.token = ANY (COALESCE(p_tokens, '{}'));
+END $recorder$;
+
 -- Push on for Alpha, which is what makes the doorbell run at all.
 INSERT INTO push_config (server_id, endpoint, secret, relay_id)
 VALUES ('aaaa0000-0000-4000-8000-000000000001', 'http://relay.invalid/push',
@@ -5283,6 +5307,23 @@ BEGIN
     body    := jsonb_build_object('relay_id', v_cfg.relay_id,
                                   'tokens',   to_jsonb(v_tokens)));
 END $real$;
+CREATE OR REPLACE FUNCTION app.push_tokens(p_server_id UUID, p_tokens TEXT[])
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = public, extensions AS $real$
+DECLARE
+  v_cfg push_config;
+BEGIN
+  IF p_tokens IS NULL OR cardinality(p_tokens) = 0 THEN RETURN; END IF;
+  SELECT * INTO v_cfg FROM push_config WHERE server_id = p_server_id;
+  IF v_cfg IS NULL THEN RETURN; END IF;
+  PERFORM net.http_post(
+    url     := v_cfg.endpoint,
+    headers := jsonb_build_object('Content-Type', 'application/json',
+                                  'x-push-secret', v_cfg.secret),
+    body    := jsonb_build_object('relay_id', v_cfg.relay_id,
+                                  'tokens',   to_jsonb(p_tokens)));
+END $real$;
+DELETE FROM device_tokens WHERE token LIKE 'dt26-%';
 DELETE FROM push_config WHERE server_id = 'aaaa0000-0000-4000-8000-000000000001';
 
 -- ============================================================
@@ -14748,6 +14789,46 @@ BEGIN
     RAISE EXCEPTION 'FAIL: definer helpers still in SQL, planned every statement: %', v_left;
   END IF;
   RAISE NOTICE 'ok  no definer helper is planned again in every statement (071)';
+END $$;
+
+-- ── 072: a push ring starts from the phones ─────────────────
+-- `app.channel_ring_tokens` must wake exactly the devices of the members
+-- `app.channel_ring_targets` names, for every message here.
+DO $$
+DECLARE
+  r     RECORD;
+  v_n   INTEGER;
+  v_bad INTEGER;
+BEGIN
+  IF has_function_privilege('authenticated', 'app.channel_ring_tokens(messages)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'app.push_tokens(uuid,text[])', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: the push ring helpers are reachable';
+  END IF;
+  -- Most members hold one, some not; each put in under its owner
+  -- (`device_tokens_stamp`).
+  FOR r IN SELECT u.id FROM users u
+            WHERE NOT EXISTS (SELECT 1 FROM device_tokens d WHERE d.user_id = u.id)
+              AND hashtext(u.id::text) % 3 <> 0 LOOP
+    PERFORM set_config('request.jwt.claims',
+      json_build_object('sub', r.id, 'role', 'authenticated')::text, true);
+    INSERT INTO device_tokens (token, user_id, platform)
+    VALUES ('dt72-' || r.id, r.id, 'android');
+  END LOOP;
+  SELECT count(*), count(*) FILTER (WHERE
+           COALESCE((SELECT array_agg(t ORDER BY t) FROM unnest(app.channel_ring_tokens(m)) t), '{}')
+           IS DISTINCT FROM
+           COALESCE((SELECT array_agg(d.token ORDER BY d.token) FROM device_tokens d
+                      WHERE d.user_id = ANY (app.channel_ring_targets(m))), '{}'))
+    INTO v_n, v_bad
+    FROM messages m;
+  IF v_n = 0 THEN
+    RAISE EXCEPTION 'FAIL: the push comparison compared nothing';
+  END IF;
+  IF v_bad > 0 THEN
+    RAISE EXCEPTION 'FAIL: % of % messages wake other devices than their targets hold', v_bad, v_n;
+  END IF;
+  DELETE FROM device_tokens WHERE token LIKE 'dt72-%';
+  RAISE NOTICE 'ok  a push ring wakes the devices its targets hold, for all % messages (072)', v_n;
 END $$;
 
 ROLLBACK;

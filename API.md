@@ -662,6 +662,12 @@ files, each run once after it, and the list below grows with them.
    its private channels in one statement. Measured Nov 26 2026 on 50,000 members, warm, in psql:
    a page 2.95 → 0.75 ms, a send 1.8 → 1.3, a reaction 2.6 → 0.6, `channel_open` 8.9 → 3.6,
    `get_server_details` 7.7 → 5.5, `server_start` 20 → 16; the same answers for five members.
+52. **072_push_ring_holders.sql** — with push set up, a message works out the devices to wake
+   from the members holding one (`app.channel_ring_tokens`), not from everyone caught up in
+   the channel (`app.channel_ring_targets`, kept, and held to the same answer by the suite).
+   `ring_channel_members` and `ring_devices` post through `app.push_tokens`. Measured Nov 26
+   2026 on 50,000 members, 48,000 caught up in the channel: 116 ms → 8 ms with 3,000 members
+   holding a device; 135 ms with 25,000.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
