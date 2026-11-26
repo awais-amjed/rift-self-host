@@ -3293,6 +3293,17 @@ INSERT INTO channels (id, server_id, name, channel_type) VALUES
   ('aaaa1111-0000-4000-8000-0000000000e1',
    'aaaa0000-0000-4000-8000-000000000001', 'booth', 'voice');
 
+-- Version 1 of the room's key, held by alice and bob: a bot's key is sealed at
+-- the version the room is on, by somebody who holds it (061).
+INSERT INTO channel_keyring
+  (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+VALUES ('aaaa1111-0000-4000-8000-0000000000e1', 1,
+        '11111111-aaaa-4aaa-8aaa-000000000001',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n'),
+       ('aaaa1111-0000-4000-8000-0000000000e1', 1,
+        '11111111-aaaa-4aaa-8aaa-000000000002',
+        '11111111-aaaa-4aaa-8aaa-000000000001', 'eph', 'ct', 'n');
+
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
   '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
 SET LOCAL ROLE authenticated;
@@ -3309,6 +3320,48 @@ BEGIN
   RAISE NOTICE 'ok  any member can seal a bot the key it speaks with';
 END $$;
 
+-- Only at the version the room is on. The bot takes its newest row, so a row
+-- sealed ahead of the room, with anything in it, is the one it would speak
+-- with, and nobody in the call could hear it from then on.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                                wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 99, false,
+            '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'junk', 'n');
+    RAISE EXCEPTION 'FAIL: a member sealed a bot a key ahead of the room (061)';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  a bot''s key is sealed only at the room''s version (061)';
+END $$;
+
+-- And only by somebody who holds that version. Carol can see the room but was
+-- never sealed its key, so whatever she wrote could not be the bot's key.
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000003","role":"authenticated"}', true); END $$;
+DO $$
+BEGIN
+  IF NOT app.can_see_channel('aaaa1111-0000-4000-8000-0000000000e1') THEN
+    RAISE EXCEPTION 'FAIL: fixture: carol cannot see the booth, so this proves nothing';
+  END IF;
+  BEGIN
+    INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
+                                wrapped_by, ephemeral_public_key, ciphertext, nonce)
+    VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 1, false,
+            '11111111-aaaa-4aaa-8aaa-000000000003', 'eph', 'junk', 'n');
+    RAISE EXCEPTION 'FAIL: a member without the room''s key sealed a bot one (061)';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+  RAISE NOTICE 'ok  and only by somebody who holds that version (061)';
+END $$;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"11111111-aaaa-4aaa-8aaa-000000000002","role":"authenticated"}', true); END $$;
+
 -- But not the channel key. Claiming to hand over the real thing is the one
 -- claim the server can check, and it checks it against the grant.
 DO $$
@@ -3317,7 +3370,7 @@ BEGIN
     INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
                                 wrapped_by, ephemeral_public_key, ciphertext, nonce)
     VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
-            '11111111-aaaa-4aaa-8aaa-0000000000b0', 2, true,
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 1, true,
             '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
     RAISE EXCEPTION 'FAIL: a member handed a bot the channel key with no grant';
   EXCEPTION
@@ -3371,7 +3424,7 @@ BEGIN
     INSERT INTO bot_voice_keys (channel_id, bot_id, key_version, is_channel_key,
                                 wrapped_by, ephemeral_public_key, ciphertext, nonce)
     VALUES ('aaaa1111-0000-4000-8000-0000000000e1',
-            '11111111-aaaa-4aaa-8aaa-0000000000b0', 3, false,
+            '11111111-aaaa-4aaa-8aaa-0000000000b0', 1, false,
             '11111111-aaaa-4aaa-8aaa-0000000000b0', 'eph', 'ct', 'n');
     RAISE EXCEPTION 'FAIL: a bot sealed itself a voice key';
   EXCEPTION
@@ -4111,6 +4164,11 @@ INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
 INSERT INTO channel_members (channel_id, user_id)
 VALUES ('aaaa1111-0000-4000-8000-0000000000d7',
         '11111111-aaaa-4aaa-8aaa-000000000002');
+INSERT INTO channel_keyring
+  (channel_id, key_version, user_id, wrapped_by, ephemeral_public_key, ciphertext, nonce)
+VALUES ('aaaa1111-0000-4000-8000-0000000000d7', 1,
+        '11111111-aaaa-4aaa-8aaa-000000000002',
+        '11111111-aaaa-4aaa-8aaa-000000000002', 'eph', 'ct', 'n');
 
 SET LOCAL ROLE authenticated;
 DO $$ BEGIN PERFORM set_config('request.jwt.claims',
