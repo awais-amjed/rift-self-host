@@ -15769,4 +15769,76 @@ BEGIN
 END $$;
 RESET ROLE;
 
+-- ── 081: the last per-row policies ask once ─────────────────
+-- Each policy is written as an InitPlan or a set test, and who sees what is
+-- unchanged: a private channel's rows are seen by its members only.
+RESET ROLE;
+DO $$
+DECLARE
+  r RECORD;
+BEGIN
+  FOR r IN SELECT tablename, policyname, qual FROM pg_policies
+            WHERE schemaname = 'public'
+              AND policyname IN ('soundboard_select', 'livekit_nodes_read',
+                                 'invites_select_admin', 'invites_select_own',
+                                 'webhooks_select', 'voice_rooms_read',
+                                 'bot_voice_grants_select', 'bot_voice_summons_select',
+                                 'bot_channel_keys_select', 'channel_overrides_select') LOOP
+    IF r.qual LIKE '%can_see_channel%'
+       OR replace(r.qual, 'SELECT app.server_id()', '') LIKE '%app.server_id()%'
+       OR replace(r.qual, 'SELECT auth.uid()', '') LIKE '%auth.uid()%' THEN
+      RAISE EXCEPTION 'FAIL: % still asks per row: %', r.policyname, r.qual;
+    END IF;
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_users_server') THEN
+    RAISE EXCEPTION 'FAIL: idx_users_server is still there';
+  END IF;
+  RAISE NOTICE 'ok  the per-row policies ask once, and idx_users_server is gone (081)';
+END $$;
+
+INSERT INTO auth.users (id) VALUES
+  ('81818181-0000-4000-8000-000000000001'),
+  ('81818181-0000-4000-8000-000000000002'),
+  ('81818181-0000-4000-8000-000000000003');
+INSERT INTO servers (id, name, livekit_url) VALUES
+  ('81810000-0000-4000-8000-000000000001', 'Once', 'ws://lan.test:7880');
+INSERT INTO users (id, server_id, username, display_name, public_key, stable_id,
+                   chat_public_key, is_bot)
+VALUES
+  ('81818181-0000-4000-8000-000000000001', '81810000-0000-4000-8000-000000000001',
+   'ada81', 'Ada', 'pk-ada81', 'sid-ada81', 'chat-ada81', false),
+  ('81818181-0000-4000-8000-000000000002', '81810000-0000-4000-8000-000000000001',
+   'ben81', 'Ben', 'pk-ben81', 'sid-ben81', 'chat-ben81', false),
+  ('81818181-0000-4000-8000-000000000003', '81810000-0000-4000-8000-000000000001',
+   'ear81', 'Ear', 'pk-ear81', 'sid-ear81', 'chat-ear81', true);
+INSERT INTO channels (id, server_id, name, channel_type, is_private) VALUES
+  ('81810000-0000-4000-8000-0000000000c1', '81810000-0000-4000-8000-000000000001', 'open', 'voice', false),
+  ('81810000-0000-4000-8000-0000000000c2', '81810000-0000-4000-8000-000000000001', 'shut', 'voice', true);
+INSERT INTO channel_members (channel_id, user_id) VALUES
+  ('81810000-0000-4000-8000-0000000000c2', '81818181-0000-4000-8000-000000000001');
+INSERT INTO bot_voice_grants (channel_id, bot_id) VALUES
+  ('81810000-0000-4000-8000-0000000000c1', '81818181-0000-4000-8000-000000000003'),
+  ('81810000-0000-4000-8000-0000000000c2', '81818181-0000-4000-8000-000000000003');
+
+SET LOCAL ROLE authenticated;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"81818181-0000-4000-8000-000000000001","role":"authenticated"}', true); END $$;
+DO $$ BEGIN
+  IF (SELECT count(*) FROM bot_voice_grants
+       WHERE bot_id = '81818181-0000-4000-8000-000000000003') <> 2 THEN
+    RAISE EXCEPTION 'FAIL: a private channel''s member lost sight of its grant';
+  END IF;
+END $$;
+DO $$ BEGIN PERFORM set_config('request.jwt.claims',
+  '{"sub":"81818181-0000-4000-8000-000000000002","role":"authenticated"}', true); END $$;
+DO $$ BEGIN
+  IF (SELECT array_agg(channel_id) FROM bot_voice_grants
+       WHERE bot_id = '81818181-0000-4000-8000-000000000003')
+     IS DISTINCT FROM ARRAY['81810000-0000-4000-8000-0000000000c1']::uuid[] THEN
+    RAISE EXCEPTION 'FAIL: someone outside a private channel sees its grant';
+  END IF;
+  RAISE NOTICE 'ok  a private channel''s rows are still its members'' alone (081)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;

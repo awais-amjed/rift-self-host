@@ -717,6 +717,13 @@ files, each run once after it, and the list below grows with them.
    so the app calls it directly and rings `sweep` only for a bot owed a key; `my_channel_key`
    names a voice channel's `listening_bots`; `push_status`, `set_push_config`,
    `clear_push_config` and `my_listing_token` do what `configure_push` and `listing_token` did.
+61. **081_policies_ask_once.sql** — the last policies that called a helper once a row ask once a
+   statement: `app.server_id()` and `auth.uid()` as scalar subqueries, and a row's channel tested
+   against `app.visible_channels()`, in `soundboard_select`, `livekit_nodes_read`, both invite
+   policies, `webhooks_select`, `voice_rooms_read`, `bot_voice_grants_select`,
+   `bot_voice_summons_select`, `bot_channel_keys_select` and `channel_overrides_select`. Who
+   sees what is unchanged. `idx_users_server` is dropped: the whole-table indexes leading with
+   `server_id` cover it.
 
 Central's set is smaller and has no edge functions behind it at all. Its RPCs are `claim_handle`,
 `send_dm`, `dm_quota`, `unread_counts`, `mark_read` and `dm_conversations`. A read cursor that
