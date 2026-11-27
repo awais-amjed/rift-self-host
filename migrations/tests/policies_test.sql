@@ -16334,4 +16334,44 @@ END $$;
 RESET ROLE;
 
 
+
+-- ============================================================
+-- A bot hears that its media key was sealed (088)
+-- ============================================================
+-- The booth's row for bot b0 (section 17) rang the bot on its own topic,
+-- with the channel and the version and nothing of the key, so a bot already
+-- in the call takes the version a rotation moved the room to.
+DO $$
+DECLARE
+  v_ring JSONB;
+BEGIN
+  IF NOT app.realtime_ready() THEN
+    RAISE NOTICE 'skip  Realtime has never run here — nothing to deliver from';
+    RETURN;
+  END IF;
+  SELECT payload INTO v_ring FROM realtime.messages
+   WHERE topic = 'user:11111111-aaaa-4aaa-8aaa-0000000000b0'
+     AND event = 'voice_key' AND private
+     AND payload->>'channel_id' = 'aaaa1111-0000-4000-8000-0000000000e1'
+   LIMIT 1;
+  IF v_ring IS NULL THEN
+    RAISE EXCEPTION 'FAIL: a bot was not told its media key was sealed';
+  END IF;
+  -- `id` is Realtime's own, added to every message it stores.
+  IF (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(v_ring - 'id') k)
+     IS DISTINCT FROM ARRAY['channel_id', 'key_version'] THEN
+    RAISE EXCEPTION 'FAIL: a bot''s key ring carried more than where to look: %',
+      (SELECT array_agg(k) FROM jsonb_object_keys(v_ring) k);
+  END IF;
+  IF (v_ring->>'key_version')::int <> 1 THEN
+    RAISE EXCEPTION 'FAIL: a bot''s key ring named the wrong version';
+  END IF;
+  IF EXISTS (SELECT 1 FROM realtime.messages
+              WHERE event = 'voice_key' AND topic NOT LIKE 'user:%') THEN
+    RAISE EXCEPTION 'FAIL: a bot''s key ring went somewhere other than the bot';
+  END IF;
+  RAISE NOTICE 'ok  a bot is rung on its own topic when its media key is sealed (088)';
+END $$;
+RESET ROLE;
+
 ROLLBACK;
