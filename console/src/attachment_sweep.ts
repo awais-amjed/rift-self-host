@@ -59,9 +59,14 @@ export function startAttachmentSweep(isReady: () => boolean): void {
     running = true;
     try {
       const { swept } = await sweepAttachmentsNow();
-      if (swept > 0) console.log(`[sweep] removed ${swept} attachment files nobody holds`);
+      if (swept > 0) {
+        console.log(`[sweep] removed ${swept} attachment files nobody holds`);
+      }
     } catch (error) {
-      console.error("[sweep] attachments:", error instanceof Error ? error.message : error);
+      console.error(
+        "[sweep] attachments:",
+        error instanceof Error ? error.message : error,
+      );
     } finally {
       running = false;
     }
